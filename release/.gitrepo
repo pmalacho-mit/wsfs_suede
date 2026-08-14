@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/pmalacho-mit/wsfs_suede
+	branch = release
+	commit = 335f846b3baf2a11cc39711e0cae150764bd8cd0
+	parent = 4ce63c65e12e66994c9fafe7882c697d177775f0
+	method = merge
+	cmdver = 0.4.9
