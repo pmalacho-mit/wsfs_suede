@@ -47,7 +47,7 @@ type `file` or `folder`. Metadata is deliberately *pure namespace*: it carries
 no content descriptor. Server-assigned ids; clients never mint entry ids.
 
 **Version** — an opaque id naming one state of an entry. Comparable by
-*equality only*; it is a CAS token, not a counter. Every stream event carries
+*equality only*; it is a CAS (Central Authentication Service) token, not a counter. Every stream event carries
 the entry's new version, which is what the client must present on its next
 mutation of that entry.
 
