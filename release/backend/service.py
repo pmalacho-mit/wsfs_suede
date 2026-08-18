@@ -1,292 +1,446 @@
-"""Adjudication + the choke point.
+"""Adjudication, and the one path every applied mutation takes.
 
-Every mutation flows through commit(): per-workspace lock -> apply ->
-bump position -> event row + transaction record, all in ONE db transaction.
-(SQLite serializes writers anyway; with_for_update() is the Postgres path.)
+The two halves are kept apart on purpose.
 
-Every transactional handler is dedup-aware: presenting a transaction id the
-server has seen returns the recorded outcome, never re-applies. This is what
-makes retries and Initialize reconciliation safe.
+`refusal()` is judgement, and it is pure: it reads the workspace and answers
+why a request cannot be applied, or None. Nothing about a refusal is stored,
+because nothing about a refusal happened -- presenting the same transaction
+again re-runs this function and produces the same answer, computed against the
+workspace as it stands rather than as it once stood.
+
+`approve()` is the choke point, and it is the only thing that writes: position
+bump, transaction rows and version row all land in the caller's single
+database transaction, so the event log cannot drift from the truth it is
+generated out of.
+
+Dedup therefore only has to protect what was applied: finding a transaction id
+in its table means the change already happened, and the recorded answer is
+served instead of a second application.
 """
+
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
+from uuid import UUID
 
 from sqlmodel import Session, select
 
-from .models import (
-    ContentVersion,
-    Entry,
-    EntryVersion,
-    EventRow,
-    TransactionRecord,
-    Workspace,
-    new_id,
+from . import stream, text, tree
+from .blobs import Blobs
+from .contract import (
+    Acknowledged,
+    Create,
+    Created,
+    Delete,
+    Kind,
+    Metadata,
+    Operation,
+    Refusal,
+    Rejected,
+    Rename,
+    Reparent,
+    Response,
+    Submitted,
+    Transacted,
+    Versioned,
+    WriteBinary,
+    WriteText,
 )
+from .diff import diff_to_delta
+from .models import (
+    BlobContent,
+    Deletion,
+    Entry,
+    Event,
+    Name,
+    Parent,
+    TextContent,
+    Transaction,
+    User,
+    Version,
+    Workspace,
+)
+from .tree import Node
 
 
 @dataclass
 class Outcome:
-    """Adjudication result: mirrors Responded/Acknowledged/Failure.
+    """What the client is told, and what the workspace's streams are told."""
 
-    events carries (position, payload) pairs emitted by this outcome's
-    commit, for the controller to fan out AFTER the db transaction commits.
-    A deduped replay returns the recorded outcome with NO events — it was
-    fanned out the first time."""
-
-    rejected: bool
-    reason: str | None = None
-    conflict_version: str | None = None
-    created_entry_id: str | None = None
-    events: list[tuple[int, str]] = field(default_factory=list)
-
-    def to_response(self) -> dict[str, Any]:
-        if not self.rejected:
-            body: dict[str, Any] = {"rejected": False}
-            if self.created_entry_id:
-                body["id"] = self.created_entry_id
-            return body
-        body = {"rejected": True, "reason": self.reason}
-        if self.conflict_version:
-            body["version"] = self.conflict_version
-        return body
+    response: Response
+    events: list[stream.Emitted] = field(default_factory=list)
 
 
-def _dedup(session: Session, txn: str) -> Outcome | None:
-    rec = session.get(TransactionRecord, txn)
-    if rec is None:
-        return None
-    return Outcome(rec.rejected, rec.reason, rec.conflict_version, rec.created_entry_id)
+@dataclass(frozen=True)
+class Submission:
+    """One request being adjudicated against one workspace."""
 
+    session: Session
+    workspace: UUID
+    user: User
+    blobs: Blobs
 
-def _commit(
-    session: Session,
-    *,
-    workspace_id: str,
-    user: str,
-    txn: str,
-    outcome: Outcome,
-    event: dict[str, Any] | None,
-) -> Outcome:
-    """The choke point. Records the outcome; on success, bumps the position
-    and appends the stream event — all in the caller's open transaction."""
-    position: int | None = None
-    if not outcome.rejected:
-        ws = session.exec(
-            select(Workspace).where(Workspace.id == workspace_id).with_for_update()
-        ).one()
-        ws.position += 1
-        position = ws.position
-        session.add(ws)
-        assert event is not None
-        payload = json.dumps({**event, "user": user, "transaction": txn})
-        session.add(
-            EventRow(workspace_id=workspace_id, position=position, payload=payload)
+    def node(self, entry_id: UUID) -> Node | None:
+        return tree.node(self.session, self.workspace, entry_id)
+
+    def name_taken(self, *, parent: UUID | None, name: str, excluding: UUID | None) -> bool:
+        return tree.name_taken(
+            self.session, self.workspace, parent=parent, name=name, excluding=excluding
         )
-        outcome.events.append((position, payload))
-    session.add(
-        TransactionRecord(
-            id=txn,
-            user=user,
-            workspace_id=workspace_id,
-            rejected=outcome.rejected,
-            reason=outcome.reason,
-            conflict_version=outcome.conflict_version,
-            created_entry_id=outcome.created_entry_id,
-            position=position,
+
+    def can_receive(self, parent: UUID | None) -> bool:
+        """A folder still reachable from the root, or the root itself."""
+        if parent is None:
+            return True
+        holder = self.node(parent)
+        return holder is not None and holder.is_folder and self.is_reachable(holder)
+
+    def is_reachable(self, node: Node) -> bool:
+        return not node.deleted and not tree.has_deleted_ancestor(
+            self.session, self.workspace, node.id
         )
+
+
+def _stale(node: Node, request: Versioned) -> bool:
+    return node.version.id != request.version
+
+
+def _already_gone(node: Node | None) -> bool:
+    return node is not None and node.deleted
+
+
+# -- judgement: why a request cannot be applied, if it cannot --------------------
+
+
+def _refuses_create(submission: Submission, request: Create) -> str | None:
+    if not submission.can_receive(request.parent):
+        return Refusal.PARENT_DELETED
+    if submission.name_taken(parent=request.parent, name=request.name, excluding=None):
+        return Refusal.NAME_TAKEN
+    return None
+
+
+def _refuses_delete(submission: Submission, request: Delete) -> str | None:
+    node = submission.node(request.id)
+    if node is None:
+        return Refusal.ENTRY_DELETED
+    if _already_gone(node):
+        return None  # already what was asked for; nothing to refuse
+    if _stale(node, request):
+        return _what_later_versions_touched(submission, node, request.version)
+    return None
+
+
+def _what_later_versions_touched(
+    submission: Submission, node: Node, presented: UUID
+) -> str:
+    """Delete's refusal names what the client would have destroyed unseen.
+
+    A move counts as a change of name: both change where the entry lives in
+    the namespace, and the contract's reasons have no third word.
+    """
+    was = submission.session.get(Version, presented)
+    if was is None or was.entry_id != node.id:
+        return Refusal.modified(name=True, content=True)
+    now = node.version
+    return Refusal.modified(
+        name=(was.name_id, was.parent_id) != (now.name_id, now.parent_id),
+        content=(was.text_content_id, was.blob_content_id)
+        != (now.text_content_id, now.blob_content_id),
     )
-    return outcome
 
 
-def _snapshot_version(session: Session, entry: Entry, content_id: str | None = None) -> str:
-    prev = session.get(EntryVersion, entry.version) if entry.version else None
-    ev = EntryVersion(
-        entry_id=entry.id,
-        name=entry.name,
-        parent_id=entry.parent_id,
-        deleted=entry.deleted,
-        content_id=content_id if content_id is not None else (prev.content_id if prev else None),
+def _refuses_rename(submission: Submission, request: Rename) -> str | None:
+    node = submission.node(request.id)
+    if node is None or node.deleted:
+        return Refusal.ENTRY_DELETED
+    if _stale(node, request):
+        return Refusal.ALREADY_RENAMED
+    if submission.name_taken(parent=node.parent, name=request.name, excluding=node.id):
+        return Refusal.NAME_TAKEN
+    return None
+
+
+def _refuses_reparent(submission: Submission, request: Reparent) -> str | None:
+    node = submission.node(request.id)
+    if node is None or node.deleted:
+        return Refusal.ENTRY_DELETED
+    if _stale(node, request):
+        return Refusal.ALREADY_MOVED
+    if not submission.can_receive(request.parent):
+        return Refusal.DESTINATION_DELETED
+    if _would_detach_the_subtree(submission, node, request.parent):
+        return Refusal.DESTINATION_INSIDE_ENTRY
+    if submission.name_taken(parent=request.parent, name=node.name, excluding=node.id):
+        return Refusal.NAME_TAKEN
+    return None
+
+
+def _would_detach_the_subtree(
+    submission: Submission, moving: Node, destination: UUID | None
+) -> bool:
+    """Moving a folder inside itself severs it from the root, unreachably."""
+    return destination is not None and tree.descends_from(
+        submission.session, submission.workspace, destination, moving.id
     )
-    session.add(ev)
-    entry.version = ev.id
-    session.add(entry)
-    return ev.id
 
 
-def _name_taken(session: Session, workspace_id: str, parent_id: str | None, name: str, *, exclude: str) -> bool:
-    q = select(Entry).where(
-        Entry.workspace_id == workspace_id,
-        Entry.parent_id == parent_id,
-        Entry.name == name,
-        Entry.deleted == False,  # noqa: E712
-        Entry.id != exclude,
-    )
-    return session.exec(q).first() is not None
+def _refuses_write(submission: Submission, request: WriteText | WriteBinary) -> str | None:
+    node = submission.node(request.id)
+    if node is None or node.deleted:
+        # The bytes are not lost with the transaction: the client parks them.
+        return Refusal.ENTRY_DELETED
+    if _stale(node, request):
+        return Refusal.ALREADY_WRITTEN
+    if isinstance(request, WriteBinary) and not submission.blobs.holds(request.hash):
+        return Refusal.BYTES_NEVER_STORED
+    return None
 
 
-def _get_live(session: Session, workspace_id: str, entry_id: str) -> Entry | None:
-    e = session.get(Entry, entry_id)
-    if e is None or e.workspace_id != workspace_id:
-        return None
-    return e
-
-
-# ---------------------------------------------------------------------------
-# Handlers — one per ClientSent request type
-# ---------------------------------------------------------------------------
-
-def create(session: Session, ws: str, user: str, req: dict) -> Outcome:
-    if (o := _dedup(session, req["transaction"])) is not None:
-        return o
-    parent_id = req.get("parent")
-    if parent_id is not None:
-        parent = _get_live(session, ws, parent_id)
-        if parent is None or parent.deleted or parent.type != "folder":
-            return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                           outcome=Outcome(True, "parent was deleted"), event=None)
-    entry = Entry(workspace_id=ws, type=req["type"], name=req["name"],
-                  parent_id=parent_id, version="")
-    session.add(entry)
-    version = _snapshot_version(session, entry)
-    event = {"type": "create", "id": entry.id, "version": version,
-             "value": _meta(entry)}
-    return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                   outcome=Outcome(False, created_entry_id=entry.id), event=event)
-
-
-def delete(session: Session, ws: str, user: str, req: dict) -> Outcome:
-    if (o := _dedup(session, req["transaction"])) is not None:
-        return o
-    entry = _get_live(session, ws, req["id"])
-    if entry is None:
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry was deleted"), event=None)
-    if entry.version != req["version"]:
-        outcome = Outcome(True, _delete_conflict_reason(session, entry, req["version"]),
-                          conflict_version=entry.version)
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=outcome, event=None)
-    entry.deleted = True
-    version = _snapshot_version(session, entry)
-    event = {"type": "delete", "id": entry.id, "version": version, "value": True}
-    return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                   outcome=Outcome(False), event=event)
-
-
-def _delete_conflict_reason(session: Session, entry: Entry, presented: str) -> str:
-    old = session.get(EntryVersion, presented)
-    cur = session.get(EntryVersion, entry.version)
-    if old is None or cur is None:
-        return "later versions modified the content and name of the entry"
-    name_changed = old.name != cur.name
-    content_changed = old.content_id != cur.content_id
-    what = ("content and name" if (name_changed and content_changed)
-            else "name" if name_changed else "content")
-    return f"later versions modified the {what} of the entry"
-
-
-def rename(session: Session, ws: str, user: str, req: dict) -> Outcome:
-    if (o := _dedup(session, req["transaction"])) is not None:
-        return o
-    entry = _get_live(session, ws, req["id"])
-    if entry is None or entry.deleted:
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry was deleted"), event=None)
-    if entry.version != req["version"]:
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry was already renamed",
-                                       conflict_version=entry.version), event=None)
-    if _name_taken(session, ws, entry.parent_id, req["name"], exclude=entry.id):
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry with name already exists within destination"),
-                       event=None)
-    entry.name = req["name"]
-    version = _snapshot_version(session, entry)
-    event = {"type": "name", "id": entry.id, "version": version, "value": entry.name}
-    return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                   outcome=Outcome(False), event=event)
-
-
-def reparent(session: Session, ws: str, user: str, req: dict) -> Outcome:
-    if (o := _dedup(session, req["transaction"])) is not None:
-        return o
-    entry = _get_live(session, ws, req["id"])
-    if entry is None or entry.deleted:
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry was deleted"), event=None)
-    dest_id = req.get("parent")
-    if dest_id is not None:
-        dest = _get_live(session, ws, dest_id)
-        if dest is None or dest.deleted or dest.type != "folder":
-            return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                           outcome=Outcome(True, "the destination was deleted"), event=None)
-    if entry.version != req["version"]:
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry had already been moved",
-                                       conflict_version=entry.version), event=None)
-    if _name_taken(session, ws, dest_id, entry.name, exclude=entry.id):
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry with name already exists within destination"),
-                       event=None)
-    entry.parent_id = dest_id
-    version = _snapshot_version(session, entry)
-    event = {"type": "parent", "id": entry.id, "version": version, "value": dest_id}
-    return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                   outcome=Outcome(False), event=event)
-
-
-def write(session: Session, ws: str, user: str, req: dict) -> Outcome:
-    if (o := _dedup(session, req["transaction"])) is not None:
-        return o
-    entry = _get_live(session, ws, req["id"])
-    if entry is None or entry.deleted:
-        # Typed failure whose CONTENT the client routes to Drafts.
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "entry was deleted"), event=None)
-    if entry.version != req["version"]:
-        return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                       outcome=Outcome(True, "content was already updated",
-                                       conflict_version=entry.version), event=None)
-    if req["content_kind"] == "text":
-        cv = ContentVersion(entry_id=entry.id, kind="text", text=req["content"],
-                            size=len(req["content"].encode()), mime="text/plain")
-    else:
-        cv = ContentVersion(entry_id=entry.id, kind="binary", hash=req["hash"],
-                            size=req["size"], mime=req["mime"])
-    session.add(cv)
-    session.flush()  # assign cv.id
-    version = _snapshot_version(session, entry, content_id=cv.id)
-    # "write" is a PURE INVALIDATION SIGNAL — no payload beyond id+version.
-    event = {"type": "write", "id": entry.id, "version": version}
-    return _commit(session, workspace_id=ws, user=user, txn=req["transaction"],
-                   outcome=Outcome(False), event=event)
-
-
-HANDLERS = {
-    "create": create,
-    "delete": delete,
-    "rename": rename,
-    "reparent": reparent,
-    "write": write,
+_JUDGEMENT: dict[Operation, Callable[[Submission, Any], str | None]] = {
+    Operation.CREATE: _refuses_create,
+    Operation.DELETE: _refuses_delete,
+    Operation.RENAME: _refuses_rename,
+    Operation.REPARENT: _refuses_reparent,
+    Operation.WRITE: _refuses_write,
 }
 
 
-def _meta(entry: Entry) -> dict[str, Any]:
-    m: dict[str, Any] = {
-        "id": entry.id, "version": entry.version, "name": entry.name,
-        "type": entry.type,
+def refusal(submission: Submission, request: Submitted) -> str | None:
+    """Why this request cannot be applied to this workspace, if it cannot.
+
+    Reads only. Re-running it is how the reason for an earlier refusal is
+    recovered, so no refusal is ever written down.
+    """
+    return _JUDGEMENT[request.op](submission, request)
+
+
+# -- the choke point ---------------------------------------------------------------
+
+
+def _next_position(submission: Submission) -> int:
+    """Serialized by the workspace controller; the row lock is the insurance
+    that turns an accidental second process from corruption into contention."""
+    workspace = submission.session.exec(
+        select(Workspace).where(Workspace.id == submission.workspace).with_for_update()
+    ).one()
+    workspace.position += 1
+    submission.session.add(workspace)
+    return workspace.position
+
+
+def _carried_over(previous: Version | None) -> dict[str, Any]:
+    if previous is None:
+        return {}
+    return {
+        "name_id": previous.name_id,
+        "parent_id": previous.parent_id,
+        "deleted_id": previous.deleted_id,
+        "text_content_id": previous.text_content_id,
+        "blob_content_id": previous.blob_content_id,
     }
-    if entry.parent_id is not None:
-        m["parent"] = entry.parent_id
-    if entry.deleted:
-        m["deleted"] = True
-    return m
 
 
-def snapshot(session: Session, workspace_id: str) -> list[dict[str, Any]]:
-    """All entries INCLUDING tombstones — reconciliation depends on them."""
-    entries = session.exec(select(Entry).where(Entry.workspace_id == workspace_id)).all()
-    return [_meta(e) for e in entries]
+def approve(
+    submission: Submission,
+    *,
+    entry_id: UUID,
+    event: Event,
+    applied: list[Transaction],
+    previous: Version | None,
+    **introduced: Any,
+) -> Version:
+    """Append the changes and the version they compose, at the next position."""
+    version = Version(
+        entry_id=entry_id,
+        event=event,
+        position=_next_position(submission),
+        **{**_carried_over(previous), **introduced},
+    )
+    submission.session.add_all([*applied, version])
+    submission.session.flush()
+    return version
+
+
+def _acknowledge(
+    submission: Submission, version: Version, response: Response | None = None
+) -> Outcome:
+    return Outcome(response or Acknowledged(), [stream.of(submission.session, version.id)])
+
+
+def _by(user: User, request: Transacted) -> dict[str, Any]:
+    return {"user_id": user.id, "transaction": request.transaction}
+
+
+# -- application: what an accepted request appends ------------------------------------
+
+
+def _apply_create(submission: Submission, request: Create) -> Outcome:
+    entry = Entry(workspace_id=submission.workspace, type=request.type)
+    submission.session.add(entry)
+    stamp = _by(submission.user, request)
+    naming = Name(entry_id=entry.id, name=request.name, **stamp)
+    parentage = Parent(entry_id=entry.id, parent_entry_id=request.parent, **stamp)
+    deletion = Deletion(entry_id=entry.id, deleted=False, **stamp)
+    version = approve(
+        submission,
+        entry_id=entry.id,
+        event=Event.CREATE,
+        applied=[naming, parentage, deletion],
+        previous=None,
+        name_id=naming.id,
+        parent_id=parentage.id,
+        deleted_id=deletion.id,
+    )
+    return _acknowledge(submission, version, Created(id=entry.id))
+
+
+def _apply_delete(submission: Submission, request: Delete) -> Outcome:
+    node = _live(submission, request)
+    if _already_gone(node):
+        # Acknowledging beats inventing a refusal for work already done.
+        return Outcome(Acknowledged())
+    deletion = Deletion(entry_id=node.id, deleted=True, **_by(submission.user, request))
+    version = approve(
+        submission,
+        entry_id=node.id,
+        event=Event.DELETE,
+        applied=[deletion],
+        previous=node.version,
+        deleted_id=deletion.id,
+    )
+    return _acknowledge(submission, version)
+
+
+def _apply_rename(submission: Submission, request: Rename) -> Outcome:
+    node = _live(submission, request)
+    naming = Name(entry_id=node.id, name=request.name, **_by(submission.user, request))
+    version = approve(
+        submission,
+        entry_id=node.id,
+        event=Event.NAME,
+        applied=[naming],
+        previous=node.version,
+        name_id=naming.id,
+    )
+    return _acknowledge(submission, version)
+
+
+def _apply_reparent(submission: Submission, request: Reparent) -> Outcome:
+    node = _live(submission, request)
+    parentage = Parent(
+        entry_id=node.id, parent_entry_id=request.parent, **_by(submission.user, request)
+    )
+    version = approve(
+        submission,
+        entry_id=node.id,
+        event=Event.PARENT,
+        applied=[parentage],
+        previous=node.version,
+        parent_id=parentage.id,
+    )
+    return _acknowledge(submission, version)
+
+
+def _apply_write(submission: Submission, request: WriteText | WriteBinary) -> Outcome:
+    node = _live(submission, request)
+    content = _content_of(submission, node, request)
+    version = approve(
+        submission,
+        entry_id=node.id,
+        event=Event.WRITE,
+        applied=[content],
+        previous=node.version,
+        text_content_id=content.id if isinstance(content, TextContent) else None,
+        blob_content_id=content.id if isinstance(content, BlobContent) else None,
+    )
+    if isinstance(request, WriteText):
+        text.remember(submission.session, version, request.content)
+    return _acknowledge(submission, version)
+
+
+def _content_of(
+    submission: Submission, node: Node, request: WriteText | WriteBinary
+) -> TextContent | BlobContent:
+    stamp = _by(submission.user, request)
+    if isinstance(request, WriteBinary):
+        return BlobContent(
+            entry_id=node.id, hash=request.hash, size=request.size, mime=request.mime, **stamp
+        )
+    return TextContent(
+        entry_id=node.id,
+        size=len(request.content.encode()),
+        mime="text/plain",
+        delta=diff_to_delta(text.at(submission.session, node.version), request.content),
+        **stamp,
+    )
+
+
+def _live(submission: Submission, request: Versioned) -> Node:
+    """The entry an accepted request names -- judgement has already found it."""
+    node = submission.node(request.id)
+    if node is None:
+        raise LookupError(f"entry {request.id} vanished between judgement and application")
+    return node
+
+
+_APPLICATION: dict[Operation, Callable[[Submission, Any], Outcome]] = {
+    Operation.CREATE: _apply_create,
+    Operation.DELETE: _apply_delete,
+    Operation.RENAME: _apply_rename,
+    Operation.REPARENT: _apply_reparent,
+    Operation.WRITE: _apply_write,
+}
+
+
+# -- dedup, and the two halves joined -------------------------------------------------
+
+_TRANSACTION_TABLE: dict[Operation, type[Transaction]] = {
+    Operation.CREATE: Name,
+    Operation.RENAME: Name,
+    Operation.REPARENT: Parent,
+    Operation.DELETE: Deletion,
+}
+
+
+def _table_for(request: Submitted) -> type[Transaction]:
+    if request.op is not Operation.WRITE:
+        return _TRANSACTION_TABLE[request.op]
+    return TextContent if request.type is Kind.TEXT else BlobContent
+
+
+def _already_applied(submission: Submission, request: Submitted) -> Outcome | None:
+    table = _table_for(request)
+    recorded = submission.session.exec(
+        select(table).where(table.transaction == request.transaction)
+    ).first()
+    if recorded is None:
+        return None
+    if request.op is Operation.CREATE:
+        return Outcome(Created(id=recorded.entry_id))
+    return Outcome(Acknowledged())
+
+
+def _conflicting_version(submission: Submission, request: Submitted) -> UUID | None:
+    """What the conflict UX needs NOW: the affected entry's current version."""
+    if isinstance(request, Create):
+        return None
+    node = submission.node(request.id)
+    return None if node is None else node.version.id
+
+
+def adjudicate(submission: Submission, request: Submitted) -> Outcome:
+    applied = _already_applied(submission, request)
+    if applied is not None:
+        return applied
+    refused = refusal(submission, request)
+    if refused is not None:
+        return Outcome(
+            Rejected(reason=refused, version=_conflicting_version(submission, request))
+        )
+    return _APPLICATION[request.op](submission, request)
+
+
+def snapshot(session: Session, workspace_id: UUID) -> list[Metadata]:
+    return [node.metadata for node in tree.nodes(session, workspace_id)]

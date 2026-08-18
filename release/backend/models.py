@@ -1,9 +1,20 @@
+# pyright: reportUnsafeMultipleInheritance=false
+
 """SQLModel tables of record.
 
-Scaffold simplification vs. the production schema: parent is an inline
-column on Entry rather than a separate FileHierarchy join table. The
-adjudication logic only ever touches parent through Entry.parent_id, so
-swapping the real schema back in is contained to models + queries.
+An entry is pure identity. Its name, its parent, its deletion and its content
+each live in their own append-only table, and a `Version` names one
+combination of those four. Current state is therefore not a row anyone
+overwrites -- it is the newest combination -- so history costs nothing extra
+and the log cannot drift from the truth.
+
+Only transactions that were applied are recorded. A refused one changed
+nothing, so there is nothing to store: presenting it again re-runs the same
+adjudication and produces the same reason (see `service.refusal`).
+
+A `Version` is also the stream event that produced it: one approved mutation
+appends exactly one version, at exactly one workspace position. There is no
+separate event table to keep in sync.
 """
 
 from __future__ import annotations
@@ -12,23 +23,29 @@ from abc import ABC as IsAbstractClass
 import enum
 from datetime import datetime
 
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint, TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlmodel import Field, SQLModel, and_
+from sqlmodel import Field, SQLModel
 
-from ...wsfs_suede__sqlmodel_utils_suede.associations import (
+# Imported for the side effect: it swaps SQLModel.metadata for one carrying the
+# library's naming convention. Must land before any table model is defined.
+from wsfs_suede__sqlmodel_utils_suede import (
+    metadata as _naming_convention,  # pyright: ignore[reportUnusedImport]
+)
+from wsfs_suede__sqlmodel_utils_suede.associations import (
     ID,
     WithID,
     WithTime,
     ForeignKeyField,
 )
-from ...wsfs_suede__sqlmodel_utils_suede.tablenames import tablename, explicit_tablename
-from ...wsfs_suede__sqlmodel_utils_suede.columns import EnumField
+from wsfs_suede__sqlmodel_utils_suede.columns import EnumField
+from wsfs_suede__sqlmodel_utils_suede.tablenames import tablename, explicit_tablename
 
 from .diff import Delta
 
 
 class User(WithID, tablename("plural"), table=True):
-    email: str
+    email: str = Field(index=True, unique=True, nullable=False)
 
 
 class WithUserReference(  # pyright: ignore[reportUnsafeMultipleInheritance]
@@ -38,12 +55,7 @@ class WithUserReference(  # pyright: ignore[reportUnsafeMultipleInheritance]
         User,
         nullable=False,
         description="The id of the user associated with this item.",
-        index=True,
     )
-
-    @classmethod
-    def MatchToUser(cls):
-        return and_(cls.user_id == User.id)
 
 
 class Workspace(WithID, tablename("plural"), table=True):
@@ -58,54 +70,36 @@ class WithWorkspaceReference(  # pyright: ignore[reportUnsafeMultipleInheritance
     workspace_id: ID = ForeignKeyField(Workspace, nullable=False)
     """The id of the associated workspace."""
 
-    @classmethod
-    def MatchToWorkspace(cls):
-        return and_(cls.workspace_id == Workspace.id)
-
 
 class Type(str, enum.Enum):
-    FILE = "pending"
-    FOLDER = "in progress"
+    FILE = "file"
+    FOLDER = "folder"
 
 
 class Entry(
     WithID, WithWorkspaceReference, tablename("custom", "fs_entries"), table=True
 ):
-    """Current state of one tree node (pure namespace — no content plane)."""
+    """One tree node's identity. Everything mutable about it is versioned."""
 
-    type: Type = EnumField(enum_class=Type)
+    type: Type = EnumField(Type, name="fs_entry_type")
 
 
-class WithEntryReference(  # pyright: ignore[reportUnsafeMultipleInheritance]
-    SQLModel, IsAbstractClass
-):
+class WithEntryReference(SQLModel, IsAbstractClass):
     entry_id: ID = ForeignKeyField(Entry)
 
-    @classmethod
-    def MatchToFileSystem(cls):
-        return and_(cls.entry_id == Entry.id)
 
-
-versions_table = explicit_tablename("Name", "custom", "fs_versions")
-
-
-class Transaction(  # pyright: ignore[reportUnsafeMultipleInheritance]
+class Transaction(
     WithID, WithTime, WithUserReference, WithEntryReference, IsAbstractClass
 ):
-    """
-    A base class for recording attempts to change a property of an entry.
-    In this way, the most recent 'approved' item indicates the current state
-    of that entry.
+    """One applied change to one property of one entry.
 
-    All denied transactions should be assumed to be relative to that most
-    recently approved entry.
+    Finding a client's transaction id here is the whole of dedup: the change
+    it names already happened, so presenting it again is answered rather than
+    applied a second time.
     """
 
-    approved: bool = Field(index=True, nullable=False)
-    version: ID = ForeignKeyField(versions_table.tablename, nullable=False)
-    """
-    NOTE: Will point to own ID on creation.
-    """
+    transaction: str = Field(index=True, unique=True, nullable=False)
+    """Client-minted `${client}:${counter}` -- the dedup key."""
 
 
 class Name(Transaction, tablename("custom", "fs_names"), table=True):
@@ -114,54 +108,92 @@ class Name(Transaction, tablename("custom", "fs_names"), table=True):
 
 class Parent(Transaction, tablename("custom", "fs_parentage"), table=True):
     parent_entry_id: ID | None = ForeignKeyField(Entry, nullable=True)
+    """Absent means the workspace root."""
 
 
 class Deletion(Transaction, tablename("custom", "fs_deletions"), table=True):
     deleted: bool = Field(default=False, nullable=False)
 
 
-class ContentBase(Transaction, IsAbstractClass):
+class Content(Transaction, IsAbstractClass):
     size: int = Field(default=0, nullable=False)
     mime: str = Field(default="text/plain", nullable=False)
 
 
-class TextContent(ContentBase, tablename("custom", "fs_text_content"), table=True):
+class TextContent(Content, tablename("custom", "fs_text_content"), table=True):
     delta: Delta = Field(sa_type=JSONB, nullable=False)
+    """How this version's text differs from the entry's previous text."""
 
 
-class BlobContent(ContentBase, tablename("custom", "fs_blob_content"), table=True):
-    hash: str = Field(index=True)
+class BlobContent(Content, tablename("custom", "fs_blob_content"), table=True):
+    hash: str = Field(index=True, nullable=False)
+
+
+class Event(str, enum.Enum):
+    CREATE = "create"
+    NAME = "name"
+    PARENT = "parent"
+    DELETE = "delete"
+    WRITE = "write"
+
+
+versions_table = explicit_tablename("Version", "custom", "fs_versions")
 
 
 class Version(WithID, WithTime, WithEntryReference, versions_table.mixin, table=True):
-    """Immutable snapshot of an entry at one APPROVED version.
+    """One approved state of an entry, and the stream event that produced it.
 
-    Entries therefore must begin in an approved state.
-
-    Powers (a) CAS-failure reasons (diff presented version vs. current),
-    (b) Content fetch by (id, version).
+    Powers (a) the CAS token clients present, (b) Content fetch by
+    (entry, version), (c) the event stream -- replay is this table, ordered
+    by position, so the log is the truth rather than a copy of it.
     """
 
-    name_id: ID = ForeignKeyField(table=Name, nullable=False)
-    parent_id: ID = ForeignKeyField(Parent, nullable=False)
-    deleted_id: ID = ForeignKeyField(Deletion, nullable=False)
+    position: int = Field(index=True, nullable=False)
+    """The workspace stream position this version was committed at."""
+
+    event: Event = EnumField(Event, name="fs_event")
+    """Which of the pointers below this version introduced."""
+
+    name_id: ID = ForeignKeyField(Name)
+    parent_id: ID = ForeignKeyField(Parent)
+    deleted_id: ID = ForeignKeyField(Deletion)
     text_content_id: ID | None = ForeignKeyField(TextContent, nullable=True)
     blob_content_id: ID | None = ForeignKeyField(BlobContent, nullable=True)
 
+    __table_args__ = (
+        CheckConstraint(
+            "num_nonnulls(text_content_id, blob_content_id) <= 1",
+            name="one_content_kind",
+        ),
+        Index(f"ix_{versions_table.tablename}_entry_position", "entry_id", "position"),
+    )
 
-class WithVersionReference(  # pyright: ignore[reportUnsafeMultipleInheritance]
-    SQLModel, IsAbstractClass
+
+class TextContentCache(
+    WithID, WithEntryReference, tablename("custom", "fs_text_cache"), table=True
 ):
-    version_id: ID = ForeignKeyField(Version, nullable=False)
+    """Derived, never authoritative: one entry's text at one version.
 
+    Reconstruction folds deltas, which is linear in an entry's history. This
+    row anchors the fold at the newest version so the common read is free and
+    older versions are recovered by inverting a few deltas backwards.
+    Deleting the whole table only costs time.
+    """
 
-class StreamToken(SQLModel, table=True):
-    token: str = Field(primary_key=True)
-    user: str = Field(nullable=False)
-    workspace_id: str = Field(nullable=False)
-    position: int = Field(nullable=False)  # stream position of the Initialize snapshot
-    expires: datetime = Field(nullable=False)
-
-
-class TextContentCache(WithID, WithEntryReference, WithVersionReference):
+    version_id: ID = ForeignKeyField(Version)
     content: str = Field(nullable=False)
+
+    __table_args__ = (UniqueConstraint("entry_id"),)
+
+
+class StreamToken(
+    WithUserReference,
+    WithWorkspaceReference,
+    tablename("custom", "fs_stream_tokens"),
+    table=True,
+):
+    """Single-use, position-bound credential minted by Initialize."""
+
+    token: str = Field(primary_key=True)
+    position: int = Field(nullable=False)
+    expires: datetime = Field(sa_type=TIMESTAMP(timezone=True), nullable=False)

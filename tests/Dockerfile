@@ -1,0 +1,28 @@
+FROM python:3.12-slim
+
+ENV \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# fast_diff_match_patch ships no aarch64 wheel, so it is compiled here.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependencies first: editing source then leaves these layers cached.
+COPY requirements.txt ./requirements.txt
+COPY tests/requirements.txt ./tests/requirements.txt
+RUN pip install -r requirements.txt -r tests/requirements.txt
+
+# compose bind-mounts the source over the top for the dev loop; copying it in
+# keeps the image runnable on its own (CI, or a bare `docker run`).
+COPY pytest.ini ./pytest.ini
+COPY release/ ./release/
+COPY wsfs_suede__sqlmodel_utils_suede/ ./wsfs_suede__sqlmodel_utils_suede/
+COPY tests/ ./tests/
+
+CMD ["pytest"]

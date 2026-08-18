@@ -1,7 +1,18 @@
+"""Text history as Yjs-shaped deltas.
+
+Storing every revision of every file whole is the wasteful option; storing the
+edit between revisions is not. These are the four operations that make that
+trade reversible: build a delta, apply it forwards, invert it, and walk a chain
+of them backwards to any older revision.
+
+Offsets are UTF-16 code units, as Yjs counts them -- which is why everything
+here works on the utf-16-le encoding rather than on Python's code points. The
+two agree until the first emoji, and then they disagree silently.
+"""
+
+from typing import Iterable, List, Required, Tuple, TypedDict
+
 from fast_diff_match_patch import diff
-
-
-from typing import Iterable, Tuple, List, TypedDict, Required
 
 
 class InsertOperation(TypedDict):
@@ -13,139 +24,138 @@ class RetainOperation(TypedDict):
 
 
 class DeleteOperation(TypedDict):
-    delete: Required[
-        str
-    ]  # yjs actually uses a number here, but using string for bidirectionality
+    delete: Required[str]
+    """Yjs carries a length here; the removed text is kept instead, because
+    that is what makes a delta invertible and therefore a delta chain walkable
+    in both directions."""
 
 
 type YjsDeltaOp = InsertOperation | RetainOperation | DeleteOperation
 type Delta = list[YjsDeltaOp]
 
-
-def utf16_len(s: str) -> int:
-    # Count UTF-16 code units (to match Yjs indexing)
-    return len(s.encode("utf-16-le")) // 2
+UTF16 = "utf-16-le"
+BYTES_PER_UNIT = 2
 
 
-def diff_to_delta(a: str, b: str, *, cleanup: str = "Efficiency") -> Delta:
-    """
-    Convert a→b using fast_diff_match_patch into Yjs-style ops.
-    cleanup: "Semantic" | "Efficiency" | "No"
-    """
-    # counts_only=False returns (op, TEXT). With counts_only=True you'd only get lengths.
-    parts: List[Tuple[str, str]] = diff(a, b, counts_only=False, cleanup=cleanup)
-    delta: Delta = []
+def _units(text: str) -> bytes:
+    return text.encode(UTF16)
 
-    def push(op: YjsDeltaOp):
-        if not delta:
-            delta.append(op)
-            return
-        last = delta[-1]
-        if "retain" in op and "retain" in last:
-            last["retain"] += op["retain"]  # type: ignore[index]
-        elif "delete" in op and "delete" in last:
-            last["delete"] += op["delete"]  # type: ignore[index]
-        elif "insert" in op and "insert" in last:
-            last["insert"] += op["insert"]  # type: ignore[index]
-        else:
-            delta.append(op)
 
-    for tag, text in parts:
-        if tag == "=" and text:
-            push({"retain": utf16_len(text)})
-        elif tag == "-" and text:
-            push({"delete": text})
-        elif tag == "+" and text:
-            push({"insert": text})
-    return delta
+def _text(units: bytes) -> str:
+    return units.decode(UTF16)
+
+
+def utf16_len(text: str) -> int:
+    return len(_units(text)) // BYTES_PER_UNIT
+
+
+class _Base:
+    """A cursor over the text a delta is being applied to, in UTF-16 units."""
+
+    def __init__(self, text: str) -> None:
+        self._units = _units(text)
+        self._at = 0
+
+    def take(self, count: int) -> bytes:
+        return self._units[self._at : self._advance(count)]
+
+    def drop(self, removed: str, *, validate: bool) -> None:
+        was = self._units[self._at : self._advance(utf16_len(removed))]
+        if validate and was != _units(removed):
+            raise ValueError(
+                f"delete mismatch: expected {removed!r}, found {_text(was)!r}"
+            )
+
+    def rest(self) -> bytes:
+        return self._units[self._at :]
+
+    def _advance(self, units: int) -> int:
+        if units < 0:
+            raise ValueError("delta offsets must be non-negative")
+        end = self._at + units * BYTES_PER_UNIT
+        if end > len(self._units):
+            raise ValueError("delta runs past the end of the base text")
+        self._at = end
+        return end
+
+
+def _appended(op: YjsDeltaOp, base: _Base, *, validate: bool) -> bytes:
+    if "retain" in op:
+        return base.take(op["retain"])
+    if "insert" in op:
+        return _units(op["insert"])
+    if "delete" in op:
+        base.drop(op["delete"], validate=validate)
+        return b""
+    raise ValueError(f"unknown delta operation: {op!r}")
 
 
 def apply_delta(base: str, delta: Delta, *, validate: bool = True) -> str:
-    """
-    Apply `delta` to `base` and return the new text.
-
-    Invariants:
-    - retain N copies the next N characters from `base`
-    - insert S appends S to output (does not advance base pointer)
-    - delete S skips len(S) characters in `base`
-      (optionally validates that skipped text equals S when validate=True)
-    """
-    i = 0  # index into base
-    out_parts: list[str] = []
-
+    """`base` with `delta` applied. Base left unconsumed by the delta is kept."""
+    cursor = _Base(base)
+    out = bytearray()
     for op in delta:
-        if "retain" in op:
-            n = op["retain"]
-            if n < 0:
-                raise ValueError("retain must be non-negative")
-            if i + n > utf16_len(base):
-                raise ValueError(
-                    f"delete text mismatch: expected {s!r}, found {base[i:i+n]!r}"
-                )
-            out_parts.append(base[i : i + n])
-            i += n
-
-        elif "insert" in op:
-            s = op["insert"]
-            out_parts.append(s)
-
-        elif "delete" in op:
-            s = op["delete"]
-            n = utf16_len(s)
-            if i + n > utf16_len(base):
-                raise ValueError("delete goes past end of base")
-            if validate:
-                # ensure we're deleting exactly what we claim
-                if base[i : i + n] != s:
-                    raise ValueError(
-                        f"delete text mismatch: expected {s!r}, found {base[i:i+n]!r}"
-                    )
-            i += n
-
-        else:
-            raise ValueError(f"Unknown op: {op!r}")
-
-    # Any remaining base after ops is implicitly discarded (by definition of delta).
-    # If you prefer to force full consumption, assert i == len(base).
-    out_parts.append(base[i:])  # keep the tail if not explicitly deleted
-    return "".join(out_parts)
+        out += _appended(op, cursor, validate=validate)
+    out += cursor.rest()
+    return _text(bytes(out))
 
 
 def apply_deltas(base: str, deltas: Iterable[Delta], *, validate: bool = True) -> str:
-    current = base
-    for d in deltas:
-        current = apply_delta(current, d, validate=validate)
-    return current
+    for delta in deltas:
+        base = apply_delta(base, delta, validate=validate)
+    return base
+
+
+def _merged(delta: Delta, op: YjsDeltaOp) -> Delta:
+    """Runs of the same operation are one operation."""
+    kind, *_ = op
+    if delta and kind in delta[-1]:
+        delta[-1][kind] += op[kind]
+    else:
+        delta.append(op)
+    return delta
+
+
+_AS_OPERATION = {
+    "=": lambda text: RetainOperation(retain=utf16_len(text)),
+    "-": lambda text: DeleteOperation(delete=text),
+    "+": lambda text: InsertOperation(insert=text),
+}
+
+
+def diff_to_delta(before: str, after: str, *, cleanup: str = "Efficiency") -> Delta:
+    """The delta taking `before` to `after`. cleanup: Semantic | Efficiency | No"""
+    parts: List[Tuple[str, str]] = diff(
+        before, after, counts_only=False, cleanup=cleanup
+    )
+    delta: Delta = []
+    for tag, text in parts:
+        if text:
+            delta = _merged(delta, _AS_OPERATION[tag](text))
+    return delta
 
 
 def invert_delta(delta: Delta) -> Delta:
-    inv: Delta = []
+    """The delta undoing `delta` -- inserts become deletes, and vice versa."""
+    inverted: Delta = []
     for op in delta:
         if "retain" in op:
-            inv.append({"retain": op["retain"]})
+            inverted.append(RetainOperation(retain=op["retain"]))
         elif "insert" in op:
-            inv.append({"delete": op["insert"]})
+            inverted.append(DeleteOperation(delete=op["insert"]))
         elif "delete" in op:
-            inv.append({"insert": op["delete"]})
+            inverted.append(InsertOperation(insert=op["delete"]))
         else:
-            raise ValueError(f"Unknown op: {op!r}")
-    return inv
+            raise ValueError(f"unknown delta operation: {op!r}")
+    return inverted
 
 
 def recover_base(
-    current: str, deltasOldestToNewest: Iterable[Delta], *, validate: bool = True
+    current: str, deltas_oldest_to_newest: Iterable[Delta], *, validate: bool = True
 ) -> str:
-    """
-    Given the final `current` text and the exact series of `deltas`
-    that transformed the base into `current`, reconstruct the base.
-
-    Implementation: for deltas [d1, d2, ..., dn],
-    compute inverses [inv(dn), ..., inv(d2), inv(d1)] and apply them in that order.
-    """
-    # materialize once in case `deltas` is a generator
-    seq = list(deltasOldestToNewest)
-    text = current
-    for d in reversed(seq):
-        inv = invert_delta(d)
-        text = apply_delta(text, inv, validate=validate)
-    return text
+    """The text `current` was reached from, by undoing those deltas in reverse."""
+    return apply_deltas(
+        current,
+        (invert_delta(delta) for delta in reversed(list(deltas_oldest_to_newest))),
+        validate=validate,
+    )
