@@ -29,7 +29,10 @@
           "editor.formatOnSave": true
         },
         "editor.formatOnSave": true,
-        "editor.tabSize": 2
+        "editor.tabSize": 2,
+        "basedpyright.analysis.extraPaths": [
+          "/usr/local/python/3.12.14/lib/python3.12/site-packages"
+        ]
       }
     }
   },
