@@ -11,6 +11,20 @@ machines, the flows, and the invariants that hold it together. The
 authoritative wire contract lives in `filesystem-sync-contract.ts`; the
 client reference implementation sketch in `workspace-fs.ts`.
 
+The diagrams below are generated, not drawn. They are authored as TypeScript
+types in `diagram.ts` and embedded here by
+[typescript2mermaid](../typescript2mermaid-suede/README.md):
+
+```sh
+./typescript2mermaid-suede/cli.sh --embed docs/ARCHITECTURE.md          # regenerate
+./typescript2mermaid-suede/cli.sh --embed docs/ARCHITECTURE.md --check  # CI: fail if stale
+```
+
+The data diagrams (§2, §3, §6) reference the contract's own declarations and
+are expanded by the type checker, so their member lists are the contract's —
+a rename there fails the run rather than quietly leaving a stale picture here.
+Edit `diagram.ts` and re-run; never hand-edit the fenced blocks.
+
 ---
 
 ## 1. The two planes
@@ -38,7 +52,45 @@ seam staying this thin:
 2. The **write-failure policy**: a content-write failure is ignored when a
    live editor is open, because the doc is the truth there.
 
+<!-- diagram: TwoPlanes -->
+```mermaid
+flowchart TD
+    Editor(["Editor / Pyodide"])
+    subgraph "Collaboration plane — concurrent, peer-shaped"
+        YDoc("Y.Doc per open text file")
+        Liveblocks("Liveblocks room")
+        YDoc -->|CRDT merge| Liveblocks
+    end
+    subgraph "Authority plane — server-authoritative, one ordered stream"
+        Outbox[("Outbox (IndexedDB)")]
+        ConfirmedMap("Confirmed map")
+        Postgres[("Postgres — the source of truth")]
+        Stream[/"SSE event stream"/]
+        Outbox -->|transactions| Postgres
+        Postgres -->|events generated from the truth| Stream
+        Stream -->|the one door| ConfirmedMap
+    end
+    Editor -->|open text file| YDoc
+    Editor -->|tree + content commits| Outbox
+    subgraph "The only two seams"
+        ReadPriority{{"1. Read priority — a live doc outranks everything"}}
+        WritePolicy{{"2. Write failure ignored while a live editor is open"}}
+    end
+    YDoc -.-> ReadPriority
+    ConfirmedMap -.-> ReadPriority
+    YDoc -.-> WritePolicy
+    Outbox -.-> WritePolicy
+    classDef collab fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+    classDef authority fill:#e6f4ea,stroke:#34a853,stroke-width:2px
+    classDef seam fill:#fef7e0,stroke:#f9ab00,stroke-width:2px
+    class YDoc,Liveblocks collab
+    class Outbox,ConfirmedMap,Postgres,Stream authority
+    class ReadPriority,WritePolicy seam
+```
+<!-- /diagram -->
+
 ---
+
 
 ## 2. Vocabulary
 
@@ -82,9 +134,94 @@ the stream replays events after its position before going live.
 (`create` at a path / `write` to a now-deleted entry) plus a hash pointer to
 bytes. Carries no version, cannot conflict, lives outside the sync machinery.
 
+<!-- diagram: Vocabulary -->
+```mermaid
+classDiagram
+    class EntryMetadata {
+        +string id
+        +string version
+        +string name
+        +string parent
+        +boolean deleted
+        +Entry.Type type
+    }
+    class Versioned {
+        +string id
+        +string version
+    }
+    class StreamEvent {
+        +string id
+        +string version
+        +string user
+        +string transaction
+    }
+    class InitializeResponse {
+        +string token
+        +Entry.Metadata[] entries
+        +Rejection[] rejected
+        +OutboxRequest[] applied
+    }
+    class Rejection {
+        +string transaction
+        +string reason
+        +string version
+    }
+    EntryMetadata *-- Versioned : every mutation presents one
+    StreamEvent --> EntryMetadata : the one door into the map
+    InitializeResponse --> EntryMetadata : entries, the replace-all snapshot
+    InitializeResponse *-- Rejection : rejected
+    StreamEvent ..> Versioned : carries the new CAS token
+```
+<!-- /diagram -->
+
 ---
 
+
 ## 3. System inventory
+
+<!-- diagram: SystemInventory -->
+```mermaid
+flowchart LR
+    subgraph "Client"
+        PyodideBridge{{"Pyodide bridge — sync-over-async, deadline-bounded"}}
+        UI(["UI"])
+        EffectiveView[/"Effective view = outbox.replayOver(confirmed)"/]
+        ConfirmedMap("Confirmed map (memory)")
+        Outbox[("Outbox + bytes-by-hash (IDB)")]
+        ContentCache[("Content cache (IDB)")]
+        DraftsStore[("Drafts (IDB)")]
+        YjsRegistry[("Yjs registry + y-indexeddb")]
+        SyncLoopDriver(("Sync loop"))
+        ConfirmedMap -->|base| EffectiveView
+        Outbox -->|overlay| EffectiveView
+        EffectiveView --- UI
+        EffectiveView --- PyodideBridge
+        PyodideBridge -->|reads| ContentCache
+        PyodideBridge -->|reads live docs first| YjsRegistry
+        SyncLoopDriver -->|snapshot + events| ConfirmedMap
+        SyncLoopDriver -.->|surfaces on reconnect| DraftsStore
+    end
+    subgraph "Server"
+        Controller{{"Workspace controller — one per workspace per process"}}
+        ChokePoint{"The choke point — mutation, position, transaction record and event row in one DB transaction"}
+        Postgres[("Postgres — entries, transactions, event buffer, tokens")]
+        SseHandler[/"SSE handler — claim token, replay, follow"/]
+        BlobStore[("Blob store, keyed by hash")]
+        Controller -->|serialized submit| ChokePoint
+        ChokePoint -->|one commit| Postgres
+        Controller -->|fan out after commit| SseHandler
+    end
+    subgraph "Third-party"
+        Liveblocks("Liveblocks — rooms + yjs sync")
+    end
+    SyncLoopDriver -->|Initialize| Controller
+    Outbox -->|transactional requests| Controller
+    SseHandler -->|stream events| SyncLoopDriver
+    ContentCache -.->|Content — bypasses the controller| Postgres
+    Outbox -->|PUT the bytes, keyed by hash| BlobStore
+    YjsRegistry -->|open text files only| Liveblocks
+```
+<!-- /diagram -->
 
 ### Client-side
 
@@ -119,6 +256,58 @@ Initialize → evict/replace → stream → backoff → repeat (§6.4).
 calls are served by the main thread against the effective view + content
 cache, with hard deadlines so a hung fetch can never wedge the
 Atomics-blocked worker.
+
+<!-- diagram: ClientStores -->
+```mermaid
+classDiagram
+    class OutboxEntry {
+        +string session
+        +string timestamp
+    }
+    class DeleteRequest {
+        +string id
+        +string version
+        +string transaction
+    }
+    class WriteText {
+        +string content
+    }
+    class StoreRequest {
+        +string hash
+        +string mime
+        +number size
+    }
+    class Draft {
+        +string id
+        +string workspace
+        +string session
+        +string timestamp
+        +DraftContent content
+    }
+    class DraftContent {
+        +string hash
+        +number size
+        +string mime
+    }
+    class ContentResponse {
+        +string version
+    }
+    class EntryMetadata {
+        +string id
+        +string version
+        +string name
+        +string parent
+        +boolean deleted
+        +Entry.Type type
+    }
+    OutboxEntry --> DeleteRequest : request (one of five)
+    OutboxEntry --> WriteText : request (one of five)
+    OutboxEntry --> StoreRequest : bytes live by hash, not here
+    Draft *-- DraftContent : a pointer, so drafts stay cheap
+    Draft --> StoreRequest : recovery replays Create, Store, Write
+    ContentResponse ..> EntryMetadata : cached per entry id
+```
+<!-- /diagram -->
 
 ### Server-side
 
@@ -158,6 +347,38 @@ position → follow live, with comment heartbeats (~15s).
 **Blob store** — object storage keyed by hash; `PUT /blobs/{hash}` verifies
 the hash and no-ops on duplicates.
 
+<!-- diagram: ServerTables -->
+```mermaid
+erDiagram
+    TransactionRow ||--o{ EntryRow : "adjudicated against"
+    TokenRow ||--|| TransactionRow : "stream position anchors after"
+    EntryRow ||--o{ EntryRow : "parent of"
+
+    TransactionRow {
+        string user
+        string workspace
+        int position
+        text id PK
+        text outcome
+    }
+    EntryRow {
+        string version
+        string name
+        boolean deleted
+        text id PK
+        text parent FK
+        text type
+    }
+    TokenRow {
+        string user
+        string workspace
+        int position
+        string expires
+        text token PK
+    }
+```
+<!-- /diagram -->
+
 ### Third-party
 
 **Liveblocks** — rooms, yjs sync protocol, presence — for open text files
@@ -180,6 +401,26 @@ only. Its footprint in the system is exactly the multi-writer surface.
 Eviction triggers, any one suffices: response received; own transaction id
 echoed on the stream; reported in `Initialize.applied`/`rejected`.
 
+<!-- diagram: TransactionLifecycle -->
+```mermaid
+stateDiagram-v2
+    [*] --> Captured : persisted to the outbox
+    Captured --> InFlight : request sent
+    InFlight --> Captured : timeout — remains queued
+    InFlight --> Applied : response, stream echo, or Initialize verdict
+    InFlight --> Rejected : typed failure
+    Applied --> Evicted : confirmed change and overlay removal cancel exactly
+    Rejected --> Evicted : routed to the failure policy
+    Evicted --> [*]
+    note right of Captured
+        Capture before send — the bytes are durable before the network is involved
+    end note
+    note left of Evicted
+        Any one eviction trigger suffices: response received, own transaction id echoed on the stream, or reported by Initialize
+    end note
+```
+<!-- /diagram -->
+
 ### 4.2 Entry lifecycle
 
 | State | Meaning | Transitions |
@@ -191,6 +432,20 @@ echoed on the stream; reported in `Initialize.applied`/`rejected`.
 Tombstones are load-bearing: reconciliation cannot distinguish "deleted"
 from "unchanged" without them.
 
+<!-- diagram: EntryLifecycle -->
+```mermaid
+stateDiagram-v2
+    [*] --> Absent
+    Absent --> Live : Create — the ack yields the id, the stream event yields the entry
+    Live --> Live : rename / reparent / write — each advances version
+    Live --> Tombstoned : delete
+    Tombstoned --> [*] : terminal — a restore is a fresh Create
+    note right of Tombstoned
+        Tombstones are load-bearing: reconciliation cannot tell deleted from unchanged without them
+    end note
+```
+<!-- /diagram -->
+
 ### 4.3 Draft lifecycle
 
 | State | Meaning | Transitions |
@@ -198,6 +453,22 @@ from "unchanged" without them.
 | **parked** | Intent + hash pointer persisted (always *before* the error is raised to the caller) | → recovering (user accepts, online) / dismissed (explicit) |
 | **recovering** | Replaying Create → Store → Write online | → evicted (success) / parked (failure — never silently dropped) |
 | **dismissed / evicted** | User chose, or recovery succeeded | terminal |
+
+<!-- diagram: DraftLifecycle -->
+```mermaid
+stateDiagram-v2
+    [*] --> Parked : intent + hash persisted before the error is raised
+    Parked --> Recovering : user accepts, online
+    Parked --> Dismissed : explicit dismissal
+    Recovering --> Parked : failure — never silently dropped
+    Recovering --> Evicted : Create, Store, Write replayed in order
+    Dismissed --> [*]
+    Evicted --> [*]
+    note right of Parked
+        No version, cannot conflict, never touches the stream — deliberately outside the sync machinery
+    end note
+```
+<!-- /diagram -->
 
 ### 4.4 Sync-loop connection states
 
@@ -211,6 +482,26 @@ from "unchanged" without them.
 Cold start, reconnect, and recovery are the *same* path: every disruption
 re-enters the loop at Initialize.
 
+<!-- diagram: ConnectionStates -->
+```mermaid
+stateDiagram-v2
+    [*] --> Cold : page load
+    Cold --> Cached : IndexedDB tree loads
+    Cold --> LiveConnection : Initialize succeeds
+    Cached --> LiveConnection : loop re-enters successfully
+    LiveConnection --> Cached : error event or watchdog expiry
+    LiveConnection --> Degraded : acks succeed but the stream will not establish
+    Degraded --> LiveConnection : stream recovers
+    Degraded --> Degraded : meanwhile the loop degrades into polling
+    note right of Cold
+        Cold start, reconnect and recovery are the same path — every disruption re-enters at Initialize
+    end note
+    note left of Degraded
+        A proxy is eating SSE: surface live updates unavailable
+    end note
+```
+<!-- /diagram -->
+
 ### 4.5 Yjs doc lifecycle (per text file, per client)
 
 closed → **attaching** (y-indexeddb loads first — instant local state — then
@@ -219,6 +510,28 @@ the room connects; CRDT merge reconciles) → **open** (refcounted) →
 the room until the server has everything) → **closed** (local state kept as
 warm cache) or **evicted** (file deleted: local state wiped, so stale CRDT
 state can never resurrect).
+
+<!-- diagram: YjsDocLifecycle -->
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Attaching : first reference
+    Attaching --> Open : y-indexeddb loads first, then the room connects
+    Open --> Open : references added and released (refcounted)
+    Open --> Flushing : last reference released with unsynced changes
+    Flushing --> Closed : the server has everything
+    Open --> Closed : last reference released, nothing pending
+    Open --> EvictedDoc : file deleted
+    Closed --> EvictedDoc : file deleted
+    EvictedDoc --> [*] : local state wiped — stale CRDT state can never resurrect
+    note right of Flushing
+        Detach never discards
+    end note
+    note left of Closed
+        Local state kept as a warm cache
+    end note
+```
+<!-- /diagram -->
 
 ---
 
@@ -237,9 +550,103 @@ with a cold cache, kind is honestly UNKNOWN and the UI says so.
 Live-editability is a client-side determination (text kind + within size
 budget + editor opened), not a server-side state.
 
+<!-- diagram: ContentModel -->
+```mermaid
+flowchart TD
+    CachedKind{"Cached kind for this id?"}
+    TextRoute("text — inline string")
+    BinaryRoute("binary — hash + size + mime")
+    UnknownKind{{"UNKNOWN — offline with a cold cache; say so in the UI"}}
+    LiveEditable{"text + within size budget + editor opened?"}
+    WriteAsText[/"Write(text)"/]
+    WriteAsBinary[/"Store bytes, then Write(binary)"/]
+    Invalidate(["stream write signal invalidates content AND kind"])
+    CachedKind -->|text| TextRoute
+    CachedKind -->|binary| BinaryRoute
+    CachedKind -->|cold cache, offline| UnknownKind
+    TextRoute --> LiveEditable
+    LiveEditable -->|yes — a client-side determination| YDoc
+    LiveEditable -->|no| WriteAsText
+    BinaryRoute --> WriteAsBinary
+    WriteAsText ==>|a write of the other kind IS the transition| Invalidate
+    WriteAsBinary ==> Invalidate
+    Invalidate -.->|the next Content fetch reveals the new kind| CachedKind
+```
+<!-- /diagram -->
+
 ---
 
 ## 6. Data flows
+
+<!-- diagram: RequestSurface -->
+```mermaid
+classDiagram
+    class CreateRequest {
+        +Entry.Type type
+        +string name
+        +string parent
+        +string transaction
+    }
+    class Versioned {
+        +string id
+        +string version
+    }
+    class DeleteRequest {
+        +string id
+        +string version
+        +string transaction
+    }
+    class RenameRequest {
+        +string id
+        +string version
+        +string name
+        +string transaction
+    }
+    class ReparentRequest {
+        +string id
+        +string version
+        +string parent
+        +string transaction
+    }
+    class ContentRequest {
+        +string id
+    }
+    class StoreRequest {
+        +string hash
+        +string mime
+        +number size
+    }
+    class WriteText {
+        +string content
+    }
+    class WriteBinary {
+        +string hash
+        +string mime
+        +number size
+    }
+    class InitializeRequest {
+        +string workspace
+        +OutboxRequest[] outbox
+    }
+    class InitializeResponse {
+        +string token
+        +Entry.Metadata[] entries
+        +Rejection[] rejected
+        +OutboxRequest[] applied
+    }
+    CreateRequest ..> Versioned : online-only, so there is no version to present
+    DeleteRequest *-- Versioned : CAS
+    RenameRequest *-- Versioned : CAS
+    ReparentRequest *-- Versioned : CAS
+    ContentRequest *-- Versioned : version optional = latest
+    WriteBinary --> StoreRequest : hash must be stored first
+    InitializeRequest --> DeleteRequest : outbox
+    InitializeRequest --> RenameRequest : outbox
+    InitializeRequest --> ReparentRequest : outbox
+    InitializeRequest --> WriteText : outbox
+    InitializeResponse --> InitializeRequest : adjudicates
+```
+<!-- /diagram -->
 
 ### 6.1 Read (`readFile`, called by the Pyodide bridge or a viewer)
 
@@ -250,6 +657,28 @@ budget + editor opened), not a server-side state.
 4. Fetch `Content` (deadline-bounded), populate cache, serve.
 5. Offline/failed → clean filesystem error through the bridge. Never a hang.
 
+<!-- diagram: ReadFlow -->
+```mermaid
+flowchart TD
+    PyodideBridge(["readFile — Pyodide bridge or viewer"])
+    YDoc{"1. live yjs doc open on this client?"}
+    ActiveBuffer{"2. active non-yjs editor buffer?"}
+    ContentCache{"3. content cache hit for this id?"}
+    ContentFetch{"4. fetch Content, deadline-bounded"}
+    Serve(["serve"])
+    FsError{{"5. clean filesystem error — never a hang"}}
+    PyodideBridge --> YDoc
+    YDoc -->|yes — the doc is the truth| Serve
+    YDoc -->|no| ActiveBuffer
+    ActiveBuffer -->|yes — visible or dirty this session| Serve
+    ActiveBuffer -->|no| ContentCache
+    ContentCache -->|hit| Serve
+    ContentCache -->|miss| ContentFetch
+    ContentFetch -->|ok — populate the cache| Serve
+    ContentFetch -->|offline or deadline exceeded| FsError
+```
+<!-- /diagram -->
+
 ### 6.2 Write (`writeFile`)
 
 Route on cached kind. Text + live doc → apply as a minimal yjs diff (one
@@ -258,6 +687,28 @@ edits merge instead of being clobbered. Otherwise → capture transaction to
 outbox → (binary: `Store` bytes by hash first) → submit `Write` with the
 entry's current version (CAS). Failure routes per §7.
 
+<!-- diagram: WriteFlow -->
+```mermaid
+flowchart TD
+    WriteCall(["writeFile"])
+    CachedKind{"route on the cached kind"}
+    YDoc{"text with a live doc open?"}
+    YjsDiff("minimal yjs diff — one delete and one insert around the common prefix and suffix")
+    Capture[("capture the transaction to the outbox, before sending")]
+    StoreBytes("binary — Store the bytes by hash first")
+    SubmitWrite[/"submit Write with the entry's current version (CAS)"/]
+    FailurePolicy{{"failure policy"}}
+    WriteCall --> CachedKind
+    CachedKind --> YDoc
+    YDoc -->|yes — concurrent human edits merge| YjsDiff
+    YDoc -->|no| Capture
+    Capture -->|binary| StoreBytes
+    Capture -->|text| SubmitWrite
+    StoreBytes -->|ack required first| SubmitWrite
+    SubmitWrite -.->|rejected| FailurePolicy
+```
+<!-- /diagram -->
+
 ### 6.3 Create (online-only)
 
 Send `Create` → ack returns the server-assigned id → dependent operations may
@@ -265,6 +716,31 @@ proceed against that id → the stream's `create` event populates the confirmed
 map. Lost ack: retry with the *same* transaction id (the server dedupes —
 this is the one place a duplicate would mint a duplicate entry). Offline: the
 call fails loudly and any content parks as a draft.
+
+<!-- diagram: CreateFlow -->
+```mermaid
+sequenceDiagram
+    actor Caller as Caller (UI or Pyodide)
+    participant ServerSide as Server
+    participant ConfirmedMap as Confirmed map
+    participant DraftsLot as Drafts
+    Note over Caller,DraftsLot: Create is online-only — it is never queued in the outbox, and neither is anything depending on an unacknowledged create
+    alt online
+        Caller->>+ServerSide: Create(transaction, type, name, parent?)
+        ServerSide-->>-Caller: ack { id } — identity, not state
+        Note right of Caller: Dependent operations may now proceed against that id
+        ServerSide-)ConfirmedMap: stream create event — the entry enters the map here, and only here
+        opt ack lost
+            Caller->>ServerSide: retry with the SAME transaction id
+            ServerSide-->>Caller: deduped — the one place a duplicate would mint a duplicate entry
+        end
+    else offline
+        Caller-xServerSide: Create
+        Caller->>DraftsLot: park the content as a draft
+        DraftsLot-->>Caller: parked — now fail loudly
+    end
+```
+<!-- /diagram -->
 
 ### 6.4 The sync loop
 
@@ -285,11 +761,60 @@ Never rely on EventSource auto-reconnect (it replays a spent token). Also
 re-enter on `visibilitychange`-to-visible and `online` — Initialize with an
 empty outbox is a cheap no-op.
 
+<!-- diagram: SyncLoopFlow -->
+```mermaid
+sequenceDiagram
+    participant SyncLoop as Sync loop
+    participant Outbox as Outbox
+    participant ServerSide as Server
+    participant ConfirmedMap as Confirmed map
+    participant EventStream as EventSource
+    Note over SyncLoop,EventStream: Cold start, reconnect and recovery are the same path
+    loop forever
+        SyncLoop->>Outbox: read pending transactions, in counter order
+        SyncLoop->>+ServerSide: POST Initialize(workspace, outbox)
+        Note right of ServerSide: ONE repeatable-read transaction: adjudicate the outbox in order, snapshot entries, read position, mint token
+        ServerSide-->>-SyncLoop: { token, entries, applied, rejected }
+        SyncLoop->>Outbox: evict applied and rejected
+        SyncLoop->>ConfirmedMap: replace-all from the snapshot — same server transaction, so no gap and no flicker
+        SyncLoop->>+EventStream: connect with the single-use token
+        EventStream->>ServerSide: claim the token atomically (DELETE ... RETURNING)
+        ServerSide-->>EventStream: replay events after token.position, then follow live
+        loop until error or watchdog expiry
+            EventStream-)ConfirmedMap: create / write / delete / name / parent
+            ServerSide-)EventStream: comment heartbeat, ~15s
+        end
+        EventStream-xSyncLoop: error, or watchdog expiry at ~45s
+        Note over SyncLoop,EventStream: close() — never rely on EventSource auto-reconnect: it replays a spent token
+        SyncLoop->>SyncLoop: jittered exponential backoff — reset only on an established stream
+    end
+    Note over SyncLoop,Outbox: Also re-enter on visibilitychange-to-visible and online — Initialize with an empty outbox is a cheap no-op
+```
+<!-- /diagram -->
+
 ### 6.5 Blob transfer
 
 Upload: `PUT /blobs/{hash}` with raw bytes; server verifies sha256; duplicate
 hash → immediate ack (retry-safe by construction). Download: raw bytes with
 `Content-Type` and `ETag: {version}` (or redirect to object storage).
+
+<!-- diagram: BlobTransfer -->
+```mermaid
+sequenceDiagram
+    participant ClientSide as Client
+    participant Blobs as Blob store
+    ClientSide->>+Blobs: PUT /blobs/{hash} — raw bytes as the body
+    alt hash already stored
+        Note right of Blobs: ack immediately, without reading the body — this is the retry story
+    else new bytes
+        Note right of Blobs: verify sha256(body) === hash
+    end
+    Blobs-->>-ClientSide: ack, or a typed failure: hash mismatch / too large
+    ClientSide->>Blobs: GET the bytes
+    Blobs-->>ClientSide: raw bytes with Content-Type: {mime} and ETag: {version}, or a redirect to object storage
+    Note over ClientSide,Blobs: Blobs are immutable: a cached blob by hash can never be wrong — only pointers go stale
+```
+<!-- /diagram -->
 
 ---
 
@@ -304,6 +829,29 @@ hash → immediate ack (retry-safe by construction). Download: raw bytes with
 | Move / rename / delete rejected | Evict; effective view snaps back automatically |
 | Store hash mismatch / too large | Surface; do not retry blindly (the bytes are wrong or oversized, not the network) |
 | Content fetch offline, cold cache | Clean filesystem error (deadline-bounded), never a wedge |
+
+<!-- diagram: FailurePolicyRouting -->
+```mermaid
+flowchart LR
+    Failure(["an operation fails"])
+    LiveEditorOpen{"content write conflict — is a live editor open?"}
+    IgnoreIt("ignore — the yjs doc is the truth")
+    DiffEditor("diff editor — fetch Content at the conflicting version for the other side")
+    ParkDraft("evict; park the content as a draft")
+    SnapBack("evict; the effective view snaps back — recomputation, not an undo operation")
+    SurfaceIt("surface; do not retry blindly — the bytes are wrong or oversized, not the network")
+    Failure -->|Write rejected| LiveEditorOpen
+    LiveEditorOpen -->|yes| IgnoreIt
+    LiveEditorOpen -->|no| DiffEditor
+    Failure -->|write to a deleted entry, or create offline| ParkDraft
+    Failure -->|move, rename or delete rejected| SnapBack
+    Failure -->|Store hash mismatch or too large| SurfaceIt
+    classDef quiet fill:#e6f4ea,stroke:#34a853,stroke-width:2px
+    classDef loud fill:#fce8e6,stroke:#d93025,stroke-width:2px
+    class IgnoreIt,SnapBack quiet
+    class DiffEditor,ParkDraft,SurfaceIt loud
+```
+<!-- /diagram -->
 
 ---
 
