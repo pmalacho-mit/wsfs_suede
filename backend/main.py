@@ -1,239 +1,449 @@
-"""FastAPI wiring, controller edition.
+"""HTTP wiring.
 
-Every WRITE (transactional requests and Initialize) flows through the
-workspace's controller: serialized per workspace, fan-out after commit.
-READS (Content, blobs) bypass the controller — MVCC handles them.
+Every WRITE -- transactional requests and Initialize alike -- flows through the
+workspace's controller: serialized per workspace, fanned out after commit.
+READS (Content, blobs) bypass it; MVCC handles them.
 
-Because Initialize runs inside the controller's serialization, it sees no
-concurrent same-workspace writes: its one-consistent-view guarantee comes
-from exclusion, not isolation levels (this replaced TODO's REPEATABLE READ
-plan).
-
-TOPOLOGY INVARIANT (ARCHITECTURE.md #11): exactly one process serves a
-workspace's writes and streams. Deploy with max one instance, or add sticky
-routing / a cross-process bus (TODO §3) before scaling out.
+TOPOLOGY INVARIANT: exactly one process serves a workspace's writes and
+streams. Deploy with a single worker; the controller's lease turns a second
+one into a loud 503 rather than silent divergence.
 """
+
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
+import os
 import secrets
-from contextlib import asynccontextmanager
-from datetime import timedelta, timezone
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import AsyncIterator, Iterator
+from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
-from sqlmodel import Session, SQLModel, create_engine, select
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import Engine, delete, func
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, SQLModel, select
 
-from . import service
-from .controller import ControllerRegistry
-from .models import (
-    BlobRecord,
-    ContentVersion,
-    Entry,
-    EntryVersion,
-    EventRow,
-    StreamToken,
-    Workspace,
-    utcnow,
+from wsfs_suede__sqlmodel_utils_suede.associations import now
+from wsfs_suede__sqlmodel_utils_suede.postgres.config import Config
+
+from . import db, service, stream, text
+from .blobs import Blobs
+from .contract import (
+    InitializeRequest,
+    InitializeResponse,
+    Queued,
+    Rejection,
+    Submitted,
+    TextContentResponse,
 )
+from .controller import ControllerRegistry, WorkspaceServedElsewhere
+from .models import BlobContent, Entry, StreamToken, User, Version, Workspace
+from .stream import Emitted
+from .tree import node as current_node
 
 TOKEN_TTL = timedelta(seconds=60)
 
+SHARDING_ACKNOWLEDGED = "WSFS_WORKSPACES_ARE_ROUTED_STICKILY"
 
-def create_app(db_url: str = "sqlite://", blob_dir: str | None = None,
-               heartbeat_seconds: float = 15.0,
-               grace_seconds: float = 30.0) -> FastAPI:
-    engine = create_engine(
-        db_url,
-        connect_args={"check_same_thread": False} if db_url.startswith("sqlite") else {},
-        poolclass=__import__("sqlalchemy.pool", fromlist=["StaticPool"]).StaticPool
-        if db_url == "sqlite://" else None,
+
+def refuse_to_split_the_brain() -> None:
+    """One process per workspace is a correctness requirement, and `--workers 4`
+    is one keystroke from silently violating it. Session affinity is not the
+    fix either: routing that may fail is, for correctness, routing that does
+    not exist. Anyone who has genuinely solved it says so out loud."""
+    workers = int(os.getenv("WEB_CONCURRENCY", "1"))
+    if workers > 1 and not os.getenv(SHARDING_ACKNOWLEDGED):
+        raise RuntimeError(
+            f"WEB_CONCURRENCY={workers} would serve one workspace from several"
+            f" processes. Run a single worker, or set {SHARDING_ACKNOWLEDGED}"
+            " once each workspace is pinned to exactly one of them."
+        )
+
+
+@dataclass(frozen=True)
+class Backend:
+    engine: Engine
+    registry: ControllerRegistry
+    blobs: Blobs
+    heartbeat_seconds: float
+    max_blob_bytes: int
+
+
+# -- identity ------------------------------------------------------------------
+
+
+def authenticate(session: Session, email: str) -> User:
+    """Stand-in for real authentication: the header names the user, and an
+    unknown one is enrolled. Replace with token verification before this is
+    reachable from anywhere but a trusted client."""
+    known = session.exec(select(User).where(User.email == email)).first()
+    if known is not None:
+        return known
+    session.add(User(email=email))
+    try:
+        session.flush()
+    except IntegrityError:  # two first requests from the same new user, racing
+        session.rollback()
+        return session.exec(select(User).where(User.email == email)).one()
+    return session.exec(select(User).where(User.email == email)).one()
+
+
+def require_workspace(session: Session, workspace_id: UUID) -> Workspace:
+    workspace = session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(404, "no such workspace")
+    return workspace
+
+
+# -- reconciliation --------------------------------------------------------------
+
+
+@dataclass
+class Reconciliation:
+    """Initialize's verdict on a presented outbox, in the order it was given."""
+
+    applied: list[str] = field(default_factory=list)
+    rejected: list[Rejection] = field(default_factory=list)
+    events: list[Emitted] = field(default_factory=list)
+
+    def record(self, transaction: str, outcome: service.Outcome) -> None:
+        self.events.extend(outcome.events)
+        if outcome.response.rejected:
+            self.rejected.append(
+                Rejection(
+                    transaction=transaction,
+                    reason=outcome.response.reason,
+                    version=outcome.response.version,
+                )
+            )
+        else:
+            self.applied.append(transaction)
+
+
+class Supersession:
+    """The versions one replay has itself replaced.
+
+    A client composes its outbox offline, against the versions it holds.
+    Applying the first item mints a version the client could not have known, so
+    every later item touching that entry presents a token that is now stale --
+    and an outbox must be able to say "rename it, then delete it".
+
+    So within a replay a superseded token reads as the token that replaced it.
+    An outbox cannot conflict with itself; only with somebody else, whose work
+    minted versions this map never saw.
+    """
+
+    def __init__(self) -> None:
+        self._replaced: dict[UUID, UUID] = {}
+
+    def current(self, presented: UUID) -> UUID:
+        while presented in self._replaced:
+            presented = self._replaced[presented]
+        return presented
+
+    def record(self, presented: UUID, outcome: service.Outcome) -> None:
+        for emitted in outcome.events:
+            self._replaced[presented] = emitted.event.version
+
+
+def reconcile(submission: service.Submission, outbox: list[Queued]) -> Reconciliation:
+    reconciliation = Reconciliation()
+    superseded = Supersession()
+    for queued in outbox:
+        request = queued.model_copy(update={"version": superseded.current(queued.version)})
+        outcome = service.adjudicate(submission, request)
+        superseded.record(queued.version, outcome)
+        reconciliation.record(queued.transaction, outcome)
+    return reconciliation
+
+
+def mint_token(session: Session, workspace: Workspace, user: User) -> str:
+    token = secrets.token_hex(16)
+    session.add(
+        StreamToken(
+            token=token,
+            user_id=user.id,
+            workspace_id=workspace.id,
+            position=workspace.position,
+            expires=now() + TOKEN_TTL,
+        )
     )
-    SQLModel.metadata.create_all(engine)
+    return token
 
-    registry = ControllerRegistry(grace_seconds=grace_seconds)
+
+def claim_token(session: Session, workspace_id: UUID, token: str) -> int:
+    """Single-use by construction: the claim and the lookup are one statement,
+    so two racing connects produce exactly one winner."""
+    claimed = session.execute(
+        delete(StreamToken)
+        .where(
+            StreamToken.token == token,
+            StreamToken.workspace_id == workspace_id,
+            StreamToken.expires > func.now(),
+        )
+        .returning(StreamToken.position)
+    ).first()
+    session.commit()
+    if claimed is None:
+        raise HTTPException(401, "invalid or spent token")
+    return claimed[0]
+
+
+# -- the two units of work every write is one of ------------------------------------
+
+
+@contextmanager
+def submitting(
+    backend: Backend, workspace_id: UUID, email: str
+) -> Iterator[service.Submission]:
+    with Session(backend.engine) as session:
+        require_workspace(session, workspace_id)
+        yield service.Submission(
+            session=session,
+            workspace=workspace_id,
+            user=authenticate(session, email),
+            blobs=backend.blobs,
+        )
+
+
+def initialize_within(
+    backend: Backend, workspace_id: UUID, email: str, body: InitializeRequest
+) -> tuple[InitializeResponse, list[Emitted]]:
+    """ONE database transaction: adjudicate the outbox in order, snapshot, and
+    mint the position-bound token together. Splitting it apart kills the
+    no-flicker and no-gap guarantees silently."""
+    with submitting(backend, workspace_id, email) as submission:
+        reconciliation = reconcile(submission, body.outbox)
+        response = _snapshot_and_token(submission, reconciliation)
+        submission.session.commit()
+        return response, reconciliation.events
+
+
+def _snapshot_and_token(
+    submission: service.Submission, reconciliation: Reconciliation
+) -> InitializeResponse:
+    session = submission.session
+    session.flush()
+    workspace = require_workspace(session, submission.workspace)
+    session.refresh(workspace)
+    return InitializeResponse(
+        token=mint_token(session, workspace, submission.user),
+        entries=service.snapshot(session, submission.workspace),
+        applied=reconciliation.applied,
+        rejected=reconciliation.rejected,
+    )
+
+
+def apply_within(
+    backend: Backend, workspace_id: UUID, email: str, request: Submitted
+) -> tuple[service.Outcome, list[Emitted]]:
+    with submitting(backend, workspace_id, email) as submission:
+        outcome = service.adjudicate(submission, request)
+        submission.session.commit()
+        return outcome, outcome.events
+
+
+# -- content ------------------------------------------------------------------------
+
+
+def resolve_version(
+    session: Session, workspace_id: UUID, entry_id: UUID, version_id: UUID | None
+) -> Version:
+    entry = session.get(Entry, entry_id)
+    if entry is None or entry.workspace_id != workspace_id:
+        raise HTTPException(404, "no such entry")
+    if version_id is None:
+        node = current_node(session, workspace_id, entry_id)
+        if node is None:
+            raise HTTPException(404, "entry has no versions")
+        return node.version
+    version = session.get(Version, version_id)
+    if version is None or version.entry_id != entry_id:
+        raise HTTPException(404, "no such version of this entry")
+    return version
+
+
+def content_response(session: Session, blobs: Blobs, version: Version) -> Response:
+    if version.text_content_id is not None:
+        body = TextContentResponse(content=text.at(session, version), version=version.id)
+        return JSONResponse(
+            body.model_dump(mode="json"), headers={"ETag": str(version.id)}
+        )
+    if version.blob_content_id is not None:
+        blob = session.get(BlobContent, version.blob_content_id)
+        assert blob is not None
+        return Response(
+            content=blobs.read(blob.hash),
+            media_type=blob.mime,
+            headers={"ETag": str(version.id), "X-Content-Hash": blob.hash},
+        )
+    raise HTTPException(404, "entry has no content at this version")
+
+
+def declared_size(request: Request) -> int | None:
+    """A Store sends Content-Length. Without one, the body's size is unknown
+    until it has been buffered -- which is the thing a limit exists to stop."""
+    declared = request.headers.get("content-length")
+    return None if declared is None else int(declared)
+
+
+# -- the stream -----------------------------------------------------------------------
+
+
+def sent(event_payload: dict) -> str:
+    return f"data: {json.dumps(event_payload)}\n\n"
+
+
+HEARTBEAT = ": hb\n\n"
+
+
+async def follow(
+    backend: Backend, workspace_id: UUID, after: int, queue: asyncio.Queue[Emitted]
+) -> AsyncIterator[str]:
+    """Replay what the token's position missed, then follow live.
+
+    Subscribing happens before the replay reads, so an event committed in
+    between lands in both -- and the position cursor drops the duplicate.
+    """
+    cursor = after
+    with Session(backend.engine) as session:
+        replay = stream.since(session, workspace_id, after)
+    for emitted in replay:
+        cursor = emitted.position
+        yield sent(emitted.event.payload())
+    while True:
+        try:
+            emitted = await asyncio.wait_for(queue.get(), backend.heartbeat_seconds)
+        except asyncio.TimeoutError:
+            yield HEARTBEAT
+            continue
+        if emitted.position <= cursor:
+            continue
+        cursor = emitted.position
+        yield sent(emitted.event.payload())
+
+
+# -- the app -------------------------------------------------------------------------
+
+
+def create_app(
+    *,
+    config: Config | None = None,
+    blob_root: str | Path = "/tmp/wsfs-blobs",
+    heartbeat_seconds: float = 15.0,
+    grace_seconds: float = 30.0,
+    max_blob_bytes: int = 64 * 1024 * 1024,
+    create_tables: bool = False,
+) -> FastAPI:
+    refuse_to_split_the_brain()
+    engine = db.engine(config)
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    backend = Backend(
+        engine=engine,
+        registry=ControllerRegistry(db.lease_engine(config), grace_seconds=grace_seconds),
+        blobs=Blobs(Path(blob_root)),
+        heartbeat_seconds=heartbeat_seconds,
+        max_blob_bytes=max_blob_bytes,
+    )
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
+    async def lifespan(_: FastAPI):
         yield
-        await registry.shutdown()
+        await backend.registry.shutdown()
+        engine.dispose()
 
     app = FastAPI(title="wsfs", lifespan=lifespan)
-    app.state.engine = engine
-    app.state.registry = registry
-    app.state.blob_dir = Path(blob_dir or "/tmp/wsfs-blobs")
-    app.state.blob_dir.mkdir(parents=True, exist_ok=True)
-    app.state.heartbeat = heartbeat_seconds
+    app.state.backend = backend
 
-    def get_session() -> AsyncIterator[Session]:  # type: ignore[misc]
+    def email(x_user_email: str = Header()) -> str:
+        return x_user_email
+
+    async def controller_for(workspace_id: UUID):
+        try:
+            return await backend.registry.visit(workspace_id)
+        except WorkspaceServedElsewhere as elsewhere:
+            raise HTTPException(503, str(elsewhere)) from elsewhere
+
+    @app.post("/workspaces", status_code=201)
+    def open_workspace() -> dict[str, str]:
         with Session(engine) as session:
-            yield session
-
-    def user(x_user: str = Header(default="anon")) -> str:
-        return x_user
-
-    def ensure_workspace(session: Session, ws: str) -> Workspace:
-        w = session.get(Workspace, ws)
-        if w is None:
-            w = Workspace(id=ws, position=0)
-            session.add(w)
-            session.flush()
-        return w
-
-    # -- Initialize: the reconciliation handshake, inside the controller ------
-
-    @app.post("/workspaces/{ws}/initialize")
-    async def initialize(ws: str, body: dict, u: str = Depends(user)) -> dict[str, Any]:
-        controller = await registry.visit(ws)
-
-        def fn() -> tuple[dict[str, Any], list[tuple[int, str]]]:
-            """ONE db transaction: adjudicate the outbox in order (unseen
-            transactions applied now), snapshot, mint the position-bound
-            token. Runs serialized by the controller, so the view is
-            consistent by exclusion. Splitting this apart silently kills the
-            no-flicker/no-gap guarantees (ARCHITECTURE.md invariant 2)."""
-            with Session(engine) as session:
-                workspace = ensure_workspace(session, ws)
-                applied: list[str] = []
-                rejected: list[dict[str, Any]] = []
-                events: list[tuple[int, str]] = []
-                for item in body.get("outbox", []):
-                    outcome = service.HANDLERS[item["op"]](session, ws, u, item)
-                    events.extend(outcome.events)
-                    if outcome.rejected:
-                        r: dict[str, Any] = {"transaction": item["transaction"],
-                                             "reason": outcome.reason}
-                        if outcome.conflict_version:
-                            r["version"] = outcome.conflict_version
-                        rejected.append(r)
-                    else:
-                        applied.append(item["transaction"])
-                session.flush()
-                entries = service.snapshot(session, ws)
-                session.refresh(workspace)
-                token = secrets.token_hex(16)
-                session.add(StreamToken(token=token, user=u, workspace_id=ws,
-                                        position=workspace.position,
-                                        expires=utcnow() + TOKEN_TTL))
-                session.commit()
-                return ({"token": token, "entries": entries,
-                         "applied": applied, "rejected": rejected}, events)
-
-        return await controller.submit(fn)
-
-    # -- Transactional requests ------------------------------------------------
-
-    @app.post("/workspaces/{ws}/tx/{op}")
-    async def transact(ws: str, op: str, body: dict,
-                       u: str = Depends(user)) -> dict[str, Any]:
-        if op not in service.HANDLERS:
-            raise HTTPException(404)
-        controller = await registry.visit(ws)
-
-        def fn() -> tuple[dict[str, Any], list[tuple[int, str]]]:
-            with Session(engine) as session:
-                ensure_workspace(session, ws)
-                outcome = service.HANDLERS[op](session, ws, u, body)
-                session.commit()
-                return outcome.to_response(), outcome.events
-
-        return await controller.submit(fn)
-
-    # -- Blobs: raw HTTP, hash-verified, idempotent — bypass the controller ----
-
-    @app.put("/blobs/{hash_}")
-    async def put_blob(hash_: str, request: Request,
-                       session: Session = Depends(get_session)) -> dict[str, Any]:
-        if session.get(BlobRecord, hash_) is not None:
-            return {"rejected": False}  # duplicate hash: ack without storing
-        body = await request.body()
-        if hashlib.sha256(body).hexdigest() != hash_:
-            return {"rejected": True, "reason": "hash mismatch"}
-        mime = request.headers.get("content-type", "application/octet-stream")
-        (app.state.blob_dir / hash_).write_bytes(body)
-        session.add(BlobRecord(hash=hash_, size=len(body), mime=mime))
-        session.commit()
-        return {"rejected": False}
-
-    # -- Content fetch: pure read — bypass the controller -----------------------
-
-    @app.get("/workspaces/{ws}/entries/{entry_id}/content")
-    def content(ws: str, entry_id: str, version: str | None = None,
-                session: Session = Depends(get_session)) -> Response:
-        entry = session.get(Entry, entry_id)
-        if entry is None or entry.workspace_id != ws:
-            raise HTTPException(404)
-        ev = session.get(EntryVersion, version or entry.version)
-        if ev is None or ev.entry_id != entry_id or ev.content_id is None:
-            raise HTTPException(404)
-        cv = session.get(ContentVersion, ev.content_id)
-        assert cv is not None
-        if cv.kind == "text":
-            return Response(
-                content=json.dumps({"type": "text", "content": cv.text,
-                                    "version": ev.id}),
-                media_type="application/json", headers={"ETag": ev.id})
-        data = (app.state.blob_dir / (cv.hash or "")).read_bytes()
-        return Response(content=data, media_type=cv.mime,
-                        headers={"ETag": ev.id, "X-Content-Hash": cv.hash or ""})
-
-    # -- The stream ---------------------------------------------------------------
-
-    @app.get("/workspaces/{ws}/stream")
-    async def stream(ws: str, token: str) -> StreamingResponse:
-        # Claim the token atomically: single-use enforcement + lookup.
-        with Session(engine) as session:
-            row = session.get(StreamToken, token)
-            expired = row is not None and (
-                row.expires.replace(tzinfo=row.expires.tzinfo or timezone.utc) < utcnow())
-            if row is None or row.workspace_id != ws or expired:
-                raise HTTPException(401, "invalid or spent token")
-            position = row.position
-            session.delete(row)
+            workspace = Workspace()
+            session.add(workspace)
             session.commit()
+            return {"id": str(workspace.id)}
 
-        # Subscribe FIRST (events during the replay land in the queue),
-        # replay EventRow after the token's position SECOND, then follow
-        # live. Overlap between the two is deduped by position.
-        q: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
-        await registry.acquire_stream(ws, q)
+    @app.post("/workspaces/{workspace_id}/initialize", response_model_exclude_none=True)
+    async def initialize(
+        workspace_id: UUID, body: InitializeRequest, user: str = Depends(email)
+    ) -> InitializeResponse:
+        controller = await controller_for(workspace_id)
+        return await controller.submit(
+            lambda: initialize_within(backend, workspace_id, user, body)
+        )
 
-        async def gen() -> AsyncIterator[str]:
-            cursor = position
+    @app.post("/workspaces/{workspace_id}/transactions")
+    async def transact(
+        workspace_id: UUID, body: Submitted = Body(), user: str = Depends(email)
+    ) -> Response:
+        controller = await controller_for(workspace_id)
+        outcome = await controller.submit(
+            lambda: apply_within(backend, workspace_id, user, body)
+        )
+        return JSONResponse(
+            outcome.response.model_dump(mode="json", exclude_none=True),
+            status_code=409 if outcome.response.rejected else 200,
+        )
+
+    @app.put("/blobs/{digest}")
+    async def store(digest: str, request: Request) -> Response:
+        if backend.blobs.holds(digest):
+            return JSONResponse({"rejected": False})  # idempotent by construction
+        size = declared_size(request)
+        if size is None or size > backend.max_blob_bytes:
+            return JSONResponse({"rejected": True, "reason": "too large"}, 413)
+        if not backend.blobs.store(digest, await request.body()):
+            return JSONResponse({"rejected": True, "reason": "hash mismatch"}, 409)
+        return JSONResponse({"rejected": False})
+
+    @app.get("/blobs/{digest}")
+    def fetch_blob(digest: str) -> Response:
+        if not backend.blobs.holds(digest):
+            raise HTTPException(404, "no such blob")
+        return Response(backend.blobs.read(digest), media_type="application/octet-stream")
+
+    @app.get("/workspaces/{workspace_id}/entries/{entry_id}/content")
+    def content(
+        workspace_id: UUID, entry_id: UUID, version: UUID | None = None
+    ) -> Response:
+        with Session(engine) as session:
+            return content_response(
+                session, backend.blobs, resolve_version(session, workspace_id, entry_id, version)
+            )
+
+    @app.get("/workspaces/{workspace_id}/stream")
+    async def events(workspace_id: UUID, token: str) -> StreamingResponse:
+        with Session(engine) as session:
+            after = claim_token(session, workspace_id, token)
+        queue: asyncio.Queue[Emitted] = asyncio.Queue()
+
+        async def subscribed() -> AsyncIterator[str]:
+            await backend.registry.acquire_stream(workspace_id, queue)
             try:
-                with Session(engine) as s:
-                    rows = s.exec(
-                        select(EventRow)
-                        .where(EventRow.workspace_id == ws,
-                               EventRow.position > cursor)
-                        .order_by(EventRow.position)
-                    ).all()
-                for r in rows:
-                    cursor = r.position
-                    yield f"data: {r.payload}\n\n"
-                while True:
-                    try:
-                        pos, payload = await asyncio.wait_for(
-                            q.get(), timeout=app.state.heartbeat)
-                    except asyncio.TimeoutError:
-                        yield ": hb\n\n"
-                        continue
-                    if pos <= cursor:
-                        continue  # replay/live overlap: already sent
-                    cursor = pos
-                    yield f"data: {payload}\n\n"
+                async for chunk in follow(backend, workspace_id, after, queue):
+                    yield chunk
             finally:
-                await registry.release_stream(ws, q)
+                await backend.registry.release_stream(workspace_id, queue)
 
-        return StreamingResponse(gen(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache",
-                                          "X-Accel-Buffering": "no"})
+        return StreamingResponse(
+            subscribed(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return app
-
-
-app = create_app()
