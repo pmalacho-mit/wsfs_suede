@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained automatically
+; by the git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:pmalacho-mit/sweater-vest-suede.git
+	branch = release
+	commit = 329d8c532dffed321b921116f044322f8d114d22
+	parent = 49a9f94eac3c6bcfd1be9016c9c8735ac537af4f
+	method = merge
+	cmdver = 0.4.9
