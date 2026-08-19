@@ -6,6 +6,12 @@ name: wsfs-sample
 #   WSFS_BACKEND=http://localhost:8099 npx vitest run performance
 #
 # ONE replica: one process per workspace is what the controller rests on.
+#
+# Neither service is on a network of its own, and that is deliberate. Compose
+# creates one per project, and the browser-test driver finds the devcontainer's
+# network by elimination -- a second bridge makes that ambiguous and the report
+# refuses to start before it runs anything. So the database publishes a port on
+# the default bridge and the backend shares the host's namespace to reach it.
 
 services:
   sample-backend:
@@ -14,14 +20,14 @@ services:
       dockerfile: ./tests/Dockerfile
     command: ["python", "-m", "wsfs_suede.samples.backend.serve"]
     working_dir: /app
+    network_mode: host
     environment:
-      DB_HOST: sample-db
+      DB_HOST: 127.0.0.1
       DB_USER: postgres
       DB_PASSWORD: postgres
       DB_NAME: postgres
       PYTHONPATH: /app
-    ports:
-      - "8099:8099"
+      PORT: 8099
     # Live source, so swapping revisions needs a restart rather than a rebuild
     # -- which is what makes a before/after measurement the same image. Point
     # WSFS_RELEASE at another checkout to serve it instead.
@@ -32,10 +38,12 @@ services:
     depends_on:
       sample-db:
         condition: service_healthy
-    networks: [sample-network]
 
   sample-db:
     image: postgres:16
+    network_mode: bridge
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -48,8 +56,3 @@ services:
       interval: 1s
       timeout: 2s
       retries: 30
-    networks: [sample-network]
-
-networks:
-  sample-network:
-    driver: bridge

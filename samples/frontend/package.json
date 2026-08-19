@@ -4,16 +4,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "../../sweater-vest-suede/templates/sveltekit/with-exclude-tests-routes-from-build.sh vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "sync": "svelte-kit sync"
+    "sync": "svelte-kit sync",
+    "report": "../../sweater-vest-suede/report.sh"
   },
   "devDependencies": {
+    "@storybook/test": "^8.6.15",
     "@sveltejs/adapter-auto": "^7.0.1",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "dockview-core": "^4.13.1",
+    "html-to-image": "^1.11.13",
     "svelte": "^5.56.9",
     "svelte-check": "^4.7.6",
     "typescript": "^6.0.3",

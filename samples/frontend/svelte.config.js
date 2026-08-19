@@ -20,6 +20,7 @@ export default {
       "wsfs_suede.dockview-svelte-suede": suede("wsfs_suede.dockview-svelte-suede"),
       "wsfs_suede.python-monaco-suede": suede("wsfs_suede.python-monaco-suede"),
       "wsfs_suede.python-web-kernel-suede": suede("wsfs_suede.python-web-kernel-suede"),
+      "sweater-vest-suede": suede("sweater-vest-suede"),
     },
   },
 };

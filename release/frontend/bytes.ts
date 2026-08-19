@@ -26,8 +26,26 @@ const hex = (buffer: ArrayBuffer) =>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 
-export const digestOf = async (content: Uint8Array | string): Promise<Digest> =>
-  hex(await crypto.subtle.digest("SHA-256", bytesOf(content) as BufferSource));
+/**
+ * The server verifies a blob against its own name, so this has to be sha256
+ * and it has to be the platform's.
+ *
+ * `crypto.subtle` exists only on a secure origin -- https, or localhost.
+ * Reached over plain http at an IP address, the whole namespace is simply
+ * absent, and the failure is otherwise a `TypeError` about reading `digest`
+ * of undefined, which says nothing about the cause. Anything that needs
+ * another kind of key can pass its own `Store`.
+ */
+export const digestOf = async (content: Uint8Array | string): Promise<Digest> => {
+  if (typeof crypto === "undefined" || crypto.subtle === undefined) {
+    throw new Error(
+      "crypto.subtle is unavailable, so content cannot be hashed. " +
+        "Browsers withhold it from insecure origins: serve this over https, " +
+        "or reach it on localhost.",
+    );
+  }
+  return hex(await crypto.subtle.digest("SHA-256", bytesOf(content) as BufferSource));
+};
 
 /**
  * The store the browser has before IndexedDB is wired up, and the one tests
