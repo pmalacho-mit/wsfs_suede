@@ -16,11 +16,21 @@
 import type { Digest, Store } from "./bytes";
 import { isWrite, type Id, type Submitted, type Transaction, type Write } from "./contract";
 import { session } from "./identity";
+import { mintedAt } from "./minted";
 
 export type Entry = {
   /** Which page load queued this. An older one never reached the screen. */
   session: string;
-  /** ISO 8601 with an explicit Z: sortable, unambiguous, and for humans. */
+  /**
+   * When the user acted, ISO 8601 with an explicit Z: sortable, unambiguous,
+   * and for humans.
+   *
+   * READ OUT OF THE REQUEST'S OWN ID rather than off the clock a second time.
+   * The transaction is a UUIDv7, so it already carries the millisecond it was
+   * minted -- and that is the number the server will derive when it records
+   * this. Two clock reads here would be two answers to one question, and the
+   * one this client showed would be the one nobody else could see.
+   */
   at: string;
   request: Submitted;
   /** Set when the request's payload lives in the byte store. */
@@ -37,7 +47,7 @@ export type Queue = {
 
 const stamped = (request: Submitted, content?: Digest): Entry => ({
   session,
-  at: new Date().toISOString(),
+  at: (mintedAt(request.transaction) ?? new Date()).toISOString(),
   request,
   ...(content === undefined ? {} : { content }),
 });

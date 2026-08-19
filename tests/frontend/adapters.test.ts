@@ -5,8 +5,12 @@ import { filesystem } from "../../release/frontend/adapters/kernel";
 import { mirror } from "../../release/frontend/adapters/tree";
 import type { Metadata } from "../../release/frontend/contract";
 import { mint } from "../../release/frontend/identity";
+import { mintedAt } from "../../release/frontend/minted";
 import * as paths from "../../release/frontend/paths";
 import type { Workspace } from "../../release/frontend/workspace";
+
+/** A server-accepted moment. These fixtures are about what changes, not when. */
+const SETTLED = new Date("2026-01-01T00:00:00Z").toISOString();
 
 const entry = (name: string, over: Partial<Metadata> = {}): Metadata => {
   const born = mint();
@@ -19,6 +23,7 @@ const entry = (name: string, over: Partial<Metadata> = {}): Metadata => {
     parent_version: born,
     deleted_version: born,
     content_version: born,
+    modified: { minted: mintedAt(born)!.toISOString(), accepted: SETTLED },
     ...over,
   };
 };

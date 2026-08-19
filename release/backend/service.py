@@ -29,7 +29,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from itertools import count, islice
-from uuid import uuid4
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, final
 from uuid import UUID
@@ -38,7 +37,7 @@ from sqlalchemy import literal, union_all
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import stream
+from . import minted, stream
 from .blobs import Blobs
 from .contract import (
     Acknowledged,
@@ -637,8 +636,18 @@ async def _announcing(
 
 
 def _by(user: UUID, request: Transacted) -> dict[str, Any]:
-    """A transaction's own id is the primary key of every row it applies."""
-    return {"id": request.transaction, "user_id": user}
+    """A transaction's own id is the primary key of every row it applies.
+
+    Which also carries when the client acted: the id is a UUIDv7, so the
+    millisecond it was minted rides along in the key. What the key cannot hold
+    is which clock the client was reading, so the offset is stamped beside it.
+    The server's own clock arrives by default, from `WithTime`.
+    """
+    return {
+        "id": request.transaction,
+        "user_id": user,
+        "utc_offset": request.offset,
+    }
 
 
 # -- application: what an accepted request appends ------------------------------------
@@ -740,9 +749,15 @@ async def _settled(submission: Submission, entry_id: UUID) -> Applied | None:
 async def _issued_by_the_controller(submission: Submission, node: Node) -> NameRow:
     """The one transaction no client minted. Its id is the controller's, and
     it reaches every client as an ordinary name event. Attributed to whoever
-    is presenting the work, because their work is what needed settling."""
+    is presenting the work, because their work is what needed settling.
+
+    A v7 like everyone else's, so this transaction answers "when did it happen"
+    out of its id the way every other one does. No offset: the only clock that
+    saw this is this process's, and that is what `WithTime` already records --
+    claiming a client's zone for work no client asked for would be a fiction.
+    """
     return submission.models.name(
-        id=uuid4(),
+        id=minted.mint(),
         entry_id=node.id,
         user_id=submission.user,
         name=await _available_name(submission, node),

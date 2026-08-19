@@ -23,6 +23,7 @@ from sqlmodel import Session, SQLModel, create_engine
 # the wsfs schema against them, which is what registers everything.
 from app import create_sample_app
 from wsfs_suede.release.backend.blobs import digest_of
+from wsfs_suede.release.backend.minted import mint
 from sqlmodel.ext.asyncio.session import AsyncSession
 from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.postgres.config import (
     ConfigFromEnvironment,
@@ -131,6 +132,18 @@ Body = dict[str, Any] | None
 
 
 def new_id() -> str:
+    """A v7, because that is what the shipped client mints.
+
+    Which matters beyond realism: a transaction's client-side time is READ OUT
+    OF ITS ID, so a suite minting v4s would exercise every path with that half
+    of the record permanently absent. What a v4 does there is worth testing on
+    purpose (`timing.py`), not by accident everywhere.
+    """
+    return str(mint())
+
+
+def minted_elsewhere() -> str:
+    """An id from a client that did not follow the recommendation."""
     return str(uuid4())
 
 

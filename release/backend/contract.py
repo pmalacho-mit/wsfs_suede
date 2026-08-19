@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import enum
 import unicodedata
+from datetime import datetime
 from typing import Annotated, Any, Literal, final
 from uuid import UUID
 
@@ -67,13 +68,43 @@ EntryName = Annotated[str, AfterValidator(to_nfc)]
 # guessed at.
 
 
+FURTHEST_FROM_UTC = 24 * 60 - 1
+"""Minutes. Real zones reach UTC-12:00 and UTC+14:00; this only refuses the
+values that cannot be a clock at all."""
+
+Offset = Annotated[int, Field(ge=-FURTHEST_FROM_UTC, le=FURTHEST_FROM_UTC)]
+"""Minutes EAST of UTC, as `-new Date().getTimezoneOffset()` reports them:
+Berlin in summer is +120, Los Angeles is -420."""
+
+
 class Transacted(BaseModel):
     transaction: UUID
     """Client-minted. Becomes the primary key of the row this applies, and the
-    CAS token the next mutation of that property must present."""
+    CAS token the next mutation of that property must present.
+
+    A v7 also says WHEN the client minted it, which is when the user acted --
+    so the client-side time of every transaction is already here, and
+    `minted.minted_at` reads it back out. See that module for what it is worth
+    and what it is not.
+    """
 
     id: UUID
     """The entry. Client-minted too, so a create needs no round trip."""
+
+    offset: Offset | None = None
+    """The client's offset from UTC when it minted this, in minutes.
+
+    ON THE TRANSACTION, not on the connection, and that is the whole point. An
+    outbox composed over a week offline is replayed in ONE Initialize, and the
+    client that replays it may be in a different zone from the client that
+    filled it -- somebody works in Los Angeles on Monday and lands in London on
+    Tuesday. A per-connection offset would stamp Tuesday's zone onto Monday's
+    work; a per-transaction one keeps each item's own.
+
+    Null means the client said nothing, which is all a server can conclude: the
+    id's instant is still known, so the transaction can be shown in the
+    READER's zone, just not in the one it was made in.
+    """
 
 
 class TextBody(BaseModel):
@@ -254,6 +285,36 @@ class Refusal:
 # -- entries and events -------------------------------------------------------
 
 
+class Occurrence(BaseModel):
+    """When one transaction happened, in both clocks that saw it.
+
+    Two clocks because they answer different questions and disagree for honest
+    reasons. `minted` is the client's, and it is when the USER acted -- which,
+    after a week offline, is the only one that means anything to them. `accepted`
+    is this server's, and it is when the change entered the workspace and became
+    something other clients could see. An offline session makes the gap between
+    them days wide, and neither number is the other's approximation.
+    """
+
+    minted: datetime | None = None
+    """UTC, read out of the transaction's UUIDv7 -- see `minted.minted_at`. Null
+    when the id is not a v7, which is a client saying nothing about when it
+    acted. Client-reported either way, so it is only as good as their clock."""
+
+    offset: Offset | None = None
+    """The client's minutes east of UTC as it acted, so `minted` can be shown on
+    the clock they were actually looking at. Null when they did not say."""
+
+    accepted: datetime | None = None
+    """UTC, from this server's clock, at the moment the transaction was applied.
+    The trustworthy half of the pair, and the one to reconcile against when a
+    client's clock is plainly wrong.
+
+    Null in exactly one place, and never from the server: a client's own
+    optimistic overlay, describing work it has queued and nobody has accepted
+    yet. A row in the database was accepted by definition."""
+
+
 class Metadata(BaseModel):
     """Pure namespace, plus the four tokens the next mutation must present.
 
@@ -270,6 +331,15 @@ class Metadata(BaseModel):
     parent_version: UUID
     deleted_version: UUID
     content_version: UUID | None = None
+    modified: Occurrence
+    """When the newest of the four rows above landed -- the entry's mtime.
+
+    Only the newest, and deliberately: every token here IS a transaction id, so
+    a client that wants the client-side time of any ONE property reads it out of
+    that token itself, with nothing sent. What it cannot derive is the offset
+    the client held and the moment this server accepted the work, so that is
+    what this carries.
+    """
 
 
 class Moved(BaseModel):
@@ -305,6 +375,10 @@ class StreamEvent(BaseModel):
     transaction: UUID
     value: Metadata | Moved | str | UUID | bool | None = None
     user: UUID | None = None
+    at: Occurrence
+    """When the transaction this announces happened. A create's `value` carries
+    the same pair as the entry's `modified`, because at a birth they are the
+    same transaction."""
 
     def payload(self) -> dict[str, Any]:
         wire = self.model_dump(mode="json", exclude_none=True, exclude={"value"})

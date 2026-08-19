@@ -21,6 +21,45 @@ export namespace Entry {
   export type Version = string;
 
   /**
+   * WHEN a transaction happened, in both clocks that saw it.
+   *
+   * Two clocks, because they answer different questions and an offline session
+   * puts days between them. `minted` is the client's, and it is when the USER
+   * acted; `accepted` is the server's, and it is when the change entered the
+   * workspace and other clients could see it. Neither approximates the other,
+   * and the server's is the one to trust when a client's clock is wrong.
+   *
+   * `minted` IS NOT SENT. A transaction id is a UUIDv7 minted at the moment
+   * the user acts, and a v7 carries its own millisecond, so the server reads
+   * the client's time back out of the primary key rather than being told it
+   * twice. Every version token in Metadata is such an id, so the client-side
+   * time of any single property change is derivable client-side with nothing
+   * on the wire at all.
+   *
+   * `offset` is the one thing that cannot be derived, and it is why this type
+   * exists. A v7's timestamp is an INSTANT — the same number in Cupertino and
+   * in Berlin — so it says nothing about the clock its user was reading.
+   * Someone who works in Los Angeles on Monday and London on Tuesday mints ids
+   * that are indistinguishable, and rendering Monday's in Tuesday's zone moves
+   * it eight hours. So the offset rides on each REQUEST (see Transactioned)
+   * and comes back here.
+   */
+  export type Occurrence = {
+    /** UTC, from the transaction's v7. Absent if the id was not one. */
+    minted?: string;
+    /** Minutes EAST of UTC on the client as it acted. Absent if unstated. */
+    offset?: number;
+    /**
+     * UTC, from the server, as it applied the transaction.
+     *
+     * Null in exactly one place, and never from the server: a client's own
+     * optimistic overlay, describing work it has queued and nobody has
+     * accepted yet. A row on the server was accepted by definition.
+     */
+    accepted: string | null;
+  };
+
+  /**
    * Deliberately PURE NAMESPACE: no content descriptor (kind/mime/size/hash).
    * The content plane is revealed by Content fetches and cached client-side
    * (see Client.Content). Stream "write" events are pure invalidation signals.
@@ -61,6 +100,15 @@ export namespace Entry {
     deleted_version: Version;
     /** Absent for an entry that has never been written. */
     content_version?: Version;
+
+    /**
+     * When the newest of the four transactions above landed — the mtime.
+     *
+     * Only the newest, and only what cannot be derived: the four tokens are
+     * themselves v7 transaction ids, so a client wanting the client-side time
+     * of one particular property reads it out of that token.
+     */
+    modified: Occurrence;
   }>;
 
   /**
@@ -69,6 +117,14 @@ export namespace Entry {
    * (`crypto.randomUUID()`, never `Math.random()`). UUIDv7 is preferred: same
    * collision safety, better index locality on the server's append-only
    * tables, at the cost of leaking creation time (already visible here).
+   *
+   * That leak is now load-bearing rather than a cost. A v7 carries the
+   * millisecond it was minted, and a transaction is minted the moment the user
+   * acts, so "when did this happen on the client" is already in the id and is
+   * never sent as a field of its own — see Entry.Occurrence. A client that
+   * mints ids some other way is still served; its work simply says nothing
+   * about when it was done, which is the honest answer rather than the
+   * server's arrival time wearing the user's name.
    *
    * Mint once and persist. A retry MUST reuse the same id — that is what
    * makes a retry free rather than a duplicate.
@@ -95,6 +151,20 @@ export namespace Events {
     transaction: string;
     /** The entry this request is about. */
     id: string;
+
+    /**
+     * The client's minutes EAST of UTC when it minted `transaction` — as
+     * `-new Date().getTimezoneOffset()` reports them. Optional; absent means
+     * the client said nothing, and its work is then shown in the reader's zone
+     * rather than in a zone the server invented.
+     *
+     * ON THE TRANSACTION, NOT ON THE CONNECTION, and that is the whole point.
+     * An outbox filled over a week offline is replayed in ONE Initialize by a
+     * client that may by then be somewhere else; a per-connection offset would
+     * stamp the arrival zone onto work done in another one. See
+     * Entry.Occurrence for why an offset is needed at all.
+     */
+    offset?: number;
   }>;
 
   export type Reasoned<Reason extends string, Obj = {}> = Utility.Expand<Obj & {
@@ -541,6 +611,10 @@ export namespace Events {
       export type Response = Utility.Expand<Traceable & {
         id: string;
         transaction: string;
+        /** When the transaction this announces happened. A create's `value`
+         *  carries the same pair as the entry's `modified`, because at a birth
+         *  they are one transaction. */
+        at: Entry.Occurrence;
       } & (
         | Utility.Typed<"create", Valued<Entry.Metadata>>
         | Utility.Typed<"write">
