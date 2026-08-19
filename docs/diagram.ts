@@ -800,7 +800,7 @@ export type BlobTransfer = Sequence.Diagram<
     Sequence.Message<
       ClientSide,
       Blobs,
-      "PUT /blobs/{hash} — raw bytes as the body",
+      "PUT /workspaces/{workspace}/blobs/{hash} — raw bytes as the body",
       "activate"
     >,
     Sequence.Alternative<

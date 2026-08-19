@@ -30,7 +30,7 @@ from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, R
 from fastapi import Path as APIPath
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import delete, func
-from sqlmodel import col
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
@@ -196,18 +196,32 @@ async def reconcile(
     return reconciliation
 
 
-def mint_token(
+async def mint_token(
     backend: Backend, session: AsyncSession, submission: service.Submission
 ) -> str:
     """Bound to the position this snapshot was taken at, so the stream that
-    claims it replays exactly the changes the snapshot does not show."""
+    claims it replays exactly the changes the snapshot does not show.
+
+    Read out of the LOGS, in this transaction, rather than off the
+    controller's counter. The counter is the next number to hand out and it
+    moves before a submission commits, so a submission that rolls back leaves
+    it above anything committed. That costs the stream nothing -- positions
+    have to increase, not to be dense -- but a token is a promise about what
+    has already happened, and one bound to a number no row carries would tell
+    a stream to skip the row that eventually takes it.
+
+    The rows this transaction has flushed are visible to this session, so this
+    is exactly what the snapshot alongside it shows: no gap, no repeat.
+    """
     token = secrets.token_hex(16)
     session.add(
         backend.models.token(
             token=token,
             user_id=submission.user,
             workspace_id=submission.workspace,
-            position=submission.positions.at,
+            position=await backend.schema.stream.high_water(
+                session, submission.workspace
+            ),
             expires=now() + TOKEN_TTL,
         )
     )
@@ -284,7 +298,7 @@ async def _snapshot_and_token(
     session = submission.session
     await session.flush()
     return InitializeResponse(
-        token=mint_token(backend, session, submission),
+        token=await mint_token(backend, session, submission),
         entries=await service.snapshot(backend.schema, session, submission.workspace),
         applied=reconciliation.applied,
         rejected=reconciliation.rejected,
@@ -362,6 +376,24 @@ async def content_response(
         media_type=held.mime,
         headers={"ETag": str(held.id), "X-Content-Hash": held.hash},
     )
+
+
+async def referenced_by(
+    backend: Backend, session: AsyncSession, workspace_id: UUID, digest: str
+) -> bool:
+    """Whether any write in this workspace points at these bytes.
+
+    The blob store is shared across the deployment, so this -- not the store
+    -- is what scopes a read to a workspace. `hash` is indexed, and the join
+    to entries is what makes the answer this workspace's rather than anyone's.
+    """
+    written, entry = backend.models.blob_content, backend.models.entry
+    referencing = (
+        select(written)
+        .join(entry, col(entry.id) == col(written.entry_id))
+        .where(col(entry.workspace_id) == workspace_id, col(written.hash) == digest)
+    )
+    return (await session.exec(referencing)).first() is not None
 
 
 def declared_size(request: Request) -> int | None:
@@ -467,8 +499,18 @@ def create_router(
             status_code=409 if outcome.response.rejected else 200,
         )
 
-    @router.put("/blobs/{digest}")
-    async def store(digest: str, request: Request) -> Response:
+    @router.put("/workspaces/{workspace_id}/blobs/{digest}")
+    async def store(
+        workspace_id: Annotated[UUID, APIPath()],
+        digest: str,
+        request: Request,
+        _: UUID = Depends(authorize),
+    ) -> Response:
+        """Under a workspace because that is the only question a host's
+        `authorize` can answer. The bytes themselves are stored once for the
+        deployment and named by their hash -- two workspaces holding the same
+        file hold one copy -- but somebody who may reach no workspace at all
+        may not fill the deployment's disk either."""
         if await backend.blobs.holds(digest):
             return JSONResponse({"rejected": False})  # idempotent by construction
         size = declared_size(request)
@@ -478,9 +520,22 @@ def create_router(
             return JSONResponse({"rejected": True, "reason": "hash mismatch"}, 409)
         return JSONResponse({"rejected": False})
 
-    @router.get("/blobs/{digest}")
-    async def fetch_blob(digest: str) -> Response:
-        if not await backend.blobs.holds(digest):
+    @router.get("/workspaces/{workspace_id}/blobs/{digest}")
+    async def fetch_blob(
+        workspace_id: Annotated[UUID, APIPath()],
+        digest: str,
+        _: UUID = Depends(authorize),
+    ) -> Response:
+        """Served only to a workspace that WRITES these bytes somewhere.
+
+        A hash is not a secret: it travels in `X-Content-Hash`, in every
+        `BinaryBody`, and through any client that ever held the file. So
+        knowing one buys nothing here -- the caller has to be someone the host
+        lets into a workspace whose own content log names it.
+        """
+        async with database.session() as session:
+            referenced = await referenced_by(backend, session, workspace_id, digest)
+        if not (referenced and await backend.blobs.holds(digest)):
             raise HTTPException(404, "no such blob")
         return Response(
             await backend.blobs.read(digest), media_type="application/octet-stream"

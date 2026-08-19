@@ -14,8 +14,10 @@ in the caller's single database transaction. The rows ARE the event log, so
 there is nothing that could drift from them.
 
 Dedup therefore only has to protect what was applied: finding a transaction id
-in its table means the change already happened, and the recorded answer is
-served instead of a second application.
+in the logs means the change already happened, and the recorded answer is
+served instead of a second application. Which logs hold it says WHICH change,
+so an id reused for a different operation is refused rather than acknowledged
+into silence.
 
 Every CAS token is per-property. A write does not invalidate a concurrent
 rename, because the rename presents the name's token and the write moved the
@@ -64,6 +66,11 @@ from .tree import Lineage, Node, Tree
 
 MOST_NESTING = 64
 MOST_SIBLINGS = 10_000
+MOST_NUMBERED_CANDIDATES = 98
+"""How far `notes (2).md`, `notes (3).md`... is followed before a settling
+create takes an entry-id suffix instead. Every candidate is one query, and
+past a hundred collisions on one name the tidy answer has stopped being
+worth what it costs to find."""
 LONGEST_NAME_IN_BYTES = 255
 UNNAMEABLE = re.compile(r"[/\\\x00-\x1f\x7f]")
 
@@ -128,6 +135,19 @@ class Submission:
     positions: stream.Positions
     deferrals: Deferrals = field(default_factory=Deferrals)
 
+    looked_up: dict[UUID, Node | None] = field(default_factory=dict)
+    """Entries this submission has already read, and the ones it found absent.
+
+    A unit of work reads the same entries over and over: every create walks
+    its whole lineage to the root, and a thousand queued creates into one
+    folder walk the same twenty ancestors a thousand times. Nothing else can
+    write this workspace while the submission holds its controller, so the
+    only thing that can make a remembered entry wrong is this submission
+    itself -- and everything it applies goes through `approve`, which forgets
+    the entries it stamped. Absence is remembered on the same terms: a folder
+    that does not exist yet is created here or not at all.
+    """
+
     @property
     def models(self) -> Models:
         return self.schema.models
@@ -141,10 +161,20 @@ class Submission:
         return self.schema.stream
 
     async def node(self, entry_id: UUID) -> Node | None:
-        return await self.schema.tree.node(self.session, self.workspace, entry_id)
+        if entry_id not in self.looked_up:
+            self.looked_up[entry_id] = await self.schema.tree.node(
+                self.session, self.workspace, entry_id
+            )
+        return self.looked_up[entry_id]
+
+    def changed(self, entry_id: UUID) -> None:
+        """Forget an entry, because this submission just moved it."""
+        _ = self.looked_up.pop(entry_id, None)
 
     async def lineage(self, entry_id: UUID) -> Lineage:
-        return await self.schema.tree.lineage(self.session, self.workspace, entry_id)
+        return await self.schema.tree.lineage(
+            self.session, self.workspace, entry_id, look_up=self.node
+        )
 
     async def claimed_first(self, node: Node) -> bool:
         return await self.schema.tree.claimed_first(
@@ -168,7 +198,7 @@ class Submission:
 
     async def descends_from(self, entry_id: UUID, ancestor_id: UUID) -> bool:
         return await self.schema.tree.descends_from(
-            self.session, self.workspace, entry_id, ancestor_id
+            self.session, self.workspace, entry_id, ancestor_id, look_up=self.node
         )
 
 
@@ -233,25 +263,93 @@ def _refuses_name(name: str) -> str | None:
     return None
 
 
-async def _reachable(submission: Submission, parent: UUID | None) -> bool:
-    """A folder still reachable from the root, or the root itself."""
+@final
+@dataclass(frozen=True)
+class Unwelcoming:
+    """The three ways a folder can fail to take an entry, in the words the
+    site asking uses for it. A create is going to a `parent`; a move is going
+    to a `destination`; the fault is the same either way and the client needs
+    to hear which of its own words it applies to."""
+
+    unknown: str
+    not_a_folder: str
+    deleted: str
+
+
+AS_PARENT = Unwelcoming(
+    unknown=Refusal.PARENT_UNKNOWN,
+    not_a_folder=Refusal.PARENT_NOT_A_FOLDER,
+    deleted=Refusal.PARENT_DELETED,
+)
+
+AS_DESTINATION = Unwelcoming(
+    unknown=Refusal.DESTINATION_UNKNOWN,
+    not_a_folder=Refusal.DESTINATION_NOT_A_FOLDER,
+    deleted=Refusal.DESTINATION_DELETED,
+)
+
+
+@final
+@dataclass(frozen=True)
+class Destination:
+    """Where an entry is being put, walked once.
+
+    Judging a placement asks the same walk three questions -- is the folder
+    there, is it still reachable, how deep does that put the child -- and the
+    walk is the expensive part. It happens here, and the answers are read off
+    this.
+    """
+
+    parent: UUID | None
+    holder: Node | None
+    """`None` at the workspace root, and also when the id names nothing."""
+    lineage: Lineage | None
+
+    @property
+    def child_depth(self) -> int:
+        """How deep an entry placed here would sit."""
+        return 0 if self.lineage is None else self.lineage.depth + 1
+
+
+async def _destination(submission: Submission, parent: UUID | None) -> Destination:
     if parent is None:
-        return True
+        return Destination(parent=None, holder=None, lineage=None)
     holder = await submission.node(parent)
-    if holder is None or not holder.is_folder or holder.deleted:
-        return False
-    return not (await submission.lineage(holder.id)).interrupted
+    return Destination(
+        parent=parent,
+        holder=holder,
+        lineage=None if holder is None else await submission.lineage(holder.id),
+    )
 
 
-async def _overfull(submission: Submission, parent: UUID | None) -> str | None:
+def _unwelcoming(where: Destination, called: Unwelcoming) -> str | None:
+    """A folder that cannot take an entry, and why.
+
+    "Never existed" and "was deleted" are kept apart deliberately. Under
+    server-minted ids a parent that does not exist was impossible; a client
+    that mints its own can name one that was never created -- which is
+    precisely what happens to every nested create queued behind a refused
+    one -- and telling that client its folder "was deleted" is a lie about
+    something it never made.
+    """
+    if where.parent is None:
+        return None  # the root takes everything
+    if where.holder is None:
+        return called.unknown
+    if not where.holder.is_folder:
+        return called.not_a_folder
+    assert where.lineage is not None
+    if where.holder.deleted or where.lineage.interrupted:
+        return called.deleted
+    return None
+
+
+async def _overfull(submission: Submission, where: Destination) -> str | None:
     """A client that mints its own ids can mint unbounded ones offline, so the
     shape of the tree is bounded here rather than by how much a client sends."""
-    if (
-        parent is not None
-        and (await submission.lineage(parent)).depth + 1 >= MOST_NESTING
-    ):
+    if where.child_depth >= MOST_NESTING:
         return Refusal.TOO_DEEP
-    if await submission.children(parent) >= MOST_SIBLINGS:
+    if await submission.children(where.parent) >= MOST_SIBLINGS:
         return Refusal.FOLDER_FULL
     return None
 
@@ -261,9 +359,10 @@ async def _refuses_create(submission: Submission, request: Create) -> str | None
         return unnameable
     if await _bytes_are_missing(submission, request.content):
         return Refusal.BYTES_NEVER_STORED
-    if not await _reachable(submission, request.parent):
-        return Refusal.PARENT_DELETED
-    return await _overfull(submission, request.parent)
+    where = await _destination(submission, request.parent)
+    if (unwelcoming := _unwelcoming(where, AS_PARENT)) is not None:
+        return unwelcoming
+    return await _overfull(submission, where)
 
 
 async def _bytes_are_missing(submission: Submission, body: Body | None) -> bool:
@@ -417,11 +516,12 @@ async def _refuses_destination(
     """Everything about where an entry is going, in the order a reader would
     ask it: does it exist, would it swallow itself, is there room, is the name
     free."""
-    if not await _reachable(submission, parent):
-        return Refusal.DESTINATION_DELETED
+    where = await _destination(submission, parent)
+    if (unwelcoming := _unwelcoming(where, AS_DESTINATION)) is not None:
+        return unwelcoming
     if await _would_detach_the_subtree(submission, node, parent):
         return Refusal.DESTINATION_INSIDE_ENTRY
-    if (full := await _overfull(submission, parent)) is not None:
+    if (full := await _overfull(submission, where)) is not None:
         return full
     if await submission.name_taken(parent=parent, name=name, excluding=node.id):
         return Refusal.NAME_TAKEN
@@ -495,7 +595,10 @@ async def _conflicting_version(
 # -- the choke point ---------------------------------------------------------------
 
 
-async def approve(submission: Submission, *applied: TransactionRow) -> int:
+Applied = tuple[TransactionRow, ...]
+
+
+async def approve(submission: Submission, *applied: TransactionRow) -> Applied:
     """Take the next position, stamp it onto the rows, append them.
 
     The position comes from the controller that owns this workspace, in
@@ -503,26 +606,31 @@ async def approve(submission: Submission, *applied: TransactionRow) -> int:
 
     Rows sharing a position are one transaction, and only a create writes more
     than one -- which is how the stream tells a birth from a change.
+
+    The stamped rows come back rather than the number, because the rows ARE
+    the event: announcing what just happened by re-reading five logs at that
+    position would be asking the database to repeat what we just told it.
     """
     position = submission.positions.take()
     for row in applied:
         row.position = position
+        submission.changed(row.entry_id)
     submission.session.add_all(applied)
     await submission.session.flush()
-    return position
+    return applied
 
 
-async def _acknowledge(submission: Submission, position: int) -> Outcome:
-    return Outcome(Acknowledged(), await _announcing(submission, position))
+async def _acknowledge(submission: Submission, applied: Applied) -> Outcome:
+    return Outcome(Acknowledged(), await _announcing(submission, applied))
 
 
 async def _announcing(
-    submission: Submission, *positions: int | None
+    submission: Submission, *transactions: Applied | None
 ) -> list[stream.Emitted]:
     return [
-        await submission.stream.at(submission.session, submission.workspace, position)
-        for position in positions
-        if position is not None
+        await submission.stream.emitted(submission.session, list(applied))
+        for applied in transactions
+        if applied
     ]
 
 
@@ -542,11 +650,16 @@ def _numbered(name: str, suffix: object) -> str:
 
 
 def _candidates(desired: str) -> Iterator[str]:
-    for index in islice(count(2), 98):
+    """`notes (2).md`, `notes (3).md`, and so on."""
+    for index in islice(count(2), MOST_NUMBERED_CANDIDATES):
         yield _numbered(desired, index)
 
 
 async def _available_name(submission: Submission, node: Node) -> str:
+    """A free name near the one asked for -- and a certainly-free one if the
+    neighbourhood is that crowded. Each candidate costs a query, so the
+    numbered run is bounded and the fallback ends it in one step rather than
+    counting on towards `MOST_SIBLINGS`."""
     for candidate in _candidates(node.name):
         if not await submission.name_taken(
             parent=node.parent, name=candidate, excluding=node.id
@@ -562,6 +675,7 @@ async def _identify(submission: Submission, request: Create) -> EntryRow:
         id=request.id, workspace_id=submission.workspace, type=request.type
     )
     submission.session.add(entry)
+    submission.changed(entry.id)  # anything that read it read its absence
     await submission.session.flush()
     return entry
 
@@ -612,7 +726,7 @@ async def settle(submission: Submission) -> list[stream.Emitted]:
     )
 
 
-async def _settled(submission: Submission, entry_id: UUID) -> int | None:
+async def _settled(submission: Submission, entry_id: UUID) -> Applied | None:
     node = await submission.node(entry_id)
     if node is None or node.deleted:
         return None  # a tombstone holds no name to collide with
@@ -701,9 +815,9 @@ async def _apply_write(submission: Submission, request: Write) -> Outcome:
         ),
     )
     assert written is not None
-    position = await approve(submission, written)
+    applied = await approve(submission, written)
     await _anchor_text(submission, written, body)
-    return await _acknowledge(submission, position)
+    return await _acknowledge(submission, applied)
 
 
 async def _content_row(
@@ -752,36 +866,77 @@ _APPLICATION: dict[Operation, Callable[[Submission, Any], Awaitable[Outcome]]] =
 
 # -- dedup, and the two halves joined -------------------------------------------------
 
-def _table_for(models: Models, request: Submitted) -> type[TransactionRow]:
-    """Which log a transaction of this shape would have landed in."""
+def _content_log(models: Models, body: Body) -> type[ContentRow]:
+    return models.text_content if body.type is Kind.TEXT else models.blob_content
+
+
+def _writes(models: Models, request: Submitted) -> tuple[type[TransactionRow], ...]:
+    """Which logs a transaction of this shape lands in.
+
+    This is the same fact `stream.announced` reads backwards: which logs a
+    transaction wrote IS which operation it was. Stated forwards here, it is
+    what lets dedup tell a replay from an id reused for something else.
+    """
+    if isinstance(request, Create):
+        placing = (models.name, models.parent, models.deletion)
+        if request.content is None:
+            return placing  # a folder is born with no content
+        return (*placing, _content_log(models, request.content))
     if isinstance(request, Write):
-        text = request.content.type is Kind.TEXT
-        return models.text_content if text else models.blob_content
+        return (_content_log(models, request.content),)
     return {
-        Operation.CREATE: models.name,
-        Operation.RENAME: models.name,
-        Operation.MOVE: models.name,
-        Operation.REPARENT: models.parent,
-        Operation.DELETE: models.deletion,
+        Operation.MOVE: (models.name, models.parent),
+        Operation.RENAME: (models.name,),
+        Operation.REPARENT: (models.parent,),
+        Operation.DELETE: (models.deletion,),
     }[request.op]
+
+
+async def _rows_named(
+    submission: Submission,
+    transaction: UUID,
+    logs: tuple[type[TransactionRow], ...],
+) -> dict[type[TransactionRow], TransactionRow]:
+    found = {}
+    for log in logs:
+        row = await submission.session.get(log, transaction)
+        if row is not None:
+            found[log] = row
+    return found
 
 
 async def _already_applied(
     submission: Submission, request: Submitted
 ) -> Outcome | None:
-    """A transaction id is spent once.
+    """A transaction id is spent once, on one operation, against one entry.
 
-    Finding it against this entry means the change already happened, and the
-    retry is free. Finding it against a DIFFERENT entry means the client
-    reused an id -- which would otherwise collide on the primary key it is
-    about to write, so it is refused rather than crashed into.
+    A replay is free, and that is the whole point: the client re-presents the
+    id it minted and is told the change already happened. But "already
+    happened" has to mean THIS change. A create writes name, parent and
+    deletion at one id; a rename reusing that id would find its name row,
+    match on entry, and be acknowledged without renaming anything -- silent
+    divergence, which is the one outcome nothing here may produce.
+
+    So the shape is checked, not just the entry: the logs holding this id must
+    be exactly the logs this request would write, and every one of them must
+    point at the entry it names. Anything else is a reused id, and is refused
+    out loud.
+
+    The cheap case stays cheap. Nothing found in the logs this request writes
+    means nothing to replay, and the other logs are never consulted.
     """
-    recorded = await submission.session.get(
-        _table_for(submission.models, request), request.transaction
-    )
-    if recorded is None:
+    models = submission.models
+    writes = _writes(models, request)
+    found = await _rows_named(submission, request.transaction, writes)
+    if not found:
         return None
-    if recorded.entry_id != request.id:
+    elsewhere = await _rows_named(
+        submission,
+        request.transaction,
+        tuple(log for log in models.logs if log not in writes),
+    )
+    spent_otherwise = elsewhere or set(found) != set(writes)
+    if spent_otherwise or any(row.entry_id != request.id for row in found.values()):
         return Outcome(Rejected(reason=Refusal.ID_TAKEN))
     return Outcome(Acknowledged())
 

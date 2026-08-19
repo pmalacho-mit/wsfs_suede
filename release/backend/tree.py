@@ -13,7 +13,7 @@ live in.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, NamedTuple, final
 from uuid import UUID
 
@@ -35,6 +35,9 @@ from .models import (
 )
 
 BEFORE_ANY_POSITION = 0
+
+Lookup = Callable[[UUID], Awaitable["Node | None"]]
+"""How a walk asks for one entry -- so a caller can answer from what it knows."""
 
 
 @final
@@ -124,47 +127,63 @@ class Tree:
 
     # -- the shapes every query below is built from --------------------------
 
-    def _newest(self, log: type[TransactionRow], workspace_id: UUID) -> Any:
-        """Each entry's most recent change to one property."""
+    def _newest(
+        self,
+        log: type[TransactionRow],
+        workspace_id: UUID,
+        entry_id: UUID | None = None,
+    ) -> Any:
+        """Each entry's most recent change to one property.
+
+        `entry_id` narrows the newest-per-entry computation to one entry
+        BEFORE it runs, rather than filtering its result afterwards. That is
+        the difference between an index seek on `(entry_id, position)` and a
+        scan of the whole workspace's log -- and single-entry lookups are the
+        hot path: every ancestor of every create walks through one.
+        """
         entry = self.models.entry
+        rows = (
+            select(log)
+            .join(entry, col(entry.id) == col(log.entry_id))
+            .where(col(entry.workspace_id) == workspace_id)
+        )
+        if entry_id is not None:
+            rows = rows.where(col(log.entry_id) == entry_id)
         return aliased(
             log,
             (
-                select(log)
-                .join(entry, col(entry.id) == col(log.entry_id))
-                .where(col(entry.workspace_id) == workspace_id)
-                .distinct(col(log.entry_id))
+                rows.distinct(col(log.entry_id))
                 .order_by(col(log.entry_id), col(log.position).desc())
                 .subquery()
             ),
         )
 
-    def _namespace(self, workspace_id: UUID) -> Namespace:
+    def _namespace(self, workspace_id: UUID, entry_id: UUID | None = None) -> Namespace:
         entry = self.models.entry
         name, parent, deletion = (
-            self._newest(log, workspace_id)
+            self._newest(log, workspace_id, entry_id)
             for log in (self.models.name, self.models.parent, self.models.deletion)
         )
+        statement = (
+            select(entry, name, parent, deletion)
+            .join(name, col(name.entry_id) == col(entry.id))
+            .join(parent, col(parent.entry_id) == col(entry.id))
+            .join(deletion, col(deletion.entry_id) == col(entry.id))
+            .where(col(entry.workspace_id) == workspace_id)
+        )
+        if entry_id is not None:
+            statement = statement.where(col(entry.id) == entry_id)
         return Namespace(
-            statement=(
-                select(entry, name, parent, deletion)
-                .join(name, col(name.entry_id) == col(entry.id))
-                .join(parent, col(parent.entry_id) == col(entry.id))
-                .join(deletion, col(deletion.entry_id) == col(entry.id))
-                .where(col(entry.workspace_id) == workspace_id)
-            ),
-            name=name,
-            parent=parent,
-            deletion=deletion,
+            statement=statement, name=name, parent=parent, deletion=deletion
         )
 
-    def _newest_content(self, workspace_id: UUID) -> Any:
+    def _newest_content(self, workspace_id: UUID, entry_id: UUID | None = None) -> Any:
         """Content lives in two logs, and the newer row is the entry's kind:
         there is no kind field anywhere, so there is none to fall out of step."""
         entry = self.models.entry
 
         def written(log: type[ContentRow], kind: Kind):
-            return (
+            rows = (
                 select(
                     col(log.entry_id).label("entry_id"),
                     col(log.id).label("version"),
@@ -174,6 +193,7 @@ class Tree:
                 .join(entry, col(entry.id) == col(log.entry_id))
                 .where(col(entry.workspace_id) == workspace_id)
             )
+            return rows if entry_id is None else rows.where(col(log.entry_id) == entry_id)
 
         both = union_all(
             written(self.models.text_content, Kind.TEXT),
@@ -186,9 +206,9 @@ class Tree:
             .subquery()
         )
 
-    def _current(self, workspace_id: UUID):
-        placed = self._namespace(workspace_id)
-        content = self._newest_content(workspace_id)
+    def _current(self, workspace_id: UUID, entry_id: UUID | None = None):
+        placed = self._namespace(workspace_id, entry_id)
+        content = self._newest_content(workspace_id, entry_id)
         return placed.statement.add_columns(
             content.c.version, content.c.position, content.c.kind
         ).outerjoin(content, content.c.entry_id == self.models.entry.id)
@@ -198,11 +218,7 @@ class Tree:
     async def node(
         self, session: AsyncSession, workspace_id: UUID, entry_id: UUID
     ) -> Node | None:
-        row = (
-            await session.exec(
-                self._current(workspace_id).where(col(self.models.entry.id) == entry_id)
-            )
-        ).first()
+        row = (await session.exec(self._current(workspace_id, entry_id))).first()
         return None if row is None else node_of(row)
 
     async def nodes(self, session: AsyncSession, workspace_id: UUID) -> list[Node]:
@@ -280,35 +296,78 @@ class Tree:
     # -- walking it -------------------------------------------------------------
 
     async def ancestors(
-        self, session: AsyncSession, workspace_id: UUID, entry_id: UUID
-    ) -> AsyncIterator[UUID]:
-        """From the entry's parent up to the workspace root."""
+        self,
+        session: AsyncSession,
+        workspace_id: UUID,
+        entry_id: UUID,
+        *,
+        look_up: Lookup | None = None,
+    ) -> AsyncIterator[Step]:
+        """From the entry's parent up to the workspace root.
+
+        Yields what it FOUND at each rung, not just the id it followed: the
+        walk had to fetch the node to keep climbing, and every caller wants
+        it. Handing back ids alone made `lineage` fetch each one a second
+        time, which doubled the cost of the walk for nothing.
+
+        `look_up` is how a caller that already knows some of these entries
+        supplies them. A unit of work walking a thousand creates into one
+        folder climbs the same rungs a thousand times, and the walk is the
+        expensive part of judging a placement -- but only the caller knows
+        whether its knowledge is still good, so the default is to ask the
+        database every time.
+        """
+        find = look_up or (lambda at: self.node(session, workspace_id, at))
         seen: set[UUID] = set()
-        at = await self.node(session, workspace_id, entry_id)
+        at = await find(entry_id)
         while at is not None and at.parent is not None and at.parent not in seen:
-            seen.add(at.parent)
-            yield at.parent
-            at = await self.node(session, workspace_id, at.parent)
+            followed = at.parent
+            seen.add(followed)
+            at = await find(followed)
+            yield Step(id=followed, node=at)
 
     async def lineage(
-        self, session: AsyncSession, workspace_id: UUID, entry_id: UUID
+        self,
+        session: AsyncSession,
+        workspace_id: UUID,
+        entry_id: UUID,
+        *,
+        look_up: Lookup | None = None,
     ) -> Lineage:
         """Deleting a folder tombstones the folder, not its contents. What the
         subtree loses is reachability, and that is what nothing may be added to."""
         walked: list[UUID] = []
         interrupted = False
-        async for ancestor in self.ancestors(session, workspace_id, entry_id):
-            walked.append(ancestor)
-            holder = await self.node(session, workspace_id, ancestor)
-            interrupted = interrupted or holder is None or holder.deleted
+        async for step in self.ancestors(
+            session, workspace_id, entry_id, look_up=look_up
+        ):
+            walked.append(step.id)
+            interrupted = interrupted or step.node is None or step.node.deleted
         return Lineage(ancestors=tuple(walked), interrupted=interrupted)
 
     async def descends_from(
-        self, session: AsyncSession, workspace_id: UUID, entry_id: UUID, ancestor_id: UUID
+        self,
+        session: AsyncSession,
+        workspace_id: UUID,
+        entry_id: UUID,
+        ancestor_id: UUID,
+        *,
+        look_up: Lookup | None = None,
     ) -> bool:
         return entry_id == ancestor_id or (
-            await self.lineage(session, workspace_id, entry_id)
+            await self.lineage(session, workspace_id, entry_id, look_up=look_up)
         ).under(ancestor_id)
+
+
+@final
+@dataclass(frozen=True)
+class Step:
+    """One rung of a walk up the tree: the parent an entry pointed at, and
+    what is actually there -- which is `None` when it points at nothing, a
+    routine possibility now that clients mint their own ids."""
+
+    id: UUID
+    node: "Node | None"
 
 
 def _under(parent: type[ParentRow], holder: UUID | None) -> ColumnElement[bool]:

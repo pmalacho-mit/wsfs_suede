@@ -28,8 +28,26 @@ async def test_a_create_cannot_land_inside_a_file(api: Api):
     file = await created(api, "notes.txt")
 
     assert refused(await api.create(new_id(), name="nested", parent=file))["reason"] == (
-        "parent was deleted"
+        "that parent is not a folder"
     )
+
+
+async def test_a_parent_that_never_existed_is_not_a_parent_that_was_deleted(api: Api):
+    """With client-minted ids, naming a folder nobody ever created is a
+    routine client mistake rather than an impossibility -- and telling that
+    client its folder "was deleted" describes a deletion that never happened."""
+    assert refused(
+        await api.create(new_id(), name="a.py", parent=new_id())
+    )["reason"] == "no such parent"
+
+
+async def test_a_move_into_a_destination_that_never_existed_says_so(api: Api):
+    file = await created(api, "a.py")
+
+    refusal = refused(
+        await api.reparent(file, await parent_version(api, file), new_id())
+    )
+    assert refusal["reason"] == "no such destination"
 
 
 async def test_a_create_colliding_on_name_is_renamed_not_refused(api: Api):

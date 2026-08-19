@@ -140,9 +140,15 @@ class Stream:
     def _kind(self, content: ContentRow) -> Kind:
         return Kind.TEXT if isinstance(content, TextContentRow) else Kind.BINARY
 
-    async def _event(
+    async def emitted(
         self, session: AsyncSession, applied: list[TransactionRow]
     ) -> Emitted:
+        """The event one transaction's rows are.
+
+        Public because the choke point has these rows in its hand the moment
+        it writes them: reading them back out of five logs to say what just
+        happened would be asking the database to tell us what we told it.
+        """
         caused = applied[0]
         entry = await session.get(self.models.entry, caused.entry_id)
         assert entry is not None
@@ -175,7 +181,7 @@ class Stream:
         # writers that somehow collided on one would produce an ugly stream,
         # never a wrong one.
         return [
-            await self._event(session, list(rows))
+            await self.emitted(session, list(rows))
             for _, rows in groupby(applied, key=attrgetter("id"))
         ]
 
@@ -183,14 +189,6 @@ class Stream:
         self, session: AsyncSession, workspace_id: UUID, position: int
     ) -> list[Emitted]:
         return await self._between(session, workspace_id, after=position, through=None)
-
-    async def at(
-        self, session: AsyncSession, workspace_id: UUID, position: int
-    ) -> Emitted:
-        (emitted,) = await self._between(
-            session, workspace_id, after=position - 1, through=position
-        )
-        return emitted
 
     async def high_water(self, session: AsyncSession, workspace_id: UUID) -> int:
         """The last position this workspace used, read out of the logs.

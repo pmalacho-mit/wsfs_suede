@@ -212,13 +212,24 @@ class Api:
             content={"type": "binary", "hash": hash, "size": size, "mime": mime}, **kw,
         )
 
+    async def put_blob(self, digest: str, data: bytes,
+                       mime: str = "application/octet-stream") -> httpx.Response:
+        return await self.http.put(
+            f"{WSFS}/workspaces/{self.workspace}/blobs/{digest}",
+            content=data,
+            headers={"Content-Type": mime, **self._headers},
+        )
+
     async def store(self, data: bytes, mime: str = "application/octet-stream") -> str:
         digest = digest_of(data)
-        response = await self.http.put(
-            f"{WSFS}/blobs/{digest}", content=data, headers={"Content-Type": mime}
-        )
+        response = await self.put_blob(digest, data, mime)
         assert response.status_code == 200, response.text
         return digest
+
+    async def blob(self, digest: str) -> httpx.Response:
+        return await self.http.get(
+            f"{WSFS}/workspaces/{self.workspace}/blobs/{digest}", headers=self._headers
+        )
 
     async def initialize(self, outbox: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         response = await self.http.post(

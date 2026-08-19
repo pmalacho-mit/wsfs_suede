@@ -78,6 +78,8 @@ class ControllerRegistry:
         self._controllers: dict[UUID, WorkspaceController] = {}
         self._counts: dict[UUID, int] = {}
         self._pending: dict[UUID, asyncio.Task[None]] = {}
+        self._seeding: dict[UUID, asyncio.Lock] = {}
+        self._issued: dict[UUID, int] = {}
         self._lock = asyncio.Lock()
 
     # -- access -----------------------------------------------------------
@@ -116,12 +118,37 @@ class ControllerRegistry:
 
     async def _enter(self, workspace_id: UUID) -> WorkspaceController:
         async with self._lock:
-            controller = await self._get_or_create(workspace_id)
-            self._counts[workspace_id] = self._counts.get(workspace_id, 0) + 1
-            returned_within_grace = self._pending.pop(workspace_id, None)
-            if returned_within_grace:
-                _ = returned_within_grace.cancel()
-            return controller
+            existing = self._controllers.get(workspace_id)
+            if existing is not None:
+                return self._counted(workspace_id, existing)
+            seeding = self._seeding.setdefault(workspace_id, asyncio.Lock())
+        # Seeding reads the database, and the registry-wide lock is not held
+        # across it: one workspace waking up must not stall every other
+        # workspace's first request behind its round trip. The per-workspace
+        # lock is what keeps two arrivals from seeding one workspace twice.
+        async with seeding:
+            async with self._lock:
+                existing = self._controllers.get(workspace_id)
+                if existing is not None:
+                    return self._counted(workspace_id, existing)
+            committed = await self._committed(workspace_id)
+            async with self._lock:
+                controller = self._controllers.get(workspace_id)
+                if controller is None:
+                    controller = self._seeded(workspace_id, committed)
+                return self._counted(workspace_id, controller)
+
+    def _counted(
+        self, workspace_id: UUID, controller: WorkspaceController
+    ) -> WorkspaceController:
+        """Claim the controller, under `self._lock`. Nothing awaits in here,
+        which is what makes "found it" and "counted it" one step -- a retire
+        cannot slip between them."""
+        self._counts[workspace_id] = self._counts.get(workspace_id, 0) + 1
+        returned_within_grace = self._pending.pop(workspace_id, None)
+        if returned_within_grace:
+            _ = returned_within_grace.cancel()
+        return controller
 
     async def _leave(self, workspace_id: UUID) -> None:
         async with self._lock:
@@ -130,19 +157,30 @@ class ControllerRegistry:
 
     # -- lifecycle ----------------------------------------------------------
 
-    async def _get_or_create(self, workspace_id: UUID) -> WorkspaceController:
-        existing = self._controllers.get(workspace_id)
-        if existing is not None:
-            return existing
+    async def _committed(self, workspace_id: UUID) -> int:
+        async with self._database.session() as session:
+            return await self._stream.high_water(session, workspace_id)
+
+    def _seeded(self, workspace_id: UUID, committed: int) -> WorkspaceController:
+        """A controller starting above everything this workspace has used.
+
+        The logs are the truth, and a fresh process has nothing else to read.
+        But they can UNDERSTATE it: a submission that rolled back consumed a
+        position no committed row carries, and a successor reading only the
+        logs would hand that number out a second time. So this process also
+        remembers the last position each of its own controllers issued, past
+        the controller itself, and takes it as a floor. One integer per
+        workspace it has ever served -- the cheapest thing in the registry.
+
+        Read under the lock, at the moment of installation rather than at the
+        moment the database was read, so a controller that lived and retired
+        while this one was being seeded still raises the floor.
+        """
         controller = WorkspaceController(
-            workspace_id, Positions(await self._used_positions(workspace_id))
+            workspace_id, Positions(max(committed, self._issued.get(workspace_id, 0)))
         )
         self._controllers[workspace_id] = controller
         return controller
-
-    async def _used_positions(self, workspace_id: UUID) -> int:
-        async with self._database.session() as session:
-            return await self._stream.high_water(session, workspace_id)
 
     def _schedule_release_if_idle(self, workspace_id: UUID) -> None:
         idle = self._counts.get(workspace_id, 0) == 0
@@ -162,10 +200,20 @@ class ControllerRegistry:
                 self._retire(workspace_id)
 
     def _retire(self, workspace_id: UUID) -> None:
-        """Nothing to hand back: the position counter is rebuilt from the logs
-        by whichever controller takes the workspace on next."""
+        """The controller goes; the last position it issued stays.
+
+        Everything else is rebuilt from the logs by whoever takes the
+        workspace on next, which is what makes a kill -9 and a clean shutdown
+        the same event for a workspace. Why the position survives is in
+        `_seeded`.
+        """
         _ = self._counts.pop(workspace_id, None)
-        _ = self._controllers.pop(workspace_id, None)
+        _ = self._seeding.pop(workspace_id, None)
+        retiring = self._controllers.pop(workspace_id, None)
+        if retiring is not None:
+            self._issued[workspace_id] = max(
+                retiring.positions.at, self._issued.get(workspace_id, 0)
+            )
 
     async def shutdown(self) -> None:
         async with self._lock:
