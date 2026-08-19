@@ -17,7 +17,7 @@ from sqlalchemy import func
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from .contract import Event, Kind, Metadata, StreamEvent
+from .contract import Event, Kind, Metadata, Moved, StreamEvent
 from .models import (
     ContentRow,
     DeletionRow,
@@ -74,15 +74,8 @@ class Stream:
         self.models = models
 
     @property
-    def announces(self) -> dict[type[TransactionRow], Event]:
-        """Which log a row landed in is which event it was."""
-        return {
-            self.models.name: Event.NAME,
-            self.models.parent: Event.PARENT,
-            self.models.deletion: Event.DELETE,
-            self.models.text_content: Event.WRITE,
-            self.models.blob_content: Event.WRITE,
-        }
+    def logs(self) -> tuple[type[TransactionRow], ...]:
+        return self.models.logs
 
     async def _changes(
         self,
@@ -102,14 +95,23 @@ class Stream:
             applied = applied.where(col(log.position) <= through)
         return list(await session.exec(applied))
 
-    def _value(self, row: TransactionRow) -> Metadata | str | UUID | bool | None:
-        """What a single-log transaction says about the entry it names."""
-        if isinstance(row, NameRow):
-            return row.name
-        if isinstance(row, ParentRow):
-            return row.parent_entry_id
-        if isinstance(row, DeletionRow):
-            return row.deleted
+    def _value(
+        self, event: Event, applied: list[TransactionRow], entry: EntryRow
+    ) -> Metadata | Moved | str | UUID | bool | None:
+        """What a transaction says about the entry it names."""
+        if event is Event.CREATE:
+            return self._born(applied, entry)
+        if event is Event.MOVE:
+            return Moved(
+                name=_one(applied, NameRow).name,
+                parent=_one(applied, ParentRow).parent_entry_id,
+            )
+        if event is Event.NAME:
+            return _one(applied, NameRow).name
+        if event is Event.PARENT:
+            return _one(applied, ParentRow).parent_entry_id
+        if event is Event.DELETE:
+            return _one(applied, DeletionRow).deleted
         # A write is a PURE INVALIDATION SIGNAL: cached content and its kind
         # are stale, and the next Content fetch reveals the rest.
         return None
@@ -144,14 +146,14 @@ class Stream:
         caused = applied[0]
         entry = await session.get(self.models.entry, caused.entry_id)
         assert entry is not None
-        created = len(applied) > 1
+        event = announced(applied)
         return Emitted(
             position=caused.position,
             event=StreamEvent(
-                type=Event.CREATE if created else self.announces[type(caused)],
+                type=event,
                 id=caused.entry_id,
                 transaction=caused.id,
-                value=self._born(applied, entry) if created else self._value(caused),
+                value=self._value(event, applied, entry),
                 user=caused.user_id,
             ),
         )
@@ -163,7 +165,7 @@ class Stream:
             chain.from_iterable(
                 [
                     await self._changes(session, log, workspace_id, after, through)
-                    for log in self.announces
+                    for log in self.logs
                 ]
             ),
             key=lambda row: (row.position, row.id),
@@ -207,9 +209,36 @@ class Stream:
                     .where(col(entry.workspace_id) == workspace_id)
                 )
             ).one()
-            for log in self.announces
+            for log in self.logs
         ]
         return max((position for position in used if position is not None), default=0)
+
+
+SHAPES = (NameRow, ParentRow, DeletionRow, ContentRow)
+
+ANNOUNCES: dict[frozenset[type[TransactionRow]], Event] = {
+    frozenset({NameRow, ParentRow, DeletionRow}): Event.CREATE,
+    frozenset({NameRow, ParentRow, DeletionRow, ContentRow}): Event.CREATE,
+    frozenset({NameRow, ParentRow}): Event.MOVE,
+    frozenset({NameRow}): Event.NAME,
+    frozenset({ParentRow}): Event.PARENT,
+    frozenset({DeletionRow}): Event.DELETE,
+    frozenset({ContentRow}): Event.WRITE,
+}
+
+
+def announced(applied: list[TransactionRow]) -> Event:
+    """Which logs a transaction wrote IS which event it was.
+
+    A create writes the three that place an entry (and the content a file is
+    born with); a move writes the two that say where it lives; everything else
+    writes exactly one.
+    """
+    return ANNOUNCES[
+        frozenset(
+            shape for shape in SHAPES if any(isinstance(r, shape) for r in applied)
+        )
+    ]
 
 
 Row = TypeVar("Row", bound=TransactionRow)

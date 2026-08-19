@@ -44,6 +44,7 @@ from .contract import (
     Delete,
     Kind,
     Metadata,
+    Move,
     Operation,
     Refusal,
     Rejected,
@@ -54,8 +55,7 @@ from .contract import (
     Submitted,
     TextBody,
     Transacted,
-    WriteBinary,
-    WriteText,
+    Write,
 )
 from .diff import diff_to_delta
 from .models import ContentRow, EntryRow, Models, NameRow, TransactionRow
@@ -374,17 +374,7 @@ async def _refuses_reparent(submission: Submission, request: Reparent) -> str | 
         )
     ) is not None:
         return conflict
-    if not await _reachable(submission, request.parent):
-        return Refusal.DESTINATION_DELETED
-    if await _would_detach_the_subtree(submission, node, request.parent):
-        return Refusal.DESTINATION_INSIDE_ENTRY
-    if (full := await _overfull(submission, request.parent)) is not None:
-        return full
-    if await submission.name_taken(
-        parent=request.parent, name=node.name, excluding=node.id
-    ):
-        return Refusal.NAME_TAKEN
-    return None
+    return await _refuses_destination(submission, node, request.parent, node.name)
 
 
 async def _would_detach_the_subtree(
@@ -396,9 +386,49 @@ async def _would_detach_the_subtree(
     )
 
 
-async def _refuses_write(
-    submission: Submission, request: WriteText | WriteBinary
+async def _refuses_move(submission: Submission, request: Move) -> str | None:
+    """A move is a rename and a reparent judged together, so that neither can
+    land without the other."""
+    node = await submission.node(request.id)
+    if node is None:
+        return Refusal.ENTRY_UNKNOWN
+    if node.deleted:
+        return Refusal.ENTRY_DELETED
+    if (unnameable := _refuses_name(request.name)) is not None:
+        return unnameable
+    if (stale := await _cas(
+        submission, node, request.name_version,
+        current=node.name_version, among=(submission.models.name,),
+        stale=Refusal.ALREADY_RENAMED,
+    )) is not None:
+        return stale
+    if (stale := await _cas(
+        submission, node, request.parent_version,
+        current=node.parent_version, among=(submission.models.parent,),
+        stale=Refusal.ALREADY_MOVED,
+    )) is not None:
+        return stale
+    return await _refuses_destination(submission, node, request.parent, request.name)
+
+
+async def _refuses_destination(
+    submission: Submission, node: Node, parent: UUID | None, name: str
 ) -> str | None:
+    """Everything about where an entry is going, in the order a reader would
+    ask it: does it exist, would it swallow itself, is there room, is the name
+    free."""
+    if not await _reachable(submission, parent):
+        return Refusal.DESTINATION_DELETED
+    if await _would_detach_the_subtree(submission, node, parent):
+        return Refusal.DESTINATION_INSIDE_ENTRY
+    if (full := await _overfull(submission, parent)) is not None:
+        return full
+    if await submission.name_taken(parent=parent, name=name, excluding=node.id):
+        return Refusal.NAME_TAKEN
+    return None
+
+
+async def _refuses_write(submission: Submission, request: Write) -> str | None:
     node = await submission.node(request.id)
     if node is None:
         return Refusal.ENTRY_UNKNOWN
@@ -418,7 +448,7 @@ async def _refuses_write(
         )
     ) is not None:
         return conflict
-    if await _bytes_are_missing(submission, _body_of(request)):
+    if await _bytes_are_missing(submission, request.content):
         return Refusal.BYTES_NEVER_STORED
     return None
 
@@ -428,6 +458,7 @@ _JUDGEMENT: dict[Operation, Callable[[Submission, Any], Awaitable[str | None]]] 
     Operation.DELETE: _refuses_delete,
     Operation.RENAME: _refuses_rename,
     Operation.REPARENT: _refuses_reparent,
+    Operation.MOVE: _refuses_move,
     Operation.WRITE: _refuses_write,
 }
 
@@ -643,11 +674,23 @@ async def _apply_reparent(submission: Submission, request: Reparent) -> Outcome:
     )
 
 
-async def _apply_write(
-    submission: Submission, request: WriteText | WriteBinary
-) -> Outcome:
+async def _apply_move(submission: Submission, request: Move) -> Outcome:
     node = await _live(submission, request)
-    body = _body_of(request)
+    stamp = _by(submission.user, request)
+    models = submission.models
+    return await _acknowledge(
+        submission,
+        await approve(
+            submission,
+            models.name(entry_id=node.id, name=request.name, **stamp),
+            models.parent(entry_id=node.id, parent_entry_id=request.parent, **stamp),
+        ),
+    )
+
+
+async def _apply_write(submission: Submission, request: Write) -> Outcome:
+    node = await _live(submission, request)
+    body = request.content
     written = await _content_row(
         submission,
         node.id,
@@ -661,12 +704,6 @@ async def _apply_write(
     position = await approve(submission, written)
     await _anchor_text(submission, written, body)
     return await _acknowledge(submission, position)
-
-
-def _body_of(request: WriteText | WriteBinary) -> Body:
-    if isinstance(request, WriteBinary):
-        return BinaryBody(hash=request.hash, size=request.size, mime=request.mime)
-    return TextBody(content=request.content)
 
 
 async def _content_row(
@@ -708,6 +745,7 @@ _APPLICATION: dict[Operation, Callable[[Submission, Any], Awaitable[Outcome]]] =
     Operation.DELETE: _apply_delete,
     Operation.RENAME: _apply_rename,
     Operation.REPARENT: _apply_reparent,
+    Operation.MOVE: _apply_move,
     Operation.WRITE: _apply_write,
 }
 
@@ -716,11 +754,13 @@ _APPLICATION: dict[Operation, Callable[[Submission, Any], Awaitable[Outcome]]] =
 
 def _table_for(models: Models, request: Submitted) -> type[TransactionRow]:
     """Which log a transaction of this shape would have landed in."""
-    if request.op is Operation.WRITE:
-        return models.text_content if request.type is Kind.TEXT else models.blob_content
+    if isinstance(request, Write):
+        text = request.content.type is Kind.TEXT
+        return models.text_content if text else models.blob_content
     return {
         Operation.CREATE: models.name,
         Operation.RENAME: models.name,
+        Operation.MOVE: models.name,
         Operation.REPARENT: models.parent,
         Operation.DELETE: models.deletion,
     }[request.op]

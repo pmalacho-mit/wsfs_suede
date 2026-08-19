@@ -29,6 +29,7 @@ class Operation(str, enum.Enum):
     DELETE = "delete"
     RENAME = "rename"
     REPARENT = "reparent"
+    MOVE = "move"
     WRITE = "write"
 
 
@@ -41,6 +42,7 @@ class Event(str, enum.Enum):
     CREATE = "create"
     NAME = "name"
     PARENT = "parent"
+    MOVE = "move"
     DELETE = "delete"
     WRITE = "write"
 
@@ -146,31 +148,36 @@ class Delete(Transacted):
     seen: Seen
 
 
-class Written(Transacted):
+class Move(Transacted):
+    """A rename and a reparent as one transaction.
+
+    A filesystem `mv` changes where an entry lives and what it is called at
+    once, and doing that as two transactions can half-succeed: the rename
+    lands, the reparent is refused, and the entry ends up somewhere nobody
+    asked for. This presents both tokens and takes both positions or neither.
+    """
+
+    op: Literal[Operation.MOVE] = Operation.MOVE
+    name: EntryName
+    name_version: UUID
+    parent: UUID | None = None
+    parent_version: UUID
+
+
+class Write(Transacted):
+    op: Literal[Operation.WRITE] = Operation.WRITE
     content_version: UUID
     """Never null: a file is born with content, so there is always a token to
     present. A folder has none, and a write to one is refused for being a
     folder before its token is ever considered."""
+    content: Body
+    """Carried exactly as a create carries it -- one spelling of content, not
+    two. Nesting it also keeps this union flat, which is what lets the schema
+    express `op` as a discriminator and a client generate itself from it."""
 
-
-class WriteText(Written):
-    op: Literal[Operation.WRITE] = Operation.WRITE
-    type: Literal[Kind.TEXT] = Kind.TEXT
-    content: str
-
-
-class WriteBinary(Written):
-    op: Literal[Operation.WRITE] = Operation.WRITE
-    type: Literal[Kind.BINARY] = Kind.BINARY
-    hash: str
-    size: int
-    mime: str
-
-
-Write = Annotated[WriteText | WriteBinary, Field(discriminator="type")]
 
 Submitted = Annotated[
-    Create | Delete | Rename | Reparent | Write, Field(discriminator="op")
+    Create | Delete | Rename | Reparent | Move | Write, Field(discriminator="op")
 ]
 """Everything a client can submit -- and everything it can queue. Creates are
 no longer online-only, because the client already knows the id."""
@@ -252,7 +259,20 @@ class Metadata(BaseModel):
     content_version: UUID | None = None
 
 
-CARRIES_A_VALUE = {Event.CREATE, Event.NAME, Event.PARENT, Event.DELETE}
+class Moved(BaseModel):
+    """Where an entry went, and what it is called now."""
+
+    name: str
+    parent: UUID | None = None
+
+
+CARRIES_A_VALUE = {
+    Event.CREATE,
+    Event.NAME,
+    Event.PARENT,
+    Event.MOVE,
+    Event.DELETE,
+}
 
 
 class StreamEvent(BaseModel):
@@ -270,7 +290,7 @@ class StreamEvent(BaseModel):
     type: Event
     id: UUID
     transaction: UUID
-    value: Metadata | str | UUID | bool | None = None
+    value: Metadata | Moved | str | UUID | bool | None = None
     user: UUID | None = None
 
     def payload(self) -> dict[str, Any]:
