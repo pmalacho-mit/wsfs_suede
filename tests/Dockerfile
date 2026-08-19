@@ -26,6 +26,8 @@ RUN pip install -r requirements.txt -r tests/requirements.txt
 COPY pytest.ini ./pytest.ini
 COPY release/ ./release/
 COPY wsfs_suede__sqlmodel_utils_suede/ ./wsfs_suede__sqlmodel_utils_suede/
+COPY samples/ ./samples/
+COPY bin/ ./bin/
 COPY tests/ ./tests/
 
 CMD ["pytest"]

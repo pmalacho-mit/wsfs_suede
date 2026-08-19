@@ -10,7 +10,7 @@ from conftest import (
     name_version,
     new_id,
 )
-from host import MODELS
+from app import MODELS
 
 REVISIONS = ["one", "one two", "one two three", "two three"]
 

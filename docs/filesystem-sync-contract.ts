@@ -209,6 +209,37 @@ export namespace Events {
         | Failure<`later versions modified the ${"content" | "name" | "content and name"} of the entry`>;
     }
 
+    export namespace Move {
+      /**
+       * A rename and a reparent as one transaction.
+       *
+       * A filesystem `mv` changes where an entry lives and what it is called
+       * at once, and doing that as two transactions can half-succeed: the
+       * rename lands, the reparent is refused, and the entry ends up somewhere
+       * nobody asked for. This presents BOTH tokens and takes both positions
+       * or neither, and it arrives as ONE `move` event rather than as a pair
+       * a client would have to recognise as belonging together.
+       */
+      export type Request = Transactioned<{
+        name: string;
+        name_version: Entry.Version;
+        parent?: string;
+        parent_version: Entry.Version;
+      }>;
+
+      export type Response = Acknowledged | Unknown | Unsound | Failure<
+        | "entry was deleted"
+        | "entry was already renamed"
+        | "entry had already been moved"
+        | "the destination was deleted"
+        | "the destination is inside the entry"
+        | "entry with name already exists within destination"
+        | "that name is not permitted"
+        | "that destination is nested too deeply"
+        | "that folder already holds too many entries"
+      >;
+    }
+
     export namespace Reparent {
       export type Request = Transactioned<{
         /**
@@ -384,6 +415,7 @@ export namespace Events {
           | Delete.Request
           | Rename.Request
           | Reparent.Request
+          | Move.Request
           | Write.Request
         >;
       }
@@ -483,6 +515,7 @@ export namespace Events {
         | Utility.Typed<"delete", Valued<boolean>>
         | Utility.Typed<"name", Valued<string>>
         | Utility.Typed<"parent", Valued<string | undefined>> // undefined = moved to workspace root
+        | Utility.Typed<"move", Valued<{ name: string; parent?: string }>>
       )>
     }
   }
@@ -519,6 +552,7 @@ export namespace Client {
       | Events.ClientSent.Delete.Request
       | Events.ClientSent.Rename.Request
       | Events.ClientSent.Reparent.Request
+      | Events.ClientSent.Move.Request
       | Events.ClientSent.Write.Request
       | Omit<Events.ClientSent.Store.Request, "bytes">
     }

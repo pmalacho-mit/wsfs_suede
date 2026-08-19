@@ -1,0 +1,948 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "wsfs schema stub",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/wsfs/workspaces/{workspace_id}/initialize": {
+      "post": {
+        "summary": "Initialize",
+        "operationId": "initialize_wsfs_workspaces__workspace_id__initialize_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitializeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitializeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/transactions": {
+      "post": {
+        "summary": "Transact",
+        "operationId": "transact_wsfs_workspaces__workspace_id__transactions_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Create"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Delete"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Rename"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Reparent"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Move"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Write"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/blobs/{digest}": {
+      "put": {
+        "summary": "Store",
+        "operationId": "store_wsfs_blobs__digest__put",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Digest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Fetch Blob",
+        "operationId": "fetch_blob_wsfs_blobs__digest__get",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Digest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/entries/{entry_id}/content": {
+      "get": {
+        "summary": "Content",
+        "description": "Omitting `content` asks for the entry's newest.",
+        "operationId": "content_wsfs_workspaces__workspace_id__entries__entry_id__content_get",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "content",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/stream": {
+      "get": {
+        "summary": "Events",
+        "description": "The token is the credential here -- EventSource cannot carry a\nheader, which is why it is single-use and position-bound.",
+        "operationId": "events_wsfs_workspaces__workspace_id__stream_get",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BinaryBody": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "binary",
+            "title": "Type",
+            "default": "binary"
+          },
+          "hash": {
+            "type": "string",
+            "title": "Hash"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "mime": {
+            "type": "string",
+            "title": "Mime"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hash",
+          "size",
+          "mime"
+        ],
+        "title": "BinaryBody"
+      },
+      "Create": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op": {
+            "type": "string",
+            "const": "create",
+            "title": "Op",
+            "default": "create"
+          },
+          "type": {
+            "$ref": "#/components/schemas/Type"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/TextBody"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BinaryBody"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "binary": "#/components/schemas/BinaryBody",
+                    "text": "#/components/schemas/TextBody"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "type",
+          "name",
+          "content"
+        ],
+        "title": "Create"
+      },
+      "Delete": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op": {
+            "type": "string",
+            "const": "delete",
+            "title": "Op",
+            "default": "delete"
+          },
+          "seen": {
+            "$ref": "#/components/schemas/Seen"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "seen"
+        ],
+        "title": "Delete"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "InitializeRequest": {
+        "properties": {
+          "outbox": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/Create"
+                },
+                {
+                  "$ref": "#/components/schemas/Delete"
+                },
+                {
+                  "$ref": "#/components/schemas/Rename"
+                },
+                {
+                  "$ref": "#/components/schemas/Reparent"
+                },
+                {
+                  "$ref": "#/components/schemas/Move"
+                },
+                {
+                  "$ref": "#/components/schemas/Write"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "op",
+                "mapping": {
+                  "create": "#/components/schemas/Create",
+                  "delete": "#/components/schemas/Delete",
+                  "move": "#/components/schemas/Move",
+                  "rename": "#/components/schemas/Rename",
+                  "reparent": "#/components/schemas/Reparent",
+                  "write": "#/components/schemas/Write"
+                }
+              }
+            },
+            "type": "array",
+            "maxItems": 10000,
+            "title": "Outbox"
+          }
+        },
+        "type": "object",
+        "title": "InitializeRequest"
+      },
+      "InitializeResponse": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/Metadata"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "applied": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Applied"
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/Rejection"
+            },
+            "type": "array",
+            "title": "Rejected"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token",
+          "entries",
+          "applied",
+          "rejected"
+        ],
+        "title": "InitializeResponse",
+        "description": "DEPARTURE: `applied` is transaction ids. The contract echoes back the\nfull requests, which the client already holds and evicts by id."
+      },
+      "Metadata": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "type": {
+            "$ref": "#/components/schemas/Type"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "deleted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted"
+          },
+          "name_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Name Version"
+          },
+          "parent_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Parent Version"
+          },
+          "deleted_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Deleted Version"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "name",
+          "name_version",
+          "parent_version",
+          "deleted_version"
+        ],
+        "title": "Metadata",
+        "description": "Pure namespace, plus the four tokens the next mutation must present.\n\nNo content descriptor ever appears here: `content_version` names the write\nto fetch, not what it holds."
+      },
+      "Move": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op": {
+            "type": "string",
+            "const": "move",
+            "title": "Op",
+            "default": "move"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "name_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Name Version"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "parent_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Parent Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "name",
+          "name_version",
+          "parent_version"
+        ],
+        "title": "Move",
+        "description": "A rename and a reparent as one transaction.\n\nA filesystem `mv` changes where an entry lives and what it is called at\nonce, and doing that as two transactions can half-succeed: the rename\nlands, the reparent is refused, and the entry ends up somewhere nobody\nasked for. This presents both tokens and takes both positions or neither."
+      },
+      "Rejection": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "reason"
+        ],
+        "title": "Rejection"
+      },
+      "Rename": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op": {
+            "type": "string",
+            "const": "rename",
+            "title": "Op",
+            "default": "rename"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "name_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Name Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "name",
+          "name_version"
+        ],
+        "title": "Rename"
+      },
+      "Reparent": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op": {
+            "type": "string",
+            "const": "reparent",
+            "title": "Op",
+            "default": "reparent"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "parent_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Parent Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "parent_version"
+        ],
+        "title": "Reparent"
+      },
+      "Seen": {
+        "properties": {
+          "name_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Name Version"
+          },
+          "parent_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Parent Version"
+          },
+          "deleted_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Deleted Version"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name_version",
+          "parent_version",
+          "deleted_version",
+          "content_version"
+        ],
+        "title": "Seen",
+        "description": "Every token of the entry a delete was looking at.\n\nDelete is the destructive operation, and the question worth asking is not\n\"has the deleted flag moved\" -- it almost never has -- but \"is this still\nthe thing I was told to destroy\"."
+      },
+      "TextBody": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "text",
+            "title": "Type",
+            "default": "text"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "TextBody"
+      },
+      "Type": {
+        "type": "string",
+        "enum": [
+          "file",
+          "folder"
+        ],
+        "title": "Type"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "Write": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op": {
+            "type": "string",
+            "const": "write",
+            "title": "Op",
+            "default": "write"
+          },
+          "content_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Content Version"
+          },
+          "content": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TextBody"
+              },
+              {
+                "$ref": "#/components/schemas/BinaryBody"
+              }
+            ],
+            "title": "Content",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "binary": "#/components/schemas/BinaryBody",
+                "text": "#/components/schemas/TextBody"
+              }
+            }
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "content_version",
+          "content"
+        ],
+        "title": "Write"
+      }
+    }
+  }
+}

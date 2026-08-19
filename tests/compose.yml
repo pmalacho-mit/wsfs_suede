@@ -16,6 +16,8 @@ services:
       - ../release:/app/wsfs_suede/release:ro
       - ../wsfs_suede__sqlmodel_utils_suede:/app/wsfs_suede/wsfs_suede__sqlmodel_utils_suede:ro
       - ../tests:/app/wsfs_suede/tests:ro
+      - ../samples:/app/wsfs_suede/samples:ro
+      - ../bin:/app/wsfs_suede/bin:ro
     depends_on:
       test-db:
         condition: service_healthy

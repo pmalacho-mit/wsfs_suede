@@ -1,17 +1,22 @@
-"""A host application, of the kind this library is meant to be mounted into.
+"""A sample host application, of the kind wsfs is meant to be mounted into.
 
 Everything here is the HOST's: its own users, its own workspaces, its own idea
 of who may reach one. wsfs is handed two table names and a dependency, and
 decides nothing else -- which is the whole point of the exercise, and the
-reason this file lives outside `release/`.
+reason this lives outside `release/`.
+
+The test suite drives wsfs through this app rather than through a fixture of
+its own, so the integration path is the one under test.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import FastAPI, Header, HTTPException, Path
+from fastapi import FastAPI, Header, HTTPException
+from fastapi import Path as APIPath
 from sqlmodel import Field, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -50,18 +55,19 @@ async def enrolled(session: AsyncSession, email: str) -> Account:
 
 
 # pyright: reportUnusedFunction=false
-def create_host_app(
+def create_sample_app(
     *,
-    database: Database,
-    blob_root,
+    database: Database | None = None,
+    blob_root: Path = Path("/tmp/wsfs-blobs"),
     heartbeat_seconds: float = 15.0,
     grace_seconds: float = 30.0,
     max_blob_bytes: int = 64 * 1024 * 1024,
 ) -> FastAPI:
-    app = FastAPI(title="host")
+    database = database or Database()
+    app = FastAPI(title="wsfs sample host")
 
     async def authorize(
-        workspace_id: Annotated[UUID, Path()],
+        workspace_id: Annotated[UUID, APIPath()],
         x_user_email: Annotated[str, Header()],
     ) -> UUID:
         """The host's policy, in the one place a host would put it: who this

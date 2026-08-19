@@ -14,7 +14,7 @@ from conftest import (
     refused,
     seen,
 )
-from host import MODELS
+from app import MODELS
 from wsfs_suede.release.backend.tree import Tree
 
 tree = Tree(MODELS)

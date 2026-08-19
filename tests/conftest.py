@@ -21,7 +21,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 # Imported for the side effect: the host declares its own tables and builds
 # the wsfs schema against them, which is what registers everything.
-from host import create_host_app
+from app import create_sample_app
 from wsfs_suede.release.backend.blobs import digest_of
 from sqlmodel.ext.asyncio.session import AsyncSession
 from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.postgres.config import (
@@ -80,7 +80,7 @@ async def processes(tmp_path):
         overrides.setdefault("blob_root", tmp_path / f"blobs-{len(built) + 1}")
         database = Database(pool="null")
         built.append(database)
-        return create_host_app(
+        return create_sample_app(
             database=database,
             heartbeat_seconds=0.05,
             grace_seconds=0.2,
@@ -176,6 +176,21 @@ class Api:
             op="rename", id=id, name_version=name_version, name=name, **kw
         )
 
+    async def move(
+        self,
+        id: str,
+        *,
+        name: str,
+        name_version: str,
+        parent: str | None,
+        parent_version: str,
+        **kw: Any,
+    ):
+        return await self.submit(
+            op="move", id=id, name=name, name_version=name_version,
+            parent=parent, parent_version=parent_version, **kw,
+        )
+
     async def reparent(self, id: str, parent_version: str, parent: str | None, **kw):
         return await self.submit(
             op="reparent", id=id, parent_version=parent_version, parent=parent, **kw
@@ -186,15 +201,15 @@ class Api:
 
     async def write(self, id: str, content_version: str | None, content: str, **kw):
         return await self.submit(
-            op="write", type="text", id=id, content_version=content_version,
-            content=content, **kw,
+            op="write", id=id, content_version=content_version,
+            content={"type": "text", "content": content}, **kw,
         )
 
     async def write_blob(self, id: str, content_version: str | None, *,
                          hash: str, size: int, mime: str, **kw):
         return await self.submit(
-            op="write", type="binary", id=id, content_version=content_version,
-            hash=hash, size=size, mime=mime, **kw,
+            op="write", id=id, content_version=content_version,
+            content={"type": "binary", "hash": hash, "size": size, "mime": mime}, **kw,
         )
 
     async def store(self, data: bytes, mime: str = "application/octet-stream") -> str:

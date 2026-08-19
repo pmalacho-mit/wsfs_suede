@@ -1,9 +1,11 @@
 """The stream: one ordered channel, claimed once, spliced without a gap."""
 
 import asyncio
+import time
 
 from conftest import (
     Api,
+    meta,
     acknowledged,
     content_version,
     created,
@@ -173,33 +175,47 @@ async def test_every_subscriber_sees_every_event(api: Api, other: Api):
 
 
 async def test_heartbeats_keep_an_idle_stream_alive(api: Api):
+    """Waited for rather than slept through: a fixed sleep asserts how fast
+    the machine is, which is not what this is about."""
     token = (await api.initialize())["token"]
     async with api.stream(token) as response:
-        chunks: list[str] = []
+        beats: list[str] = []
 
         async def read() -> None:
             async for line in response.aiter_lines():
-                chunks.append(line)
+                if line.startswith(":"):
+                    beats.append(line)
 
         reading = asyncio.create_task(read())
-        await asyncio.sleep(0.3)  # heartbeat_seconds is 0.05 in tests
+        deadline = time.monotonic() + 5.0
+        while not beats and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         reading.cancel()
 
-    assert ": hb" in chunks
+    assert beats and beats[0] == ": hb"
 
 
-async def test_a_create_announces_the_content_the_entry_was_born_with(api: Api):
-    entry, born = new_id(), api.transaction()
+async def test_a_move_arrives_as_one_event_carrying_both_halves(api: Api):
+    folder = await created(api, "src", type="folder")
+    file = await created(api, "a.py")
+    was = await meta(api, file)
+    moving = api.transaction()
     token = (await api.initialize())["token"]
+
     async with listening(api, token) as heard:
         acknowledged(
-            await api.create(
-                entry, name="notes.md", transaction=born,
-                content={"type": "text", "content": "hello"},
+            await api.move(
+                file,
+                name="b.py",
+                name_version=was["name_version"],
+                parent=folder,
+                parent_version=was["parent_version"],
+                transaction=moving,
             )
         )
-        event = (await heard.until(1))[0]
+        events = await heard.until(1)
 
-    assert event["type"] == "create"
-    assert event["value"]["content_version"] == born
-    assert "hello" not in str(event)  # content is fetched, never streamed
+    assert len(events) == 1  # never a rename the client has to pair with a move
+    assert events[0]["type"] == "move"
+    assert events[0]["value"] == {"name": "b.py", "parent": folder}
+    assert events[0]["transaction"] == moving

@@ -17,7 +17,7 @@ from conftest import (
     refused,
     seen,
 )
-from host import MODELS
+from app import MODELS
 
 
 def creating(api: Api, entry: str, **fields: Any) -> dict[str, Any]:
@@ -50,8 +50,8 @@ async def test_a_whole_offline_session_replays_in_order(api: Api):
     snapshot = await api.initialize(
         [
             creating(api, entry, transaction=born),
-            {"op": "write", "type": "text", "transaction": api.transaction(),
-             "id": entry, "content_version": born, "content": "offline work"},
+            {"op": "write", "transaction": api.transaction(),
+             "id": entry, "content_version": born, "content": {"type": "text", "content": "offline work"}},
             {"op": "rename", "transaction": api.transaction(), "id": entry,
              "name_version": born, "name": "notes.md"},
         ]
@@ -121,8 +121,8 @@ async def test_a_refused_create_does_not_cascade_into_its_dependents(api: Api):
     snapshot = await api.initialize(
         [
             creating(api, entry, parent=folder),
-            {"op": "write", "type": "text", "transaction": dependent, "id": entry,
-             "content_version": new_id(), "content": "orphaned"},
+            {"op": "write", "transaction": dependent, "id": entry,
+             "content_version": new_id(), "content": {"type": "text", "content": "orphaned"}},
         ]
     )
 

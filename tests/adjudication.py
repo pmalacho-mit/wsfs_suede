@@ -271,3 +271,80 @@ async def test_a_file_is_created_with_content_and_a_folder_without(api: Api):
     for request in malformed:
         response = await api.submit(op="create", id=new_id(), **request)
         assert response.status_code == 422, request
+
+
+async def test_a_move_changes_where_an_entry_lives_and_what_it_is_called(api: Api):
+    folder = await created(api, "src", type="folder")
+    file = await created(api, "a.py")
+    was = await meta(api, file)
+
+    acknowledged(
+        await api.move(
+            file,
+            name="b.py",
+            name_version=was["name_version"],
+            parent=folder,
+            parent_version=was["parent_version"],
+        )
+    )
+
+    moved = await meta(api, file)
+    assert (moved["name"], moved["parent"]) == ("b.py", folder)
+
+
+async def test_a_move_that_loses_either_race_moves_nothing(api: Api, other: Api):
+    folder = await created(api, "src", type="folder")
+    file = await created(api, "a.py")
+    was = await meta(api, file)
+    acknowledged(await other.rename(file, was["name_version"], "theirs.py"))
+
+    refusal = refused(
+        await api.move(
+            file,
+            name="b.py",
+            name_version=was["name_version"],
+            parent=folder,
+            parent_version=was["parent_version"],
+        )
+    )
+
+    assert refusal["reason"] == "entry was already renamed"
+    still = await meta(api, file)
+    assert (still["name"], still.get("parent")) == ("theirs.py", None)
+
+
+async def test_a_move_into_a_deleted_folder_moves_nothing(api: Api):
+    folder = await created(api, "src", type="folder")
+    file = await created(api, "a.py")
+    acknowledged(await api.delete(folder, await seen(api, folder)))
+    was = await meta(api, file)
+
+    refusal = refused(
+        await api.move(
+            file,
+            name="b.py",
+            name_version=was["name_version"],
+            parent=folder,
+            parent_version=was["parent_version"],
+        )
+    )
+
+    assert refusal["reason"] == "the destination was deleted"
+    assert (await meta(api, file))["name"] == "a.py"
+
+
+async def test_a_move_may_not_swallow_its_own_subtree(api: Api):
+    outer = await created(api, "outer", type="folder")
+    inner = await created(api, "inner", type="folder", parent=outer)
+    was = await meta(api, outer)
+
+    refusal = refused(
+        await api.move(
+            outer,
+            name="renamed",
+            name_version=was["name_version"],
+            parent=inner,
+            parent_version=was["parent_version"],
+        )
+    )
+    assert refusal["reason"] == "the destination is inside the entry"
