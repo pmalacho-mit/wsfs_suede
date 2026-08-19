@@ -3,9 +3,11 @@ import devcontainer from "../../sweater-vest-suede.programmatic-docker-suede/dev
 import { container } from "../../sweater-vest-suede.programmatic-docker-suede";
 import {
   buildAndRun,
+  certificates,
   playwright,
   sessionWithTabs,
   type Browser,
+  type Forwarded,
   browsers,
 } from "../../sweater-vest-suede.browser-control-container-suede";
 import { cli } from "../../sweater-vest-suede.typescript-cli-suede";
@@ -37,6 +39,29 @@ export namespace Report {
     component?: RegExp;
     /** Only run tests whose name or id matches this pattern. */
     test?: RegExp;
+    /**
+     * Ports to publish on the browser's own loopback address, so that a page
+     * served from one counts as a trustworthy origin. Only such an origin is
+     * given SharedArrayBuffer, service workers and the rest of the
+     * secure-context APIs — reaching the same server at the devcontainer's
+     * address is not enough, and the page gives no hint why.
+     *
+     * Point `server` at `http://localhost:<port>` to use them.
+     */
+    forward?: Forwarded[];
+    /**
+     * How long the run may go without a word from any browser before it is
+     * given up on. Raise it for a suite whose slowest single test is longer
+     * than this — booting a language runtime, downloading a large asset.
+     */
+    silenceMs?: number;
+    /**
+     * Certificates the browser should trust, by path on this machine.
+     * Defaults to the roots this machine has been given beyond its
+     * distribution's — an intercepting proxy's CA, typically, without which
+     * the browser cannot reach what this machine can.
+     */
+    trustCertificates?: string[];
   };
 
   /**
@@ -286,6 +311,8 @@ export const generateReport = async (
         container: () => name,
         network: await devcontainer.network(),
         log: true,
+        forward: options.forward ?? [],
+        trustCertificates: options.trustCertificates ?? (await certificates.local()),
         skipIfRunning: true, // can re-use browser container specific to this devcontainer
       });
       await playwright.ready(name);
@@ -300,7 +327,7 @@ export const generateReport = async (
       ),
     );
 
-    server = await startReportServer();
+    server = await startReportServer(options.silenceMs);
 
     const discover = (browser: Browser) =>
       sessions.get(browser)!.newTab(urls.discover(options, server!));
@@ -333,8 +360,15 @@ export const generateReport = async (
   }
 };
 
+const ports = (list: string): Forwarded[] =>
+  list
+    .split(",")
+    .map((port) => Number(port.trim()))
+    .filter((port) => Number.isInteger(port) && port > 0);
+
 if (cli.entry(import.meta.url)) {
-  const { server, closet, browser, output, test, component } = cli(
+  const { server, closet, browser, output, test, component, forward, silence } =
+    cli(
     "Run the sweater vest report script.",
     cli.flag(
       ["server", "s"],
@@ -365,6 +399,18 @@ if (cli.entry(import.meta.url)) {
       ["component", "m"],
       "Only open components whose path matches this pattern.",
     ),
+    cli.flag(
+      ["forward", "f"],
+      "Ports to publish on the browser's localhost, comma separated, so that " +
+        "pages served from them are trustworthy origins.",
+      "",
+    ),
+    cli.flag(
+      ["silence", "w"],
+      "Seconds a run may go without a word from any browser before it is " +
+        "given up on.",
+      0,
+    ),
   );
 
   generateReport({
@@ -372,6 +418,8 @@ if (cli.entry(import.meta.url)) {
     closet,
     output,
     browsers: browser,
+    forward: ports(forward),
+    silenceMs: silence > 0 ? silence * 1000 : undefined,
     component: component ? new RegExp(component, "i") : undefined,
     test: test ? new RegExp(test, "i") : undefined,
   })

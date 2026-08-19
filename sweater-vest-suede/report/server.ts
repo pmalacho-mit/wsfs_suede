@@ -38,6 +38,23 @@ type OnMessage = (payload: {
 }) => void;
 
 /**
+ * Expires when nothing has been heard for `timeout`, rather than at a fixed
+ * deadline from the start: a suite that boots a language runtime before its
+ * first assertion is slow, not stuck, and one whose page died says nothing at
+ * all.
+ */
+const watchdog = (timeout: number, expire: () => void) => {
+  let timer = setTimeout(expire, timeout);
+  return {
+    reset: () => {
+      clearTimeout(timer);
+      timer = setTimeout(expire, timeout);
+    },
+    stop: () => clearTimeout(timer),
+  };
+};
+
+/**
  * Creates an HTTP server that:
  *   - handles CORS and OPTIONS preflight,
  *   - reads and parses each POST body as JSON,
@@ -64,6 +81,7 @@ export const createHttpListener = ({
 }) =>
   new Promise<{ url: string; close: () => void }>((resolve) => {
     const server = createServer(async (request, response) => {
+      silence.reset();
       setCors(response);
       if (request.method === "OPTIONS") {
         response.writeHead(204);
@@ -81,13 +99,13 @@ export const createHttpListener = ({
       }
     });
 
-    const timer = setTimeout(() => {
+    const silence = watchdog(timeout, () => {
       server.close();
       onTimeout();
-    }, timeout);
+    });
 
     const close = () => {
-      clearTimeout(timer);
+      silence.stop();
       server.close();
     };
 

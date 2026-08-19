@@ -238,6 +238,31 @@ Open `fashion-show.md` to see the full report with pass/fail status, duration, e
 | `--output <path>`       | `-o`      | Output path for the Markdown report. Pass `""` to skip. | `./fashion-show.md`             |
 | `--component <pattern>` | `-m`      | Only open components whose path matches this regex.     | (all)                           |
 | `--test <pattern>`      | `-t`      | Only run tests whose name or id matches this regex.     | (all)                           |
+| `--forward <ports>`     | `-f`      | Ports to publish on the browser's own `localhost`.      | (none)                          |
+| `--silence <seconds>`   | `-w`      | Seconds without a word from any browser before giving up. | `120`                        |
+
+#### Secure-context APIs
+
+`SharedArrayBuffer`, service workers, `crypto.subtle` and the rest are only
+given to a _trustworthy_ origin — https, or `localhost`. A dev server reached at
+the devcontainer's address is neither, and a page needing one of those fails
+with no hint as to why.
+
+`--forward` publishes a port on the browser container's own loopback address, so
+point `--server` at `localhost` to use it:
+
+```sh
+npm run report -- --server http://localhost:5173 --forward 5173,1234
+```
+
+Forward every port the page talks to, not only the one serving it.
+
+#### Slow suites
+
+`--silence` is an idle timeout, not a deadline: it fires when nothing has been
+heard from any browser for that long, so a suite may run for as long as it likes
+provided it keeps reporting. Raise it above the duration of the slowest _single_
+test — a first test that boots a language runtime is the usual reason.
 
 Patterns are case-insensitive regular expressions. Tests that don't match `--test` are recorded as `skipped` in the report rather than omitted entirely.
 
