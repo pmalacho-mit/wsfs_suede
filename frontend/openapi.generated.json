@@ -289,10 +289,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "One `data:` line per event, in position order, and a `: hb` comment every heartbeat. Declared here because this payload is what a client's confirmed map is mutated by -- an undeclared one could not be generated.",
             "content": {
+              "text/event-stream": {},
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/StreamEvent"
+                }
               }
             }
           },
@@ -443,6 +446,18 @@
           "seen"
         ],
         "title": "Delete"
+      },
+      "Event": {
+        "type": "string",
+        "enum": [
+          "create",
+          "name",
+          "parent",
+          "move",
+          "delete",
+          "write"
+        ],
+        "title": "Event"
       },
       "HTTPValidationError": {
         "properties": {
@@ -673,6 +688,32 @@
         "title": "Move",
         "description": "A rename and a reparent as one transaction.\n\nA filesystem `mv` changes where an entry lives and what it is called at\nonce, and doing that as two transactions can half-succeed: the rename\nlands, the reparent is refused, and the entry ends up somewhere nobody\nasked for. This presents both tokens and takes both positions or neither."
       },
+      "Moved": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "Moved",
+        "description": "Where an entry went, and what it is called now."
+      },
       "Rejection": {
         "properties": {
           "transaction": {
@@ -824,6 +865,67 @@
         ],
         "title": "Seen",
         "description": "Every token of the entry a delete was looking at.\n\nDelete is the destructive operation, and the question worth asking is not\n\"has the deleted flag moved\" -- it almost never has -- but \"is this still\nthe thing I was told to destroy\"."
+      },
+      "StreamEvent": {
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/Event"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Metadata"
+              },
+              {
+                "$ref": "#/components/schemas/Moved"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "transaction"
+        ],
+        "title": "StreamEvent",
+        "description": "DEPARTURE: a create's metadata rides in `value`, as every other event's\npayload does. The contract spreads it over the event, where its `type`\n(\"file\"/\"folder\") is shadowed by the event's own `type` (\"create\") and the\nclient can no longer tell a file from a folder.\n\n`transaction` does the job the old `version` field did as well: it is the\nid of the transaction this event announces, which IS the new token for the\nproperty it changed. On an event for property P, set the value and set P's\ntoken to `transaction`."
       },
       "TextBody": {
         "properties": {

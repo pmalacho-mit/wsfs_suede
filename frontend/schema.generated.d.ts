@@ -159,6 +159,11 @@ export interface components {
             op: "delete";
             seen: components["schemas"]["Seen"];
         };
+        /**
+         * Event
+         * @enum {string}
+         */
+        Event: "create" | "name" | "parent" | "move" | "delete" | "write";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -262,6 +267,16 @@ export interface components {
              */
             parent_version: string;
         };
+        /**
+         * Moved
+         * @description Where an entry went, and what it is called now.
+         */
+        Moved: {
+            /** Name */
+            name: string;
+            /** Parent */
+            parent?: string | null;
+        };
         /** Rejection */
         Rejection: {
             /**
@@ -350,6 +365,35 @@ export interface components {
             deleted_version: string;
             /** Content Version */
             content_version: string | null;
+        };
+        /**
+         * StreamEvent
+         * @description DEPARTURE: a create's metadata rides in `value`, as every other event's
+         *     payload does. The contract spreads it over the event, where its `type`
+         *     ("file"/"folder") is shadowed by the event's own `type` ("create") and the
+         *     client can no longer tell a file from a folder.
+         *
+         *     `transaction` does the job the old `version` field did as well: it is the
+         *     id of the transaction this event announces, which IS the new token for the
+         *     property it changed. On an event for property P, set the value and set P's
+         *     token to `transaction`.
+         */
+        StreamEvent: {
+            type: components["schemas"]["Event"];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Transaction
+             * Format: uuid
+             */
+            transaction: string;
+            /** Value */
+            value?: components["schemas"]["Metadata"] | components["schemas"]["Moved"] | string | boolean | null;
+            /** User */
+            user?: string | null;
         };
         /** TextBody */
         TextBody: {
@@ -592,13 +636,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description One `data:` line per event, in position order, and a `: hb` comment every heartbeat. Declared here because this payload is what a client's confirmed map is mutated by -- an undeclared one could not be generated. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "text/event-stream": unknown;
+                    "application/json": components["schemas"]["StreamEvent"];
                 };
             };
             /** @description Validation Error */

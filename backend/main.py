@@ -45,6 +45,7 @@ from .contract import (
     Refusal,
     Rejected,
     Rejection,
+    StreamEvent,
     Submitted,
     TextContentResponse,
 )
@@ -201,7 +202,7 @@ def mint_token(
 ) -> str:
     """Bound to the position this snapshot was taken at, so the stream that
     claims it replays exactly the changes the snapshot does not show."""
-    token = secrets.token_hex(16)
+    token = secrets.token_hex(nbytes=16)
     session.add(
         backend.models.token(
             token=token,
@@ -503,7 +504,22 @@ def create_router(
                 ),
             )
 
-    @router.get("/workspaces/{workspace_id}/stream")
+    @router.get(
+        "/workspaces/{workspace_id}/stream",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "model": StreamEvent,
+                "content": {"text/event-stream": {}},
+                "description": (
+                    "One `data:` line per event, in position order, and a"
+                    " `: hb` comment every heartbeat. Declared here because"
+                    " this payload is what a client's confirmed map is"
+                    " mutated by -- an undeclared one could not be generated."
+                ),
+            }
+        },
+    )
     async def events(workspace_id: UUID, token: str) -> StreamingResponse:
         """The token is the credential here -- EventSource cannot carry a
         header, which is why it is single-use and position-bound."""
