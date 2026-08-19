@@ -8,15 +8,7 @@ import { Kernel } from "wsfs_suede.python-web-kernel-suede";
 import fs from "wsfs_suede.python-web-kernel-suede/fs";
 import { Editor } from "wsfs_suede.python-monaco-suede";
 
-import {
-  connect,
-  filesystem,
-  http,
-  inMemory,
-  provider,
-  type Store,
-  type Workspace,
-} from "$wsfs";
+import { connect, filesystem, http, inMemory, provider, type Workspace } from "$wsfs";
 
 const BACKEND = "/wsfs";
 const ROOT = "/home/pyodide";
@@ -30,13 +22,11 @@ export class Open {
   #stop: () => void;
   #kernel: Kernel | undefined;
 
-  /** `bytes` is injectable for the browser tests, which reach this page over
-   * plain http and so have no `crypto.subtle` to hash with. */
-  constructor(id: string, user: string, bytes: Store = inMemory()) {
+  constructor(id: string, user: string) {
     this.workspace = connect({
       workspace: id,
       transport: http(BACKEND, asUser(user)),
-      bytes,
+      bytes: inMemory(),
     });
     this.#stop = this.workspace.watch(() => {
       this.paths = [...this.workspace.index().paths()].sort();

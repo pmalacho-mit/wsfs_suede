@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "sync": "svelte-kit sync",
-    "report": "../../sweater-vest-suede/report.sh"
+    "report": "../../sweater-vest-suede/report.sh",
+    "test:browser": "../../sweater-vest-suede/report.sh --server http://localhost:5173 --closet /tests --forward 5173"
   },
   "devDependencies": {
     "@storybook/test": "^8.6.15",

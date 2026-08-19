@@ -38,6 +38,24 @@
 <Sweater config category="File tree" orientation="vertical" mode="serial" />
 
 <Sweater
+  name="runs on a trustworthy origin"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    // Stated once, so the failure has a name. The client hashes queued
+    // payloads with `crypto.subtle`, which browsers withhold from insecure
+    // origins -- reached at the devcontainer's ADDRESS, every test below
+    // fails on a missing namespace instead. `--forward 5173` is what puts
+    // this page on the browser's own localhost, where it is trusted.
+    harness.expect(window.isSecureContext).toBe(true);
+    harness.expect(typeof crypto.subtle?.digest).toBe("function");
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <p class="note">Origin: {typeof window === "undefined" ? "?" : window.origin}</p>
+  {/snippet}
+</Sweater>
+
+<Sweater
   name="draws what the workspace holds"
   lazy
   body={async (harness) => {
@@ -195,6 +213,12 @@
 </Sweater>
 
 <style>
+  .note {
+    margin: 0;
+    padding: 0.5rem;
+    font: 12px ui-monospace, monospace;
+  }
+
   .panel {
     height: 320px;
     overflow: auto;
