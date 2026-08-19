@@ -1,7 +1,9 @@
 {
   "customizations": {
     "desolate": {
-      "allowPrivileged": true
+      "allowPrivileged": true,
+      "shadowImages": ["node:22-bookworm-slim"],
+      "ports": [5173]
     },
     "vscode": {
       "extensions": [
