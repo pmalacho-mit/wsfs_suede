@@ -1,20 +1,27 @@
 """The wire shapes, mirroring `docs/filesystem-sync-contract.ts`.
 
-Three deliberate departures from that document, each noted where it lands:
-`op` on outbox requests, `value` on the create event, and two refusal reasons
-the document does not enumerate.
+Identity is client-minted throughout. A transaction id is chosen by the client
+before it sends anything, and after the server applies it that same id is the
+CAS token for the property it changed -- so a client knows, at mint time and
+without a round trip, what token its own work will produce. That is what lets
+an outbox chain: each queued item presents the id of the item before it.
+
+Mint with a platform CSPRNG (`crypto.randomUUID()`), never `Math.random()`;
+UUIDv7 is preferred for index locality on append-only tables. Mint once and
+reuse the same id on every retry -- that is what makes a retry free.
 """
 
 from __future__ import annotations
 
 import enum
-from typing import Annotated, Any, Literal
+import unicodedata
+from typing import Annotated, Any, Literal, final
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 from pydantic_core import to_jsonable_python
 
-from .models import Event, Type
+from .models import Type
 
 
 class Operation(str, enum.Enum):
@@ -30,52 +37,129 @@ class Kind(str, enum.Enum):
     BINARY = "binary"
 
 
+class Event(str, enum.Enum):
+    CREATE = "create"
+    NAME = "name"
+    PARENT = "parent"
+    DELETE = "delete"
+    WRITE = "write"
+
+
+def to_nfc(name: str) -> str:
+    """Unicode normalisation belongs at the door, and only here.
+
+    A macOS client's NFD `café` and a Linux client's NFC `café` must
+    not become two siblings a user cannot tell apart, and the controller is the
+    only participant that sees both.
+    """
+    return unicodedata.normalize("NFC", name)
+
+
+EntryName = Annotated[str, AfterValidator(to_nfc)]
+
+
 # -- requests ---------------------------------------------------------------
 #
 # DEPARTURE: every request carries `op`. The contract's outbox union is not
-# structurally discriminable -- a Reparent to the workspace root and a Delete
-# are the same three fields -- so the discriminator is explicit rather than
+# structurally discriminable, so the discriminator is explicit rather than
 # guessed at.
 
 
 class Transacted(BaseModel):
-    transaction: str
+    transaction: UUID
+    """Client-minted. Becomes the primary key of the row this applies, and the
+    CAS token the next mutation of that property must present."""
+
+    id: UUID
+    """The entry. Client-minted too, so a create needs no round trip."""
+
+
+class TextBody(BaseModel):
+    type: Literal[Kind.TEXT] = Kind.TEXT
+    content: str
+
+
+class BinaryBody(BaseModel):
+    type: Literal[Kind.BINARY] = Kind.BINARY
+    hash: str
+    size: int
+    mime: str
+
+
+Body = Annotated[TextBody | BinaryBody, Field(discriminator="type")]
 
 
 class Create(Transacted):
     op: Literal[Operation.CREATE] = Operation.CREATE
     type: Type
-    name: str
+    name: EntryName
+    """What the entry is created as. If a sibling already holds it, the create
+    still lands under this name and the controller immediately renames it --
+    so the settled name arrives as an ordinary `name` event rather than as a
+    surprise inside the create."""
     parent: UUID | None = None
+    content: Body | None
+    """A file is born with its content; a folder is born with none.
+
+    Required either way, so "empty file" is something a client says
+    (`{"type": "text", "content": ""}`) rather than something it omits. An
+    entry therefore never exists in a contentless state, which is what lets
+    every write present a content token that is really there.
+    """
+
+    @model_validator(mode="after")
+    def content_belongs_to_files(self) -> "Create":
+        if (self.content is None) is (self.type is Type.FILE):
+            raise ValueError("a file is created with content, a folder without")
+        return self
 
 
-class Versioned(Transacted):
-    id: UUID
-    version: UUID
-    """The CAS token: the version this request was composed against."""
-
-
-class Delete(Versioned):
-    op: Literal[Operation.DELETE] = Operation.DELETE
-
-
-class Rename(Versioned):
+class Rename(Transacted):
     op: Literal[Operation.RENAME] = Operation.RENAME
-    name: str
+    name: EntryName
+    name_version: UUID
 
 
-class Reparent(Versioned):
+class Reparent(Transacted):
     op: Literal[Operation.REPARENT] = Operation.REPARENT
     parent: UUID | None = None
+    parent_version: UUID
 
 
-class WriteText(Versioned):
+class Seen(BaseModel):
+    """Every token of the entry a delete was looking at.
+
+    Delete is the destructive operation, and the question worth asking is not
+    "has the deleted flag moved" -- it almost never has -- but "is this still
+    the thing I was told to destroy".
+    """
+
+    name_version: UUID
+    parent_version: UUID
+    deleted_version: UUID
+    content_version: UUID | None
+    """Required, and null for a folder, which holds none."""
+
+
+class Delete(Transacted):
+    op: Literal[Operation.DELETE] = Operation.DELETE
+    seen: Seen
+
+
+class Written(Transacted):
+    content_version: UUID
+    """Never null: a file is born with content, so there is always a token to
+    present. A folder has none, and a write to one is refused for being a
+    folder before its token is ever considered."""
+
+
+class WriteText(Written):
     op: Literal[Operation.WRITE] = Operation.WRITE
     type: Literal[Kind.TEXT] = Kind.TEXT
     content: str
 
 
-class WriteBinary(Versioned):
+class WriteBinary(Written):
     op: Literal[Operation.WRITE] = Operation.WRITE
     type: Literal[Kind.BINARY] = Kind.BINARY
     hash: str
@@ -85,10 +169,11 @@ class WriteBinary(Versioned):
 
 Write = Annotated[WriteText | WriteBinary, Field(discriminator="type")]
 
-Queued = Annotated[Delete | Rename | Reparent | Write, Field(discriminator="op")]
-"""What may sit in a client's outbox. Creates are online-only and never queued."""
-
-Submitted = Annotated[Create | Delete | Rename | Reparent | Write, Field(discriminator="op")]
+Submitted = Annotated[
+    Create | Delete | Rename | Reparent | Write, Field(discriminator="op")
+]
+"""Everything a client can submit -- and everything it can queue. Creates are
+no longer online-only, because the client already knows the id."""
 
 
 # -- responses ---------------------------------------------------------------
@@ -98,21 +183,18 @@ class Acknowledged(BaseModel):
     rejected: Literal[False] = False
 
 
-class Created(Acknowledged):
-    id: UUID
-    """Identity, not state: the entry itself still arrives via the stream."""
-
-
 class Rejected(BaseModel):
     rejected: Literal[True] = True
     reason: str
     version: UUID | None = None
-    """The entry's current version, when the refusal was a CAS conflict."""
+    """The property's current token, when the refusal was a lost race: what a
+    client rebases onto before retrying."""
 
 
-Response = Acknowledged | Created | Rejected
+Response = Acknowledged | Rejected
 
 
+@final
 class Refusal:
     """The closed set of typed failures a client may have to route on."""
 
@@ -124,10 +206,24 @@ class Refusal:
     ALREADY_MOVED = "entry had already been moved"
     ALREADY_WRITTEN = "content was already updated"
 
-    # DEPARTURE: neither reason appears in the contract, and both name a
-    # failure it can otherwise only answer with a lie.
+    # Failures the contract does not enumerate, each naming something it could
+    # otherwise only answer with a lie.
     DESTINATION_INSIDE_ENTRY = "the destination is inside the entry"
     BYTES_NEVER_STORED = "content bytes were never stored"
+    ENTRY_UNKNOWN = "no such entry"
+    ID_TAKEN = "that id is already in use"
+    NOT_A_FILE = "content cannot be written to a folder"
+    NAME_INVALID = "that name is not permitted"
+    TOO_DEEP = "that destination is nested too deeply"
+    FOLDER_FULL = "that folder already holds too many entries"
+    CREATE_REFUSED = "the create this depends on was refused"
+
+    UNKNOWN_VERSION = "the version presented was never issued"
+    """A different CLASS of failure from the rest. A token is current (accept),
+    superseded (an ordinary conflict -- rebase and retry), or was never issued
+    at all, which means the client's state is unsound and its only sound move
+    is to discard it and re-Initialize. Answering the third as an ordinary
+    conflict sends a client into a retry loop it cannot win."""
 
     @staticmethod
     def modified(*, name: bool, content: bool) -> str:
@@ -139,14 +235,21 @@ class Refusal:
 
 
 class Metadata(BaseModel):
-    """Pure namespace: no content descriptor ever appears here."""
+    """Pure namespace, plus the four tokens the next mutation must present.
+
+    No content descriptor ever appears here: `content_version` names the write
+    to fetch, not what it holds.
+    """
 
     id: UUID
-    version: UUID
     type: Type
     name: str
     parent: UUID | None = None
     deleted: bool | None = None
+    name_version: UUID
+    parent_version: UUID
+    deleted_version: UUID
+    content_version: UUID | None = None
 
 
 CARRIES_A_VALUE = {Event.CREATE, Event.NAME, Event.PARENT, Event.DELETE}
@@ -156,14 +259,19 @@ class StreamEvent(BaseModel):
     """DEPARTURE: a create's metadata rides in `value`, as every other event's
     payload does. The contract spreads it over the event, where its `type`
     ("file"/"folder") is shadowed by the event's own `type` ("create") and the
-    client can no longer tell a file from a folder."""
+    client can no longer tell a file from a folder.
+
+    `transaction` does the job the old `version` field did as well: it is the
+    id of the transaction this event announces, which IS the new token for the
+    property it changed. On an event for property P, set the value and set P's
+    token to `transaction`.
+    """
 
     type: Event
     id: UUID
-    version: UUID
+    transaction: UUID
     value: Metadata | str | UUID | bool | None = None
     user: UUID | None = None
-    transaction: str | None = None
 
     def payload(self) -> dict[str, Any]:
         wire = self.model_dump(mode="json", exclude_none=True, exclude={"value"})
@@ -177,13 +285,19 @@ class StreamEvent(BaseModel):
 
 
 class Rejection(BaseModel):
-    transaction: str
+    transaction: UUID
     reason: str
     version: UUID | None = None
 
 
+MOST_TRANSACTIONS_PER_INITIALIZE = 10_000
+"""An outbox composed offline can be long; it cannot be unbounded."""
+
+
 class InitializeRequest(BaseModel):
-    outbox: list[Queued] = Field(default_factory=list)
+    outbox: list[Submitted] = Field(
+        default_factory=list, max_length=MOST_TRANSACTIONS_PER_INITIALIZE
+    )
     """In counter order. Replay depends on it."""
 
 
@@ -193,7 +307,7 @@ class InitializeResponse(BaseModel):
 
     token: str
     entries: list[Metadata]
-    applied: list[str]
+    applied: list[UUID]
     rejected: list[Rejection]
 
 
@@ -201,3 +315,4 @@ class TextContentResponse(BaseModel):
     type: Literal[Kind.TEXT] = Kind.TEXT
     content: str
     version: UUID
+    """The content token this text was fetched at."""
