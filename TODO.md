@@ -102,13 +102,22 @@ is a worked example. What remains:
     re-enters through Initialize, which is what it does after any failure
 [ ] Content responses carry an ETag but honour no If-None-Match
 [ ] tree.lineage() walks one indexed query per level. Depth is capped at 64,
-    so the cost is bounded; a recursive CTE would trade that for a scan of
-    the workspace's current rows, which is worse until trees get deep
+    so the cost is bounded, and a submission now memoises what it looked up,
+    so the thousandth create into one folder walks nothing. A recursive CTE
+    would trade the remaining per-level query for a scan of the workspace's
+    current rows, which is worse until trees get deep
 [ ] stream replay filters five logs by `position > P` and joins fs_entries to
     scope the workspace, so it reads rows belonging to other workspaces above
     that position. It was one log before and is five now. A workspace column
     on each log would make it a pure index range scan, at the cost of storing
-    something derivable -- worth it only once measured
+    something derivable -- worth it only once measured.
+    NOT a correctness question any more: `stream.since` takes the five reads
+    at one snapshot (REPEATABLE READ), because read committed let a
+    transaction committing mid-replay be seen in some logs and not others
+[ ] `_spent_on` reads all five logs on every submitted transaction to answer
+    "is this id spent". One round trip, and unavoidable while the answer must
+    span logs the request would not write -- but it is on the hot path, and a
+    single index over (id) across the logs would be the thing to measure
 ```
 
 ## 5. Deployment
@@ -138,4 +147,11 @@ is a worked example. What remains:
     converging on field-level equality with an empty outbox. The failure mode
     it can now reach that it could not before is "response dropped after the
     server applied a create"
+[ ] the client renders unreachable entries at the ROOT rather than hiding
+    them. `paths.walked` drops an entry whose ancestry is interrupted, so the
+    index is right -- but nothing has been tested for the case where a folder
+    is tombstoned while its children are open
+[ ] blobs are never exercised by a browser test, because every one of them is
+    text. A binary round trip through `crypto.subtle` and the workspace-scoped
+    blob routes is the gap
 ```
