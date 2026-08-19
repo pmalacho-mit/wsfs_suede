@@ -38,17 +38,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/wsfs/blobs/{digest}": {
+    "/wsfs/workspaces/{workspace_id}/blobs/{digest}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Fetch Blob */
-        get: operations["fetch_blob_wsfs_blobs__digest__get"];
-        /** Store */
-        put: operations["store_wsfs_blobs__digest__put"];
+        /**
+         * Fetch Blob
+         * @description Served only to a workspace that WRITES these bytes somewhere.
+         *
+         *     A hash is not a secret: it travels in `X-Content-Hash`, in every
+         *     `BinaryBody`, and through any client that ever held the file. So
+         *     knowing one buys nothing here -- the caller has to be someone the host
+         *     lets into a workspace whose own content log names it.
+         */
+        get: operations["fetch_blob_wsfs_workspaces__workspace_id__blobs__digest__get"];
+        /**
+         * Store
+         * @description Under a workspace because that is the only question a host's
+         *     `authorize` can answer. The bytes themselves are stored once for the
+         *     deployment and named by their hash -- two workspaces holding the same
+         *     file hold one copy -- but somebody who may reach no workspace at all
+         *     may not fill the deployment's disk either.
+         */
+        put: operations["store_wsfs_workspaces__workspace_id__blobs__digest__put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -527,11 +542,12 @@ export interface operations {
             };
         };
     };
-    fetch_blob_wsfs_blobs__digest__get: {
+    fetch_blob_wsfs_workspaces__workspace_id__blobs__digest__get: {
         parameters: {
             query?: never;
             header?: never;
             path: {
+                workspace_id: string;
                 digest: string;
             };
             cookie?: never;
@@ -558,11 +574,12 @@ export interface operations {
             };
         };
     };
-    store_wsfs_blobs__digest__put: {
+    store_wsfs_workspaces__workspace_id__blobs__digest__put: {
         parameters: {
             query?: never;
             header?: never;
             path: {
+                workspace_id: string;
                 digest: string;
             };
             cookie?: never;

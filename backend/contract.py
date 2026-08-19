@@ -215,6 +215,19 @@ class Refusal:
 
     # Failures the contract does not enumerate, each naming something it could
     # otherwise only answer with a lie.
+    PARENT_UNKNOWN = "no such parent"
+    DESTINATION_UNKNOWN = "no such destination"
+    """A folder that never existed is not a folder that was deleted.
+
+    Under server-minted ids the first was impossible, so the contract has no
+    word for it. A client that mints its own can name a folder nobody ever
+    created -- which is exactly what every create queued behind a REFUSED
+    create does -- and answering that with "parent was deleted" would be the
+    server describing a deletion that never happened.
+    """
+
+    PARENT_NOT_A_FOLDER = "that parent is not a folder"
+    DESTINATION_NOT_A_FOLDER = "that destination is not a folder"
     DESTINATION_INSIDE_ENTRY = "the destination is inside the entry"
     BYTES_NEVER_STORED = "content bytes were never stored"
     ENTRY_UNKNOWN = "no such entry"

@@ -127,6 +127,17 @@ class ParentRow(TransactionRow, IsAbstractClass):
 
 class DeletionRow(TransactionRow, IsAbstractClass):
     deleted: bool = Field(default=False, nullable=False)
+    """Stated, not implied by the row's existence.
+
+    A create appends `False` here, which is what gives a newborn entry a
+    deletion token to present -- the same shape as its other three, so nothing
+    special-cases "not deleted yet". The field being a flag rather than the
+    row being a tombstone also means restoring an entry would be an ordinary
+    append of `False`, judged like any other transaction. NOTHING IN THE
+    CONTRACT DOES THAT TODAY: `delete` is the only operation that writes here
+    and it only ever writes `True`. The field anticipates restore; it does not
+    implement it.
+    """
 
 
 class ContentRow(TransactionRow, IsAbstractClass):

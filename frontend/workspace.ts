@@ -89,7 +89,7 @@ export const connect = (options: Options): Workspace => {
     map = confirmed.applied(map, event);
     if (event.type === "delete") void docs.evict(event.id);
     if (event.type === "write") content.forget(event.id);
-    queue.evict([event.transaction]);
+    bytes.forget(queue.evict([event.transaction]));
     recomputed();
     readied(map.get(event.id));
   };
@@ -100,14 +100,24 @@ export const connect = (options: Options): Workspace => {
     return entry;
   };
 
+  /**
+   * Queued work leaves the outbox when the STREAM carries it, not when the
+   * response acknowledges it -- those are different moments, and dropping it
+   * at the first one opens a window where the entry is in neither the outbox
+   * nor the confirmed map, so a file blinks out of the tree just after it is
+   * created. A rejection is the one answer no event will ever follow, so that
+   * is the one this evicts itself.
+   */
   const submit = async (request: Submitted, payload?: string | Uint8Array) => {
     const digest = payload === undefined ? undefined : await bytes.put(payload);
     queue.capture(request, digest);
     recomputed();
     const response = await transport.submit(workspace, request);
-    if (response.rejected && response.reason === UNSOUND) sync.nudge();
-    bytes.forget(queue.evict([request.transaction]));
-    recomputed();
+    if (response.rejected) {
+      if (response.reason === UNSOUND) sync.nudge();
+      bytes.forget(queue.evict([request.transaction]));
+      recomputed();
+    }
     return response;
   };
 
@@ -118,7 +128,7 @@ export const connect = (options: Options): Workspace => {
   const staged = async (payload: string | Uint8Array, mime: string): Promise<Body> => {
     if (isText(payload)) return { type: "text", content: payload };
     const hash = await digestOf(payload);
-    await transport.store(hash, payload, mime);
+    await transport.store(workspace, hash, payload, mime);
     return { type: "binary", hash, size: payload.byteLength, mime };
   };
 

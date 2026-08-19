@@ -123,11 +123,22 @@
         }
       }
     },
-    "/wsfs/blobs/{digest}": {
+    "/wsfs/workspaces/{workspace_id}/blobs/{digest}": {
       "put": {
         "summary": "Store",
-        "operationId": "store_wsfs_blobs__digest__put",
+        "description": "Under a workspace because that is the only question a host's\n`authorize` can answer. The bytes themselves are stored once for the\ndeployment and named by their hash -- two workspaces holding the same\nfile hold one copy -- but somebody who may reach no workspace at all\nmay not fill the deployment's disk either.",
+        "operationId": "store_wsfs_workspaces__workspace_id__blobs__digest__put",
         "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
           {
             "name": "digest",
             "in": "path",
@@ -161,8 +172,19 @@
       },
       "get": {
         "summary": "Fetch Blob",
-        "operationId": "fetch_blob_wsfs_blobs__digest__get",
+        "description": "Served only to a workspace that WRITES these bytes somewhere.\n\nA hash is not a secret: it travels in `X-Content-Hash`, in every\n`BinaryBody`, and through any client that ever held the file. So\nknowing one buys nothing here -- the caller has to be someone the host\nlets into a workspace whose own content log names it.",
+        "operationId": "fetch_blob_wsfs_workspaces__workspace_id__blobs__digest__get",
         "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
           {
             "name": "digest",
             "in": "path",
