@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from conftest import (
     Api,
@@ -122,3 +122,42 @@ async def test_a_controller_is_not_retired_while_a_submission_is_in_flight(
 
     await asyncio.sleep(0.4)
     assert registry.live(workspace) is None
+
+
+async def test_a_position_a_rolled_back_submission_took_is_never_reissued(
+    api: Api, registry, session: Session
+):
+    """A submission that raises has already taken its position, and nothing
+    hands it back -- which costs the stream nothing, because positions have to
+    increase rather than be dense. What must not happen is the NEXT controller
+    reading the logs, seeing only what committed, and handing the same number
+    out a second time: a token bound to it would then tell a stream to skip
+    the row that finally lands there.
+    """
+    workspace = UUID(api.workspace)
+    await created(api, "a.py")  # position 1
+    leaked = registry.live(workspace).positions.take()
+
+    await asyncio.sleep(0.4)  # grace_seconds is 0.2 in tests
+    assert registry.live(workspace) is None
+
+    await created(api, "b.py")
+
+    assert sorted(session.exec(select(MODELS.name.position)).all()) == [1, leaked + 1]
+
+
+async def test_a_stream_token_names_a_position_the_logs_really_carry(
+    api: Api, registry, session: Session
+):
+    """The counter is the next number to hand out; a token is a promise about
+    what has already happened. Binding one to the other puts the token above
+    the log the moment anything rolls back."""
+    await created(api, "a.py")
+    registry.live(UUID(api.workspace)).positions.take()  # as a rollback leaves it
+
+    minted = (await api.initialize())["token"]
+
+    tokens = MODELS.token
+    stored = session.exec(select(tokens).where(tokens.token == minted)).one()
+    highest = session.exec(select(func.max(MODELS.name.position))).one()
+    assert stored.position == highest

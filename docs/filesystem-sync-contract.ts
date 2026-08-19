@@ -34,7 +34,27 @@ export namespace Entry {
     id: string;
     name: string;
     parent?: string; // absent = workspace root
-    deleted?: boolean; // tombstone: deleted entries remain present in snapshots
+
+    /**
+     * Tombstone. Deleted entries remain present in snapshots, and deleting a
+     * folder tombstones THE FOLDER ONLY — its children are untouched and
+     * still carry `parent` pointers into it.
+     *
+     * REACHABILITY IS THE CLIENT'S TO COMPUTE, and it is not optional. A
+     * snapshot therefore contains entries whose parent chain is interrupted
+     * by a tombstone; rendering `deleted !== true` alone shows folders and
+     * files that no longer exist as far as the tree is concerned. The rule
+     * is: an entry is reachable when every ancestor up to the root exists and
+     * none of them is tombstoned. It must be recomputed after every `delete`
+     * and every `parent`/`move` event, because either can interrupt or
+     * restore a whole subtree at once, and the events for that subtree's own
+     * members never fire.
+     *
+     * The server holds nothing else: this is the whole of what a "deleted
+     * folder" means, and the same walk is what refuses a create into an
+     * unreachable folder ("parent was deleted").
+     */
+    deleted?: boolean;
 
     name_version: Version;
     parent_version: Version;
@@ -173,6 +193,14 @@ export namespace Events {
         | Acknowledged
         | Failure<"that id is already in use">
         | Failure<"parent was deleted">
+        /**
+         * A parent that never existed, which client-minted ids make routine:
+         * every create queued behind a REFUSED create points at a folder
+         * nobody made. Distinct from "parent was deleted", which describes a
+         * deletion that in this case never happened.
+         */
+        | Failure<"no such parent">
+        | Failure<"that parent is not a folder">
         | Failure<"content bytes were never stored">
         | Failure<"that name is not permitted">
         | Failure<"that destination is nested too deeply">
@@ -232,6 +260,8 @@ export namespace Events {
         | "entry was already renamed"
         | "entry had already been moved"
         | "the destination was deleted"
+        | "no such destination"
+        | "that destination is not a folder"
         | "the destination is inside the entry"
         | "entry with name already exists within destination"
         | "that name is not permitted"
@@ -254,6 +284,8 @@ export namespace Events {
       export type Response = Acknowledged | Unknown | Unsound | Failure<
         | "entry was deleted"
         | "the destination was deleted"
+        | "no such destination"
+        | "that destination is not a folder"
         | "the destination is inside the entry"
         | "entry with name already exists within destination"
         | "entry had already been moved"
@@ -286,7 +318,7 @@ export namespace Events {
       /**
        * NOT a JSON request — this is a raw HTTP transfer:
        *
-       *   PUT /blobs/{hash}
+       *   PUT /workspaces/{workspace}/blobs/{hash}
        *   Content-Type: {mime}
        *   Content-Length: {size}
        *   <bytes as the request body>

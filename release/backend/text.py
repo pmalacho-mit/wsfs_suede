@@ -82,7 +82,13 @@ class Text:
     async def remember(
         self, session: AsyncSession, written: TextContentRow, content: str
     ) -> None:
-        """Re-anchor the chain at `written`, which must be the entry's newest."""
+        """Re-anchor the chain at `written`, which must be the entry's newest.
+
+        Flushed before returning. A later write in the same unit of work reads
+        the anchor back with a SELECT to fold its delta against, and leaving
+        that to autoflush would make correctness here rest on a session
+        setting somebody two layers up is free to turn off.
+        """
         cache = self.models.text_cache
         anchored = (
             await session.exec(
@@ -93,7 +99,8 @@ class Text:
             session.add(
                 cache(entry_id=written.entry_id, content_id=written.id, content=content)
             )
-            return
-        anchored.content_id = written.id
-        anchored.content = content
-        session.add(anchored)
+        else:
+            anchored.content_id = written.id
+            anchored.content = content
+            session.add(anchored)
+        await session.flush()

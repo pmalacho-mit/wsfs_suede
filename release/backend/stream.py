@@ -140,9 +140,15 @@ class Stream:
     def _kind(self, content: ContentRow) -> Kind:
         return Kind.TEXT if isinstance(content, TextContentRow) else Kind.BINARY
 
-    async def _event(
+    async def emitted(
         self, session: AsyncSession, applied: list[TransactionRow]
     ) -> Emitted:
+        """The event one transaction's rows are.
+
+        Public because the choke point has these rows in its hand the moment
+        it writes them: reading them back out of five logs to say what just
+        happened would be asking the database to tell us what we told it.
+        """
         caused = applied[0]
         entry = await session.get(self.models.entry, caused.entry_id)
         assert entry is not None
@@ -175,22 +181,33 @@ class Stream:
         # writers that somehow collided on one would produce an ugly stream,
         # never a wrong one.
         return [
-            await self._event(session, list(rows))
+            await self.emitted(session, list(rows))
             for _, rows in groupby(applied, key=attrgetter("id"))
         ]
 
     async def since(
         self, session: AsyncSession, workspace_id: UUID, position: int
     ) -> list[Emitted]:
-        return await self._between(session, workspace_id, after=position, through=None)
+        """Everything after `position`, as ONE observation of the five logs.
 
-    async def at(
-        self, session: AsyncSession, workspace_id: UUID, position: int
-    ) -> Emitted:
-        (emitted,) = await self._between(
-            session, workspace_id, after=position - 1, through=position
+        Repeatable read, and not for tidiness. A transaction's rows are spread
+        across up to four logs, and read committed hands every statement its
+        own snapshot -- so a transaction committing between two of these five
+        queries is seen in some logs and not in others. A folder create caught
+        that way arrives as {parent, deletion}, which is not an event at all;
+        caught the other way it arrives as a bare `name`, which IS one, for an
+        entry the client has never heard of. The first kills the stream loudly
+        and the second loses the entry in silence, which is worse.
+
+        The rows were one transaction when they were written, and this is what
+        makes them one transaction when they are read. It has to be the first
+        statement in its transaction: postgres fixes the snapshot at the first
+        read and will not change the level afterwards.
+        """
+        _ = await session.connection(
+            execution_options={"isolation_level": "REPEATABLE READ"}
         )
-        return emitted
+        return await self._between(session, workspace_id, after=position, through=None)
 
     async def high_water(self, session: AsyncSession, workspace_id: UUID) -> int:
         """The last position this workspace used, read out of the logs.
@@ -234,11 +251,19 @@ def announced(applied: list[TransactionRow]) -> Event:
     born with); a move writes the two that say where it lives; everything else
     writes exactly one.
     """
-    return ANNOUNCES[
-        frozenset(
-            shape for shape in SHAPES if any(isinstance(r, shape) for r in applied)
+    wrote = frozenset(
+        shape for shape in SHAPES if any(isinstance(row, shape) for row in applied)
+    )
+    if wrote not in ANNOUNCES:
+        # Unreachable: every operation writes one of these combinations, and
+        # `since` reads all five logs at one snapshot so a transaction cannot
+        # be seen half-written. Named anyway, because the bare KeyError this
+        # replaces said only that a frozenset was missing.
+        raise AssertionError(
+            f"no event writes {sorted(shape.__name__ for shape in wrote)} "
+            f"(transaction {applied[0].id})"
         )
-    ]
+    return ANNOUNCES[wrote]
 
 
 Row = TypeVar("Row", bound=TransactionRow)

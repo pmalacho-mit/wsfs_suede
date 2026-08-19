@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from uuid import UUID
 
 from conftest import (
     Api,
@@ -219,3 +220,46 @@ async def test_a_move_arrives_as_one_event_carrying_both_halves(api: Api):
     assert events[0]["type"] == "move"
     assert events[0]["value"] == {"name": "b.py", "parent": folder}
     assert events[0]["transaction"] == moving
+
+async def test_a_replay_never_sees_a_transaction_half_written(api: Api, app):
+    """A transaction's rows live in up to four logs, and the replay reads five.
+
+    Under read committed each of those five queries takes its own snapshot, so
+    a transaction committing between two of them is visible in one log and not
+    the next -- and a folder create caught that way arrives as a bare `name`,
+    which is a perfectly legal event for an entry the client has never heard
+    of. It applies nothing, no error is raised anywhere, and the entry is gone
+    from that client for good.
+
+    So this hammers replays against a stream of commits and insists every
+    event keep the shape the transaction that wrote it had.
+    """
+    backend = app.state.wsfs
+    workspace = UUID(api.workspace)
+    total = 40
+
+    async def creating() -> None:
+        for n in range(total):
+            acknowledged(await api.create(new_id(), name=f"folder-{n}", type="folder"))
+
+    async def replaying() -> list[str]:
+        kinds: list[str] = []
+        while not writing.done():
+            async with backend.database.session() as session:
+                replayed = await backend.schema.stream.since(session, workspace, 0)
+            kinds.extend(emitted.event.type.value for emitted in replayed)
+            await asyncio.sleep(0)
+        return kinds
+
+    writing = asyncio.ensure_future(creating())
+    watchers = [asyncio.ensure_future(replaying()) for _ in range(4)]
+    await writing
+    observed = [kind for watcher in await asyncio.gather(*watchers) for kind in watcher]
+
+    # Only creates happened, so only creates may be reported. A torn read
+    # shows up here as a `name` or a `move` -- the halves of a create seen on
+    # their own.
+    assert set(observed) == {"create"}
+    async with backend.database.session() as session:
+        replayed = await backend.schema.stream.since(session, workspace, 0)
+    assert len(replayed) == total

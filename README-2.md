@@ -155,7 +155,7 @@ Controller memory is rebuildable-from-zero: Postgres remains the truth.
 **SSE handler** — claim token → subscribe → replay events after the token's
 position → follow live, with comment heartbeats (~15s).
 
-**Blob store** — object storage keyed by hash; `PUT /blobs/{hash}` verifies
+**Blob store** — object storage keyed by hash; `PUT /workspaces/{workspace}/blobs/{hash}` verifies
 the hash and no-ops on duplicates.
 
 ### Third-party
@@ -287,7 +287,7 @@ empty outbox is a cheap no-op.
 
 ### 6.5 Blob transfer
 
-Upload: `PUT /blobs/{hash}` with raw bytes; server verifies sha256; duplicate
+Upload: `PUT /workspaces/{workspace}/blobs/{hash}` with raw bytes; server verifies sha256; duplicate
 hash → immediate ack (retry-safe by construction). Download: raw bytes with
 `Content-Type` and `ETag: {version}` (or redirect to object storage).
 

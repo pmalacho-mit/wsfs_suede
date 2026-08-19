@@ -379,7 +379,7 @@ thousand of them cost exactly what one does.
 **SSE handler** — claim token → subscribe → replay events after the token's
 position → follow live, with comment heartbeats (~15s).
 
-**Blob store** — object storage keyed by hash; `PUT /blobs/{hash}` verifies
+**Blob store** — object storage keyed by hash; `PUT /workspaces/{workspace}/blobs/{hash}` verifies
 the hash and no-ops on duplicates.
 
 <!-- diagram: ServerTables -->
@@ -466,6 +466,23 @@ stateDiagram-v2
 
 Tombstones are load-bearing: reconciliation cannot distinguish "deleted"
 from "unchanged" without them.
+
+**Deleting a folder tombstones the folder, not its contents.** Its children
+keep their `parent` pointers and are never touched, so there is a fourth state
+the table above cannot show because it is not a state of the entry at all:
+**unreachable** — live, present in every snapshot, and cut off from the root by
+a tombstone somewhere above it. No event fires for those children, because
+nothing about them changed.
+
+**Computing reachability is the client's job, and it is not optional.** An
+entry is reachable when every ancestor up to the root exists and none of them
+is tombstoned; a client that renders `deleted !== true` alone draws entries
+that are gone. It has to be recomputed after every `delete` and every
+`parent`/`move` event, since either can sever or restore a whole subtree at
+once. The server does exactly this walk — it is how a create into an
+unreachable folder is refused — and it exposes no shortcut: a reachability
+flag in a snapshot would go stale on the first event after it, which is worse
+than not having one. See `Entry.Metadata.deleted` in the contract.
 
 <!-- diagram: EntryLifecycle -->
 ```mermaid
@@ -859,7 +876,7 @@ sequenceDiagram
 
 ### 6.5 Blob transfer
 
-Upload: `PUT /blobs/{hash}` with raw bytes; server verifies sha256; duplicate
+Upload: `PUT /workspaces/{workspace}/blobs/{hash}` with raw bytes; server verifies sha256; duplicate
 hash → immediate ack (retry-safe by construction). Download: raw bytes with
 `Content-Type` and `ETag: {version}` (or redirect to object storage).
 
@@ -868,7 +885,7 @@ hash → immediate ack (retry-safe by construction). Download: raw bytes with
 sequenceDiagram
     participant ClientSide as Client
     participant Blobs as Blob store
-    ClientSide->>+Blobs: PUT /blobs/{hash} — raw bytes as the body
+    ClientSide->>+Blobs: PUT /workspaces/{workspace}/blobs/{hash} — raw bytes as the body
     alt hash already stored
         Note right of Blobs: ack immediately, without reading the body — this is the retry story
     else new bytes

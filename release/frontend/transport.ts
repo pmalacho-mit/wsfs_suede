@@ -23,7 +23,7 @@ export type Transport = {
   initialize: (workspace: Id, outbox: Submitted[]) => Promise<Snapshot>;
   submit: (workspace: Id, request: Submitted) => Promise<Response>;
   content: (workspace: Id, entry: Id, version?: Version) => Promise<Held>;
-  store: (digest: string, bytes: Uint8Array, mime: string) => Promise<void>;
+  store: (workspace: Id, digest: string, bytes: Uint8Array, mime: string) => Promise<void>;
   follow: (workspace: Id, token: string, reading: Reading) => Subscription;
 };
 
@@ -105,8 +105,8 @@ export const http = (base: string, authorize: Authorized): Transport => {
       return held(await send(`${workspaces(workspace)}/entries/${entry}/content${query}`));
     },
 
-    store: async (digest, bytes, mime) => {
-      await send(`/blobs/${digest}`, {
+    store: async (workspace, digest, bytes, mime) => {
+      await send(`${workspaces(workspace)}/blobs/${digest}`, {
         method: "PUT",
         headers: { "content-type": mime, "content-length": String(bytes.byteLength) },
         body: bytes as BodyInit,

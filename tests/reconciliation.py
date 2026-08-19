@@ -132,6 +132,127 @@ async def test_a_refused_create_does_not_cascade_into_its_dependents(api: Api):
     ]
 
 
+async def test_a_refused_create_does_not_cascade_into_a_nested_create(api: Api):
+    """The chain holds transitively, and says something true at every rung.
+
+    `Stillborn` shields transactions that NAME a refused entry -- a write, a
+    rename -- and a create nested inside one names its own new id instead. So
+    it is really adjudicated, and refused for the true reason: it points at a
+    folder that was never created. Nothing was created for the rung below to
+    point at either, all the way down to the leaf.
+    """
+    folder = await created(api, "src", type="folder")
+    acknowledged(await api.delete(folder, await seen(api, folder)))
+    refused_folder, nested_folder, nested_file = new_id(), new_id(), new_id()
+
+    snapshot = await api.initialize(
+        [
+            creating(api, refused_folder, type="folder", content=None, parent=folder),
+            creating(api, nested_folder, type="folder", content=None,
+                     parent=refused_folder),
+            creating(api, nested_file, parent=nested_folder),
+        ]
+    )
+
+    assert [rejection["reason"] for rejection in snapshot["rejected"]] == [
+        "parent was deleted",
+        "no such parent",
+        "no such parent",
+    ]
+    assert snapshot["applied"] == []
+    born = {entry["id"] for entry in (await api.initialize())["entries"]}
+    assert born.isdisjoint({refused_folder, nested_folder, nested_file})
+
+
+async def test_a_transaction_id_may_not_be_reused_for_another_operation(api: Api):
+    """A create writes name, parent and deletion at one id. A rename reusing
+    that id finds its own name row, matching entry and all -- and would be
+    acknowledged without renaming anything if dedup only looked at one log."""
+    entry, born = new_id(), api.transaction()
+    acknowledged(await api.create(entry, name="a.py", transaction=born))
+
+    reused = await api.rename(entry, born, "b.py", transaction=born)
+
+    assert refused(reused)["reason"] == "that id is already in use"
+    assert (await meta(api, entry))["name"] == "a.py"
+
+
+async def test_a_transaction_id_may_not_be_reused_across_disjoint_logs(api: Api):
+    """The reverse direction, which a one-sided check cannot see.
+
+    A rename and a write share no log, so looking only at the logs THIS
+    request would write finds nothing, calls the id fresh, and applies it --
+    no primary key conflict, because the tables differ. The entry ends up with
+    two properties whose CAS tokens are the same UUID, and a later honest
+    replay of the rename is refused because of it.
+    """
+    file = await created(api, "a.py")
+    renamed = api.transaction()
+    acknowledged(await api.rename(file, await name_version(api, file), "b.py", transaction=renamed))
+
+    reused = await api.write(file, await content_version(api, file), "text", transaction=renamed)
+
+    assert refused(reused)["reason"] == "that id is already in use"
+    assert (await api.content(file)).json()["content"] == ""
+    assert (await meta(api, file))["content_version"] != renamed
+
+
+async def test_a_replay_is_still_free_after_the_shape_check(api: Api):
+    """The check must not cost the thing it protects: an honest replay names
+    exactly the logs it wrote, against the entry it wrote them for."""
+    file = await created(api, "a.py")
+    held = await name_version(api, file)
+    replayed = api.transaction()
+    acknowledged(await api.rename(file, held, "b.py", transaction=replayed))
+
+    assert acknowledged(await api.rename(file, held, "b.py", transaction=replayed))
+    assert (await meta(api, file))["name"] == "b.py"
+
+
+async def test_a_folder_created_earlier_in_the_outbox_can_be_created_into(api: Api):
+    """The first create is judged against a folder that does not exist yet --
+    it is judged against nothing, and refused. What must not survive that is
+    the ANSWER: the folder arrives two items later, and the create after it
+    has to be judged against the folder that is now there."""
+    folder, before, after = new_id(), new_id(), new_id()
+
+    snapshot = await api.initialize(
+        [
+            creating(api, before, parent=folder),
+            creating(api, folder, type="folder", content=None),
+            creating(api, after, parent=folder),
+        ]
+    )
+
+    assert [rejection["reason"] for rejection in snapshot["rejected"]] == [
+        "no such parent"
+    ]
+    entries = {entry["id"]: entry for entry in (await api.initialize())["entries"]}
+    assert entries[after]["parent"] == folder
+    assert before not in entries
+
+
+async def test_a_folder_deleted_earlier_in_the_outbox_can_no_longer_be_created_into(
+    api: Api,
+):
+    """The other direction: the folder was live when the delete looked at it,
+    and must not still be live when the create does."""
+    folder = await created(api, "src", type="folder")
+    doomed = new_id()
+
+    snapshot = await api.initialize(
+        [
+            {"op": "delete", "transaction": api.transaction(), "id": folder,
+             "seen": await seen(api, folder)},
+            creating(api, doomed, parent=folder),
+        ]
+    )
+
+    assert [rejection["reason"] for rejection in snapshot["rejected"]] == [
+        "parent was deleted"
+    ]
+
+
 async def test_work_applied_by_initialize_reaches_the_other_streams(api: Api, other: Api):
     file = await created(api, "a.py")
     token = (await other.initialize())["token"]
