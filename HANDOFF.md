@@ -82,20 +82,35 @@ beside the compose file — run it from that directory, and note that
 an explicit `-f` turns off adjacent-file discovery. Always `cd` to the
 compose file's directory instead.
 
-**The browser image is built by dockerode, not compose, so the override does
-not reach it.** Its Dockerfile runs `npm install` from a stock
-`node:22-bookworm-slim` and fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
-What makes it build here is a local retag, which is a fact about this docker
-daemon and not about the repo:
+**The browser image is built by dockerode, not compose, so a build-context
+override cannot reach it.** Its Dockerfile runs `npm install` from a stock
+`node:22-bookworm-slim`, which fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
+The fix is to shadow the base image — retag the CA-trusting derivative under
+the upstream name, so every `FROM node:22-bookworm-slim` in this daemon gets
+it, whoever is driving the build. `.devcontainer/devcontainer.json` declares
+it, so a rebuild reapplies it:
 
-```sh
-mkdir -p ~/ca-scratch && cd ~/ca-scratch
-printf 'services:\n  browser:\n    image: node:22-bookworm-slim\n' > compose.yml
-/desolate-ca/trust-proxy-in-builds.sh --service browser --image node:22-bookworm-slim
-docker tag desolate-ca/node:22-bookworm-slim node:22-bookworm-slim
+```jsonc
+"customizations": { "desolate": { "shadowImages": ["node:22-bookworm-slim"] } }
 ```
 
-The build does not `--pull`, so it takes the local image. If
+NOT YET VERIFIED FROM A CLEAN DEVCONTAINER — the shadow was in place by hand
+when this was written, so a rebuild is the first thing that will prove it. The
+symptom if it did not take is the certificate error above, on the first
+`npm run test:browser`. The recovery, which is also what the declaration
+automates:
+
+```sh
+/desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
+```
+
+Two ways to lose it once it is there: `docker pull node:22-bookworm-slim`
+silently puts the untrusting upstream back, and so does a `docker image prune`
+that collects the tag. Neither says anything, and the next build fails with a
+certificate error that points nowhere near here — so suspect a pull first.
+`--unshadow` puts the pristine base back deliberately.
+
+The build does not `--pull`, so it takes whatever is local. If
 `browser-control-chromium:latest` already exists the layer cache covers it.
 
 **The sample stack is on no network of its own, deliberately.** The report
@@ -111,6 +126,10 @@ from insecure origins — and a containerised browser reaching the page at the
 devcontainer's address has one. `npm run test:browser` carries
 `--server http://localhost:5173 --forward 5173`. The first test asserts
 `isSecureContext` so the failure has a name.
+
+The dev server binds every interface (`server.host` in `vite.config.ts`) for
+the same reason: `--forward` points the browser's localhost at THIS machine's
+address, which vite's default localhost-only bind does not answer.
 
 **The tree draws inside an open shadow root, and draws each filename twice**
 (once visible, once for measuring truncation), so `textContent` matching finds
