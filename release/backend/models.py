@@ -1,74 +1,88 @@
-# pyright: reportUnsafeMultipleInheritance=false
-
-"""SQLModel tables of record.
+"""SQLModel tables of record, built against a host schema.
 
 An entry is pure identity. Its name, its parent, its deletion and its content
-each live in their own append-only table, and a `Version` names one
-combination of those four. Current state is therefore not a row anyone
-overwrites -- it is the newest combination -- so history costs nothing extra
-and the log cannot drift from the truth.
+each live in their own append-only table, and each row records the workspace
+position it landed at. Current state is therefore not a row anyone overwrites
+-- it is the newest row per property -- so history costs nothing extra and the
+log cannot drift from the truth.
+
+Identity is minted by the client, and one identifier does three jobs: the id
+of a transaction is the primary key of the row it applies, the dedup key that
+makes a retry free, and the CAS token the next mutation of that property must
+present. A client can therefore predict the token its own work will produce,
+which is what lets it compose a whole session's work offline.
 
 Only transactions that were applied are recorded. A refused one changed
 nothing, so there is nothing to store: presenting it again re-runs the same
 adjudication and produces the same reason (see `service.refusal`).
 
-A `Version` is also the stream event that produced it: one approved mutation
-appends exactly one version, at exactly one workspace position. There is no
-separate event table to keep in sync.
+These rows are also the event stream: one applied transaction takes exactly
+one position, and which table its rows are in IS which event it was. There is
+nothing else to write, and so nothing that can disagree.
+
+NOTHING HERE IS A MODULE-LEVEL TABLE. A foreign key names its target table in
+the field itself, so a table pointing at somebody else's users cannot exist
+until somebody says which table that is -- which is why `build_models` creates
+the classes rather than a mixin decorating them. What this package owns is the
+shape; the host owns identity, and hands over two table names.
 """
 
 from __future__ import annotations
 
 from abc import ABC as IsAbstractClass
 import enum
+import warnings
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, ClassVar, cast, final
 
 from sqlalchemy import CheckConstraint, Index, UniqueConstraint, TIMESTAMP
+from sqlalchemy.sql.schema import SchemaItem
+from sqlalchemy.types import TypeEngine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
-# Imported for the side effect: it swaps SQLModel.metadata for one carrying the
-# library's naming convention. Must land before any table model is defined.
-from wsfs_suede__sqlmodel_utils_suede import (
-    metadata as _naming_convention,  # pyright: ignore[reportUnusedImport]
-)
-from wsfs_suede__sqlmodel_utils_suede.associations import (
+from ...wsfs_suede__sqlmodel_utils_suede.associations import (
     ID,
     WithID,
     WithTime,
     ForeignKeyField,
+    WithTableName,
+    get_tablename,
 )
-from wsfs_suede__sqlmodel_utils_suede.columns import EnumField
-from wsfs_suede__sqlmodel_utils_suede.tablenames import tablename, explicit_tablename
+from ...wsfs_suede__sqlmodel_utils_suede.columns import EnumField
+from ...wsfs_suede__sqlmodel_utils_suede.tablenames import tablename
 
 from .diff import Delta
 
-
-class User(WithID, tablename("plural"), table=True):
-    email: str = Field(index=True, unique=True, nullable=False)
+DEFAULT_PREFIX = "wsfs"
 
 
-class WithUserReference(  # pyright: ignore[reportUnsafeMultipleInheritance]
-    SQLModel, IsAbstractClass
-):
-    user_id: ID = ForeignKeyField(
-        User,
-        nullable=False,
-        description="The id of the user associated with this item.",
-    )
+class Minted(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+    """A row whose id whoever originated the transaction chose.
+
+    Almost always the client, so that it can predict its own tokens; the
+    controller mints one for the work it issues itself.
+
+    Deliberately no default. An id nobody chose on purpose is one no client
+    will recognise, so a call site that forgets to pass one has to fail at
+    construction rather than quietly diverge.
+    """
+
+    id: ID = Field(primary_key=True, index=True, nullable=False)
 
 
-class Workspace(WithID, tablename("plural"), table=True):
-    # Internal per-workspace monotonic stream position. Bumped ONLY inside
-    # the choke point, under the workspace row lock. Never client-visible.
-    position: int = Field(default=0, nullable=False)
+UNSTAMPED = 0
 
 
-class WithWorkspaceReference(  # pyright: ignore[reportUnsafeMultipleInheritance]
-    SQLModel, IsAbstractClass
-):
-    workspace_id: ID = ForeignKeyField(Workspace, nullable=False)
-    """The id of the associated workspace."""
+class Positioned(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+    position: int = Field(default=UNSTAMPED, index=True, nullable=False)
+    """Where this landed in its workspace's one ordered stream.
+
+    Stamped by the choke point and nowhere else. The default is the unstamped
+    value precisely so that a row which bypassed it cannot reach the database:
+    positions start at one.
+    """
 
 
 class Type(str, enum.Enum):
@@ -76,124 +90,248 @@ class Type(str, enum.Enum):
     FOLDER = "folder"
 
 
-class Entry(
-    WithID, WithWorkspaceReference, tablename("custom", "fs_entries"), table=True
-):
+# -- the shapes ----------------------------------------------------------------
+#
+# Every field is declared here, where it can be read and typed. What `build`
+# adds is only what cannot be known until a host speaks up: which table an id
+# refers to, and what these tables are called.
+
+
+class EntryRow(Minted, IsAbstractClass):
     """One tree node's identity. Everything mutable about it is versioned."""
 
-    type: Type = EnumField(Type, name="fs_entry_type")
+    workspace_id: ID
+    type: Type
 
 
-class WithEntryReference(SQLModel, IsAbstractClass):
-    entry_id: ID = ForeignKeyField(Entry)
-
-
-class Transaction(
-    WithID, WithTime, WithUserReference, WithEntryReference, IsAbstractClass
-):
+class TransactionRow(Minted, Positioned, WithTime, IsAbstractClass):
     """One applied change to one property of one entry.
 
     Finding a client's transaction id here is the whole of dedup: the change
     it names already happened, so presenting it again is answered rather than
-    applied a second time.
+    applied a second time. It is also the property's current CAS token.
     """
 
-    transaction: str = Field(index=True, unique=True, nullable=False)
-    """Client-minted `${client}:${counter}` -- the dedup key."""
+    entry_id: ID
+    user_id: ID
 
 
-class Name(Transaction, tablename("custom", "fs_names"), table=True):
+class NameRow(TransactionRow, IsAbstractClass):
     name: str = Field(nullable=False)
 
 
-class Parent(Transaction, tablename("custom", "fs_parentage"), table=True):
-    parent_entry_id: ID | None = ForeignKeyField(Entry, nullable=True)
+class ParentRow(TransactionRow, IsAbstractClass):
+    parent_entry_id: ID | None
     """Absent means the workspace root."""
 
 
-class Deletion(Transaction, tablename("custom", "fs_deletions"), table=True):
+class DeletionRow(TransactionRow, IsAbstractClass):
     deleted: bool = Field(default=False, nullable=False)
 
 
-class Content(Transaction, IsAbstractClass):
+class ContentRow(TransactionRow, IsAbstractClass):
     size: int = Field(default=0, nullable=False)
     mime: str = Field(default="text/plain", nullable=False)
 
 
-class TextContent(Content, tablename("custom", "fs_text_content"), table=True):
+class TextContentRow(ContentRow, IsAbstractClass):
     delta: Delta = Field(sa_type=JSONB, nullable=False)
-    """How this version's text differs from the entry's previous text."""
+    """How this write's text differs from the entry's previous text."""
 
 
-class BlobContent(Content, tablename("custom", "fs_blob_content"), table=True):
+class BlobContentRow(ContentRow, IsAbstractClass):
     hash: str = Field(index=True, nullable=False)
 
 
-class Event(str, enum.Enum):
-    CREATE = "create"
-    NAME = "name"
-    PARENT = "parent"
-    DELETE = "delete"
-    WRITE = "write"
-
-
-versions_table = explicit_tablename("Version", "custom", "fs_versions")
-
-
-class Version(WithID, WithTime, WithEntryReference, versions_table.mixin, table=True):
-    """One approved state of an entry, and the stream event that produced it.
-
-    Powers (a) the CAS token clients present, (b) Content fetch by
-    (entry, version), (c) the event stream -- replay is this table, ordered
-    by position, so the log is the truth rather than a copy of it.
-    """
-
-    position: int = Field(index=True, nullable=False)
-    """The workspace stream position this version was committed at."""
-
-    event: Event = EnumField(Event, name="fs_event")
-    """Which of the pointers below this version introduced."""
-
-    name_id: ID = ForeignKeyField(Name)
-    parent_id: ID = ForeignKeyField(Parent)
-    deleted_id: ID = ForeignKeyField(Deletion)
-    text_content_id: ID | None = ForeignKeyField(TextContent, nullable=True)
-    blob_content_id: ID | None = ForeignKeyField(BlobContent, nullable=True)
-
-    __table_args__ = (
-        CheckConstraint(
-            "num_nonnulls(text_content_id, blob_content_id) <= 1",
-            name="one_content_kind",
-        ),
-        Index(f"ix_{versions_table.tablename}_entry_position", "entry_id", "position"),
-    )
-
-
-class TextContentCache(
-    WithID, WithEntryReference, tablename("custom", "fs_text_cache"), table=True
-):
-    """Derived, never authoritative: one entry's text at one version.
+class TextCacheRow(WithID, IsAbstractClass):
+    """Derived, never authoritative: one entry's text as of one write.
 
     Reconstruction folds deltas, which is linear in an entry's history. This
-    row anchors the fold at the newest version so the common read is free and
-    older versions are recovered by inverting a few deltas backwards.
-    Deleting the whole table only costs time.
+    row anchors the fold at the newest write so the common read is free and
+    older ones are recovered by inverting a few deltas backwards. Deleting the
+    whole table only costs time.
     """
 
-    version_id: ID = ForeignKeyField(Version)
+    entry_id: ID
+    content_id: ID
     content: str = Field(nullable=False)
 
-    __table_args__ = (UniqueConstraint("entry_id"),)
 
-
-class StreamToken(
-    WithUserReference,
-    WithWorkspaceReference,
-    tablename("custom", "fs_stream_tokens"),
-    table=True,
-):
+class TokenRow(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
     """Single-use, position-bound credential minted by Initialize."""
 
     token: str = Field(primary_key=True)
+    user_id: ID
+    workspace_id: ID
     position: int = Field(nullable=False)
-    expires: datetime = Field(sa_type=TIMESTAMP(timezone=True), nullable=False)
+    expires: datetime = Field(
+        # SQLModel annotates sa_type as `type[Any]` but hands it to Column(),
+        # which takes an instance just as happily.
+        sa_type=cast(type[TypeEngine[Any]], TIMESTAMP(timezone=True)),
+        nullable=False,
+    )
+
+
+def stamped_by_the_choke_point() -> CheckConstraint:
+    return CheckConstraint("position > 0", name="stamped_by_the_choke_point")
+
+
+def _table_of(named: str | type[WithTableName]) -> str:
+    """A host's table, however they care to name it."""
+    return named if isinstance(named, str) else get_tablename(named)
+
+
+@final
+@dataclass(frozen=True)
+class Models:
+    """One wsfs schema, bound to one host's users and workspaces.
+
+    Handed to `Workspaces.over` and carried from there: every query in this
+    package reads its tables off this object rather than importing them, so
+    two of these can coexist in one process against two different hosts.
+    """
+
+    entry: type[EntryRow]
+    name: type[NameRow]
+    parent: type[ParentRow]
+    deletion: type[DeletionRow]
+    text_content: type[TextContentRow]
+    blob_content: type[BlobContentRow]
+    text_cache: type[TextCacheRow]
+    token: type[TokenRow]
+
+    @property
+    def logs(self) -> tuple[type[TransactionRow], ...]:
+        """The five append-only logs, which are also the event stream."""
+        return (
+            self.name,
+            self.parent,
+            self.deletion,
+            self.text_content,
+            self.blob_content,
+        )
+
+    @property
+    def content(self) -> tuple[type[ContentRow], ...]:
+        return (self.text_content, self.blob_content)
+
+    @property
+    def tables(self) -> tuple[type[SQLModel], ...]:
+        """Everything this schema owns -- for create_all, or a migration."""
+        return (self.entry, *self.logs, self.text_cache, self.token)
+
+
+def build_models(
+    *,
+    user_table: str | type[WithTableName],
+    workspace_table: str | type[WithTableName],
+    prefix: str = DEFAULT_PREFIX,
+) -> Models:
+    """The tables, pointed at the host's users and workspaces.
+
+    Only two things about the host are needed, and neither is a class: the
+    table a `user_id` refers to, and the table a `workspace_id` refers to.
+    Nothing in this package reads a user or a workspace -- it stores their
+    ids, and scopes queries by them -- so the host keeps every decision about
+    what those are and who may reach them.
+
+    `prefix` names the tables and the entry-type enum. Two wsfs schemas in one
+    process need two prefixes, because SQLModel registers tables by name.
+    Building the same prefix twice with the same arguments returns the schema
+    already built; with different ones it raises, because that is a collision
+    rather than a repeat.
+    """
+    users, workspaces = _table_of(user_table), _table_of(workspace_table)
+    signature = (users, workspaces, prefix)
+    if prefix in _BUILT:
+        return _already_built(signature)
+    _BUILT[prefix] = (signature, _build(users, workspaces, prefix))
+    return _BUILT[prefix][1]
+
+
+_BUILT: dict[str, tuple[tuple[str, str, str], Models]] = {}
+
+
+def _already_built(signature: tuple[str, str, str]) -> Models:
+    built, models = _BUILT[signature[2]]
+    if built != signature:
+        raise ValueError(
+            f"a wsfs schema prefixed {signature[2]!r} already points at "
+            f"{built[0]}/{built[1]}, not {signature[0]}/{signature[1]}. "
+            "Give the second schema its own prefix."
+        )
+    return models
+
+
+def _build(users: str, workspaces: str, prefix: str) -> Models:
+    with warnings.catch_warnings():
+        # A second schema re-registers these class NAMES in SQLAlchemy's
+        # declarative registry, which matters only for resolving a
+        # `relationship("Entry")` by string. This package declares no
+        # relationships at all -- every join here is written out.
+        warnings.filterwarnings("ignore", message=".*already contains a class.*")
+        return _tables(users, workspaces, prefix)
+
+
+def _tables(users: str, workspaces: str, prefix: str) -> Models:
+    def named(part: str) -> type[WithTableName]:
+        return tablename("custom", f"{prefix}_{part}")
+
+    def logged(part: str) -> tuple[SchemaItem, ...]:
+        """Only a create writes more than one log at a position, which is what
+        makes "these rows are one transaction" a fact rather than a
+        convention."""
+        return (
+            stamped_by_the_choke_point(),
+            Index(f"ix_{prefix}_{part}_entry_position", "entry_id", "position"),
+        )
+
+    class Entry(EntryRow, named("entries"), table=True):
+        workspace_id: ID = ForeignKeyField(workspaces)
+        type: Type = EnumField(Type, name=f"{prefix}_entry_type")
+
+    class Transaction(TransactionRow, IsAbstractClass):
+        """The two ids every log row carries. Declared here, ahead of each
+        log's own shape in the MRO, because these are the ones that had to
+        wait for a host to say where they point."""
+
+        entry_id: ID = ForeignKeyField(Entry)
+        user_id: ID = ForeignKeyField(users)
+
+    class Name(Transaction, NameRow, named("names"), table=True):
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = logged("names")
+
+    class Parent(Transaction, ParentRow, named("parentage"), table=True):
+        parent_entry_id: ID | None = ForeignKeyField(Entry, nullable=True)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = logged("parentage")
+
+    class Deletion(Transaction, DeletionRow, named("deletions"), table=True):
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = logged("deletions")
+
+    class TextContent(Transaction, TextContentRow, named("text_content"), table=True):
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = logged("text_content")
+
+    class BlobContent(Transaction, BlobContentRow, named("blob_content"), table=True):
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = logged("blob_content")
+
+    class TextContentCache(TextCacheRow, named("text_cache"), table=True):
+        entry_id: ID = ForeignKeyField(Entry)
+        content_id: ID = ForeignKeyField(TextContent)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (UniqueConstraint("entry_id"),)
+
+    class StreamToken(TokenRow, named("stream_tokens"), table=True):
+        user_id: ID = ForeignKeyField(users)
+        workspace_id: ID = ForeignKeyField(workspaces)
+
+    return Models(
+        entry=Entry,
+        name=Name,
+        parent=Parent,
+        deletion=Deletion,
+        text_content=TextContent,
+        blob_content=BlobContent,
+        text_cache=TextContentCache,
+        token=StreamToken,
+    )

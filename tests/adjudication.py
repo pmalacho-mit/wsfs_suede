@@ -1,156 +1,273 @@
-"""Every typed refusal the contract names, and the two it does not."""
+"""Every typed refusal the contract names, and the ones it does not."""
 
-from conftest import Api, acknowledged, created, refused, version_of
+from conftest import (
+    Api,
+    meta,
+    acknowledged,
+    content_version,
+    created,
+    name_version,
+    new_id,
+    parent_version,
+    refused,
+    seen,
+)
 
 
 async def test_a_create_needs_a_live_folder_to_land_in(api: Api):
-    folder = created(await api.create("src", type="folder"))
-    await api.delete(folder, await version_of(api, folder))
+    folder = await created(api, "src", type="folder")
+    await api.delete(folder, await seen(api, folder))
 
-    assert refused(await api.create("main.py", parent=folder))["reason"] == "parent was deleted"
+    entry = new_id()
+    assert refused(await api.create(entry, name="main.py", parent=folder))["reason"] == (
+        "parent was deleted"
+    )
 
 
 async def test_a_create_cannot_land_inside_a_file(api: Api):
-    file = created(await api.create("notes.txt"))
+    file = await created(api, "notes.txt")
 
-    assert refused(await api.create("nested", parent=file))["reason"] == "parent was deleted"
+    assert refused(await api.create(new_id(), name="nested", parent=file))["reason"] == (
+        "parent was deleted"
+    )
 
 
-async def test_siblings_cannot_share_a_name(api: Api):
-    created(await api.create("main.py"))
+async def test_a_create_colliding_on_name_is_renamed_not_refused(api: Api):
+    await created(api, "main.py")
+    second = await created(api, "main.py")
+    third = await created(api, "main.py")
 
-    reason = refused(await api.create("main.py"))["reason"]
+    names = {entry["id"]: entry["name"] for entry in (await api.initialize())["entries"]}
+    assert names[second] == "main (2).py"
+    assert names[third] == "main (3).py"
+
+
+async def test_the_deduping_rename_advances_the_name_token_past_the_create(api: Api):
+    await created(api, "main.py")
+    entry, born = new_id(), api.transaction()
+    acknowledged(await api.create(entry, name="main.py", transaction=born))
+
+    settled = await meta(api, entry)
+    assert settled["name"] == "main (2).py"
+    assert settled["name_version"] != born
+    assert settled["parent_version"] == settled["deleted_version"] == born
+
+
+async def test_a_dotfile_keeps_its_leading_dot_when_resolved(api: Api):
+    await created(api, ".gitignore")
+    second = await created(api, ".gitignore")
+
+    names = {entry["id"]: entry["name"] for entry in (await api.initialize())["entries"]}
+    assert names[second] == ".gitignore (2)"
+
+
+async def test_renaming_onto_a_live_sibling_is_refused(api: Api):
+    await created(api, "a.py")
+    other = await created(api, "b.py")
+
+    reason = refused(await api.rename(other, await name_version(api, other), "a.py"))["reason"]
     assert reason == "entry with name already exists within destination"
 
 
 async def test_a_deleted_name_is_free_again(api: Api):
-    first = created(await api.create("main.py"))
-    acknowledged(await api.delete(first, await version_of(api, first)))
+    first = await created(api, "main.py")
+    acknowledged(await api.delete(first, await seen(api, first)))
 
-    assert created(await api.create("main.py")) != first
-
-
-async def test_renaming_onto_a_live_sibling_is_refused(api: Api):
-    created(await api.create("a.py"))
-    other = created(await api.create("b.py"))
-
-    reason = refused(await api.rename(other, await version_of(api, other), "a.py"))["reason"]
-    assert reason == "entry with name already exists within destination"
+    second = await created(api, "main.py")
+    names = {entry["id"]: entry["name"] for entry in (await api.initialize())["entries"]}
+    assert names[second] == "main.py"
 
 
-async def test_a_rename_against_a_stale_version_is_refused_with_the_current_one(api: Api):
-    file = created(await api.create("a.py"))
-    stale = await version_of(api, file)
+async def test_a_rename_against_a_stale_token_is_refused_with_the_current_one(api: Api):
+    file = await created(api, "a.py")
+    stale = await name_version(api, file)
     acknowledged(await api.rename(file, stale, "b.py"))
 
     refusal = refused(await api.rename(file, stale, "c.py"))
     assert refusal["reason"] == "entry was already renamed"
-    assert refusal["version"] == await version_of(api, file)
+    assert refusal["version"] == await name_version(api, file)
 
 
 async def test_a_rename_of_a_deleted_entry_is_refused(api: Api):
-    file = created(await api.create("a.py"))
-    acknowledged(await api.delete(file, await version_of(api, file)))
+    file = await created(api, "a.py")
+    token = await name_version(api, file)
+    acknowledged(await api.delete(file, await seen(api, file)))
 
-    assert refused(await api.rename(file, await version_of(api, file), "b.py"))["reason"] == "entry was deleted"
+    assert refused(await api.rename(file, token, "b.py"))["reason"] == "entry was deleted"
 
 
 async def test_a_move_into_a_deleted_folder_is_refused(api: Api):
-    folder = created(await api.create("src", type="folder"))
-    file = created(await api.create("a.py"))
-    acknowledged(await api.delete(folder, await version_of(api, folder)))
+    folder = await created(api, "src", type="folder")
+    file = await created(api, "a.py")
+    acknowledged(await api.delete(folder, await seen(api, folder)))
 
-    reason = refused(await api.reparent(file, await version_of(api, file), folder))["reason"]
+    reason = refused(await api.reparent(file, await parent_version(api, file), folder))["reason"]
     assert reason == "the destination was deleted"
 
 
 async def test_a_move_into_the_entrys_own_subtree_is_refused(api: Api):
-    outer = created(await api.create("outer", type="folder"))
-    inner = created(await api.create("inner", type="folder", parent=outer))
-    deeper = created(await api.create("deeper", type="folder", parent=inner))
+    outer = await created(api, "outer", type="folder")
+    inner = await created(api, "inner", type="folder", parent=outer)
+    deeper = await created(api, "deeper", type="folder", parent=inner)
 
     for destination in (outer, inner, deeper):
-        refusal = refused(await api.reparent(outer, await version_of(api, outer), destination))
+        refusal = refused(
+            await api.reparent(outer, await parent_version(api, outer), destination)
+        )
         assert refusal["reason"] == "the destination is inside the entry"
 
 
 async def test_a_move_that_would_collide_with_a_sibling_is_refused(api: Api):
-    folder = created(await api.create("src", type="folder"))
-    created(await api.create("a.py", parent=folder))
-    loose = created(await api.create("a.py"))
+    folder = await created(api, "src", type="folder")
+    await created(api, "a.py", parent=folder)
+    loose = await created(api, "a.py")
 
-    reason = refused(await api.reparent(loose, await version_of(api, loose), folder))["reason"]
+    reason = refused(
+        await api.reparent(loose, await parent_version(api, loose), folder)
+    )["reason"]
     assert reason == "entry with name already exists within destination"
 
 
-async def test_a_move_against_a_stale_version_is_refused(api: Api):
-    folder = created(await api.create("src", type="folder"))
-    file = created(await api.create("a.py"))
-    stale = await version_of(api, file)
-    acknowledged(await api.rename(file, stale, "b.py"))
+async def test_a_move_against_a_stale_token_is_refused(api: Api):
+    folder = await created(api, "src", type="folder")
+    file = await created(api, "a.py")
+    stale = await parent_version(api, file)
+    acknowledged(await api.reparent(file, stale, folder))
 
-    assert refused(await api.reparent(file, stale, folder))["reason"] == "entry had already been moved"
+    assert refused(await api.reparent(file, stale, None))["reason"] == (
+        "entry had already been moved"
+    )
 
 
-async def test_a_write_against_a_stale_version_names_the_version_it_lost_to(api: Api):
-    file = created(await api.create("a.py"))
-    stale = await version_of(api, file)
+async def test_a_write_against_a_stale_token_names_the_token_it_lost_to(api: Api):
+    file = await created(api, "a.py")
+    stale = await content_version(api, file)
     acknowledged(await api.write(file, stale, "first"))
 
     refusal = refused(await api.write(file, stale, "second"))
     assert refusal["reason"] == "content was already updated"
-    assert refusal["version"] == await version_of(api, file)
+    assert refusal["version"] == await content_version(api, file)
 
 
 async def test_a_write_to_a_deleted_entry_is_refused_so_the_client_can_park_it(api: Api):
-    file = created(await api.create("a.py"))
-    version = await version_of(api, file)
-    acknowledged(await api.delete(file, version))
+    file = await created(api, "a.py")
+    held = await content_version(api, file)
+    acknowledged(await api.delete(file, await seen(api, file)))
 
-    assert refused(await api.write(file, version, "work"))["reason"] == "entry was deleted"
+    assert refused(await api.write(file, held, "work"))["reason"] == "entry was deleted"
+
+
+async def test_a_folder_holds_no_content(api: Api):
+    folder = await created(api, "src", type="folder")
+
+    assert refused(await api.write(folder, new_id(), "not a file"))["reason"] == (
+        "content cannot be written to a folder"
+    )
 
 
 async def test_a_write_naming_bytes_that_were_never_stored_is_refused(api: Api):
-    file = created(await api.create("blob.bin"))
+    file = await created(api, "blob.bin")
 
     refusal = refused(
         await api.write_blob(
-            file, await version_of(api, file), hash="0" * 64, size=3, mime="application/x-thing"
+            file, await content_version(api, file),
+            hash="0" * 64, size=3, mime="application/x-thing",
         )
     )
     assert refusal["reason"] == "content bytes were never stored"
 
 
 async def test_deleting_what_is_already_deleted_is_acknowledged(api: Api):
-    file = created(await api.create("a.py"))
-    acknowledged(await api.delete(file, await version_of(api, file)))
+    file = await created(api, "a.py")
+    was = await seen(api, file)
+    acknowledged(await api.delete(file, was))
 
     # A second delete achieved what its caller asked for, so there is nothing
     # to refuse -- and the contract has no reason string that would be honest.
-    acknowledged(await api.delete(file, await version_of(api, file)))
+    acknowledged(await api.delete(file, was))
 
 
 async def test_a_stale_delete_names_what_it_would_have_destroyed_unseen(api: Api):
-    file = created(await api.create("a.py"))
-    stale = await version_of(api, file)
-    acknowledged(await api.write(file, stale, "unsaved work"))
+    file = await created(api, "a.py")
+    was = await seen(api, file)
+    acknowledged(await api.write(file, was["content_version"], "unsaved work"))
 
-    assert refused(await api.delete(file, stale))["reason"] == (
+    assert refused(await api.delete(file, was))["reason"] == (
         "later versions modified the content of the entry"
     )
 
 
 async def test_a_stale_delete_reports_a_rename_too(api: Api):
-    file = created(await api.create("a.py"))
-    stale = await version_of(api, file)
-    acknowledged(await api.rename(file, stale, "b.py"))
-    acknowledged(await api.write(file, await version_of(api, file), "work"))
+    file = await created(api, "a.py")
+    was = await seen(api, file)
+    acknowledged(await api.rename(file, was["name_version"], "b.py"))
+    acknowledged(await api.write(file, was["content_version"], "work"))
 
-    assert refused(await api.delete(file, stale))["reason"] == (
+    assert refused(await api.delete(file, was))["reason"] == (
         "later versions modified the content and name of the entry"
     )
 
 
-async def test_an_unknown_entry_is_refused_rather_than_crashing(api: Api):
-    unknown = "00000000-0000-4000-8000-000000000000"
-    assert refused(await api.delete(unknown, unknown))["reason"] == "entry was deleted"
+async def test_an_unknown_entry_is_not_reported_as_a_deleted_one(api: Api):
+    unknown = new_id()
+
+    assert refused(await api.rename(unknown, new_id(), "b.py"))["reason"] == "no such entry"
+    assert refused(await api.write(unknown, new_id(), "x"))["reason"] == "no such entry"
+
+
+async def test_names_that_could_not_be_a_path_segment_are_refused(api: Api):
+    file = await created(api, "a.py")
+    token = await name_version(api, file)
+
+    for name in ("", ".", "..", "a/b", "a\\b", "a\x00b", " padded ", "x" * 300):
+        assert refused(await api.rename(file, token, name))["reason"] == (
+            "that name is not permitted"
+        ), name
+
+
+async def test_names_are_normalised_so_two_clients_cannot_disagree_about_one(api: Api):
+    composed = "café.py"  # NFC
+    decomposed = "café.py"  # NFD -- the same word, as macOS sends it
+    await created(api, composed)
+    second = await created(api, decomposed)
+
+    names = {entry["id"]: entry["name"] for entry in (await api.initialize())["entries"]}
+    assert names[second] == "café (2).py"
+
+
+async def test_a_token_that_was_never_issued_is_not_an_ordinary_conflict(api: Api):
+    file = await created(api, "a.py")
+
+    fabricated = refused(await api.rename(file, new_id(), "b.py"))
+    assert fabricated["reason"] == "the version presented was never issued"
+
+
+async def test_another_entrys_token_does_not_vouch_for_this_one(api: Api):
+    file = await created(api, "a.py")
+    neighbour = await created(api, "b.py")
+
+    borrowed = await name_version(api, neighbour)
+    assert refused(await api.rename(file, borrowed, "c.py"))["reason"] == (
+        "the version presented was never issued"
+    )
+
+
+async def test_a_create_naming_bytes_that_were_never_stored_is_refused(api: Api):
+    refusal = refused(
+        await api.create(
+            new_id(),
+            name="logo.png",
+            content={"type": "binary", "hash": "0" * 64, "size": 3, "mime": "image/png"},
+        )
+    )
+    assert refusal["reason"] == "content bytes were never stored"
+
+
+async def test_a_file_is_created_with_content_and_a_folder_without(api: Api):
+    malformed = [
+        {"type": "folder", "name": "src", "content": {"type": "text", "content": "x"}},
+        {"type": "file", "name": "a.py", "content": None},
+    ]
+    for request in malformed:
+        response = await api.submit(op="create", id=new_id(), **request)
+        assert response.status_code == 422, request

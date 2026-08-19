@@ -94,14 +94,28 @@ flowchart TD
 
 ## 2. Vocabulary
 
-**Entry** — a node in the tree: `{id, version, name, parent?, deleted?}`,
-type `file` or `folder`. Metadata is deliberately *pure namespace*: it carries
-no content descriptor. Server-assigned ids; clients never mint entry ids.
+**Entry** — a node in the tree: `{id, name, parent?, deleted?}` plus one
+version token per property, type `file` or `folder`. Metadata is deliberately
+*pure namespace*: it carries no content descriptor. **Client-minted ids**: the
+client chooses an entry's id before it asks for the entry, which is what makes
+creating one offline an ordinary queued transaction rather than a special case.
 
-**Version** — an opaque id naming one state of an entry. Comparable by
-*equality only*; it is a CAS (Central Authentication Service) token, not a counter. Every stream event carries
-the entry's new version, which is what the client must present on its next
-mutation of that entry.
+**Version** — an opaque token naming one state of *one property* of an entry:
+its name, its parent, its deletion, or its content. Comparable by *equality
+only*; it is a compare-and-swap (CAS) token, not a counter. There is no such
+thing as a version of a whole entry — only four tokens that move independently.
+
+A version token is the **id of the transaction that last set that property**.
+The client minted that id, so it knows what token its own work will produce
+before the response arrives — which is what lets it chain a whole session's
+work offline with nothing remapped server-side. Splitting tokens by property
+is what keeps that from over-firing: a collaborator's write moves the content
+token and nothing else, so your pending rename still applies.
+
+**Identity** — every id crossing the wire is client-minted with a platform
+CSPRNG (UUIDv7 preferred). The server never remaps: an entry id already in use
+is a typed refusal, because a remap would reintroduce the local-id → server-id
+table that client-minted identity exists to delete.
 
 **Content plane** — kind (`text` | `binary`), mime, size, hash. Revealed by
 `Content` fetches, cached client-side per entry id, invalidated by stream
@@ -130,9 +144,11 @@ Orders the event stream and anchors tokens. *Never client-visible.*
 to `{user, workspace, position}`. Connecting the stream claims it atomically;
 the stream replays events after its position before going live.
 
-**Draft** — parked content with no server-side home: an intent
-(`create` at a path / `write` to a now-deleted entry) plus a hash pointer to
-bytes. Carries no version, cannot conflict, lives outside the sync machinery.
+**Draft** — parked content with no server-side home: a `write` to a
+now-deleted entry, plus a hash pointer to the bytes. Carries no version,
+cannot conflict, lives outside the sync machinery. Down to this one case:
+the offline-create draft is gone, because an offline create is now an
+ordinary queued transaction.
 
 <!-- diagram: Vocabulary -->
 ```mermaid
@@ -311,24 +327,37 @@ classDiagram
 
 ### Server-side
 
-**Postgres, tables of record** — entries + hierarchy (your
-`FileSystem`/`FileHierarchy` schema), per-entry version history, and:
+**Postgres, tables of record** — an entry is pure identity, and each of its
+four properties is an append-only log: names, parentage, deletions, content
+(text as deltas, binary as hash pointers). Every row records the workspace
+position it landed at, and current state is the newest row per log.
 
-- **Transaction record** — one table, three roles: audit log, dedup table,
-  and the answer source for `Initialize`'s `applied`/`rejected`. Payloads
-  content-addressed. Retention must exceed maximum tolerated client offline
-  age; older presented transactions are answered "cannot reconcile", never
-  guessed.
-- **Event buffer** — stream events by position. Retention: *minutes* —
-  resume never spans more than the Initialize→connect gap plus blips.
-- **Token table** — `{token, user, workspace, position, expires}`, claimed
-  by `DELETE ... RETURNING` on stream connect.
+Four things that would ordinarily be separate tables are not:
 
-**The choke point** — the one code path every mutation flows through:
-apply mutation → bump position → write transaction record + event row, all
-in one database transaction, serialized per workspace by the controller.
-The event log is generated *from* the truth, so it cannot drift from it.
-(The row lock on the workspace stays as split-brain insurance.)
+- **No transaction record.** An applied transaction *is* the row it appended:
+  its client-minted id is that row's primary key, so dedup is primary-key
+  identity rather than a secondary index somebody has to remember to keep.
+- **No refusal record.** Adjudication is a pure function of the workspace, so
+  a refused transaction is recomputed rather than remembered — and the reason
+  it produces is measured against the workspace as it stands, which is the one
+  the client can act on. Nothing was applied, so there is nothing to store.
+- **No event buffer.** One applied transaction takes exactly one position, so
+  the rows of a workspace in position order *are* its event stream — and
+  *which log* a row is in is which event it was. Nothing to retain, nothing to
+  drift, and nothing to derive by comparing a row against its predecessor.
+- **No version row.** A materialised "the entry looked like this" row would
+  hold only what the four newest rows already say. Only a create writes more
+  than one log at a position, which is what tells a birth from a change.
+
+The one table beyond the domain schema is the **token table** —
+`{token, user, workspace, position, expires}`, claimed by `DELETE ...
+RETURNING` on stream connect.
+
+**The choke point** — the one code path every mutation flows through, and by
+now it is three lines: take the next position, stamp it onto the rows the
+transaction appends, append them. One database transaction, serialized per
+workspace by the controller. There is no event log to generate, because those
+rows are it.
 
 **Workspace controller + registry** — one controller per workspace per
 process (the actor pattern). All writes — transactional requests AND
@@ -336,10 +365,16 @@ Initialize — flow through its serialized `submit()`, which fans committed
 events out to subscribed streams after commit. Initialize's one-consistent-
 view guarantee comes from this exclusion, not isolation levels. Reads
 (Content, blobs) bypass it. Lifecycle: streams refcount it, mutations are
-transient visitors, release is grace-delayed (~30s) so reconnect churn
-doesn't thrash it, and one registry lock guards get-or-create AND release
-(re-checking the count inside the lock) against the release/acquire race.
-Controller memory is rebuildable-from-zero: Postgres remains the truth.
+held for the duration of one (because they carry the position counter),
+release is grace-delayed (~30s) so reconnect churn doesn't thrash it, and one
+registry lock guards get-or-create AND release (re-checking the count inside
+the lock) against the release/acquire race. Controller memory is
+rebuildable-from-zero: Postgres remains the truth, and a controller taking a
+workspace on reads its position out of the logs.
+
+Nothing about a workspace is held open in the database — no lock, no
+connection, no row. Live workspaces therefore cost the database nothing, and a
+thousand of them cost exactly what one does.
 
 **SSE handler** — claim token → subscribe → replay events after the token's
 position → follow live, with comment heartbeats (~15s).
@@ -425,8 +460,8 @@ stateDiagram-v2
 
 | State | Meaning | Transitions |
 |---|---|---|
-| **absent** | No such id | → live (Create; the ack yields the id — identity, not state; the entry enters the confirmed map only via the stream's `create` event) |
-| **live** | In the tree | → live (rename / reparent / write, each advancing `version`); → tombstoned (delete) |
+| **absent** | No such id | → live (Create; the client already holds the id, so the ack carries nothing — the entry enters the confirmed map only via the stream's `create` event) |
+| **live** | In the tree | → live (rename / reparent / write, each advancing ONE property's token); → tombstoned (delete) |
 | **tombstoned** | `deleted: true`; remains in snapshots | terminal (a "restore" is a fresh Create) |
 
 Tombstones are load-bearing: reconciliation cannot distinguish "deleted"
@@ -436,8 +471,8 @@ from "unchanged" without them.
 ```mermaid
 stateDiagram-v2
     [*] --> Absent
-    Absent --> Live : Create — the ack yields the id, the stream event yields the entry
-    Live --> Live : rename / reparent / write — each advances version
+    Absent --> Live : Create — the client already holds the id, the stream event yields the entry
+    Live --> Live : rename / reparent / write — each advances that property's token
     Live --> Tombstoned : delete
     Tombstoned --> [*] : terminal — a restore is a fresh Create
     note right of Tombstoned
@@ -450,8 +485,8 @@ stateDiagram-v2
 
 | State | Meaning | Transitions |
 |---|---|---|
-| **parked** | Intent + hash pointer persisted (always *before* the error is raised to the caller) | → recovering (user accepts, online) / dismissed (explicit) |
-| **recovering** | Replaying Create → Store → Write online | → evicted (success) / parked (failure — never silently dropped) |
+| **parked** | Entry + hash pointer persisted (always *before* the error is raised to the caller) | → recovering (user accepts, online) / dismissed (explicit) |
+| **recovering** | Minting a fresh entry id and replaying Create → Store → Write | → evicted (success) / parked (failure — never silently dropped) |
 | **dismissed / evicted** | User chose, or recovery succeeded | terminal |
 
 <!-- diagram: DraftLifecycle -->
@@ -634,7 +669,7 @@ classDiagram
         +Rejection[] rejected
         +OutboxRequest[] applied
     }
-    CreateRequest ..> Versioned : online-only, so there is no version to present
+    CreateRequest ..> Versioned : no prior version to present — the entry is new
     DeleteRequest *-- Versioned : CAS
     RenameRequest *-- Versioned : CAS
     ReparentRequest *-- Versioned : CAS
@@ -709,35 +744,65 @@ flowchart TD
 ```
 <!-- /diagram -->
 
-### 6.3 Create (online-only)
+### 6.3 Create
 
-Send `Create` → ack returns the server-assigned id → dependent operations may
-proceed against that id → the stream's `create` event populates the confirmed
-map. Lost ack: retry with the *same* transaction id (the server dedupes —
-this is the one place a duplicate would mint a duplicate entry). Offline: the
-call fails loudly and any content parks as a draft.
+Mint an entry id and a transaction id → queue the request like any other →
+dependent operations may proceed against that id immediately, online or off →
+the stream's `create` event populates the confirmed map. A lost ack is retried
+with the *same* transaction id and the *same* entry id; the server answers from
+the row it already appended rather than minting a second entry.
+
+A create carries the entry's content: a file is born with it, a folder is born
+without, and neither is optional — an "empty file" is something a client says
+rather than something it omits. So an entry never exists in a contentless
+state, every Write has a real token to present, and a Pyodide computation
+finishing offline is one queued transaction instead of two.
+
+The typical gesture is "new file, then type its name", so the client sends a
+placeholder name and opens the name field for editing straight away — blank,
+VSCode-style. Filling it issues a rename; leaving it blank issues a delete.
+Both name the entry by the id the client minted, whether or not the create has
+been acknowledged yet.
+
+A name collision on create is **renamed, not refused**: a create has no prior
+version to compare against, so refusing it would be the only thing standing
+between two offline clients and a lost `notes.md`. The create lands under the
+name it asked for and the controller renames it — two events, a `create` then
+a `name`, both arriving through the one door. A rename IS refused on
+collision: there the user typed a specific name and deserves to be told.
+
+**Names settle at the end of the unit of work, not at the create.** One
+controller submission is one database transaction, so for a single online
+create that is immediately afterwards — but for a replayed outbox it is after
+every queued transaction has had its say. That matters for the ordinary
+offline gesture: create `notes.md`, then type `report.md` over it. By the time
+names settle the entry is called `report.md`, nothing collides, and the
+controller issues no rename at all. The typed name simply wins.
+
+Two consequences worth knowing. First claim wins: when two entries do arrive
+holding one name, the one whose name row is older keeps it. And within a
+replay two live siblings may briefly share a name — which is never observable
+as a wrong answer, because a create only settles away from its name when
+somebody claimed that name first, and that earlier claimant still holds it
+afterwards.
 
 <!-- diagram: CreateFlow -->
 ```mermaid
 sequenceDiagram
     actor Caller as Caller (UI or Pyodide)
+    participant OutboxQueue as Outbox
     participant ServerSide as Server
     participant ConfirmedMap as Confirmed map
-    participant DraftsLot as Drafts
-    Note over Caller,DraftsLot: Create is online-only — it is never queued in the outbox, and neither is anything depending on an unacknowledged create
-    alt online
-        Caller->>+ServerSide: Create(transaction, type, name, parent?)
-        ServerSide-->>-Caller: ack { id } — identity, not state
-        Note right of Caller: Dependent operations may now proceed against that id
-        ServerSide-)ConfirmedMap: stream create event — the entry enters the map here, and only here
-        opt ack lost
-            Caller->>ServerSide: retry with the SAME transaction id
-            ServerSide-->>Caller: deduped — the one place a duplicate would mint a duplicate entry
-        end
-    else offline
-        Caller-xServerSide: Create
-        Caller->>DraftsLot: park the content as a draft
-        DraftsLot-->>Caller: parked — now fail loudly
+    Note over Caller,ConfirmedMap: The client mints the entry id, so a create is queued like anything else — online or off
+    Caller->>Caller: mint entry id + transaction id
+    Caller->>OutboxQueue: capture before send
+    Caller->>+ServerSide: Create(transaction, id, type, name?, parent?)
+    ServerSide-->>-Caller: ack — carries nothing; the id was never the server's to give
+    Note right of Caller: Dependent work referenced that id from the moment it was minted
+    ServerSide-)ConfirmedMap: stream create event — the entry enters the map here, and only here
+    opt ack lost
+        Caller->>ServerSide: retry with the SAME transaction id and entry id
+        ServerSide-->>Caller: answered from the row already appended — never a second entry
     end
 ```
 <!-- /diagram -->
@@ -825,7 +890,7 @@ sequenceDiagram
 | Content write conflict, live editor open | Ignore — the yjs doc is the truth; all text mutations flow through it |
 | Text write conflict, no live editor | Diff editor: fetch `Content` at the conflicting version for the other side |
 | Write to a deleted entry | Evict transaction; park content as a draft |
-| Create offline | Fail loudly; park content as a draft; UI disables creation while disconnected |
+| Create offline | Queue it — the id is the client's to mint. Nothing to park, nothing to disable |
 | Move / rename / delete rejected | Evict; effective view snaps back automatically |
 | Store hash mismatch / too large | Surface; do not retry blindly (the bytes are wrong or oversized, not the network) |
 | Content fetch offline, cold cache | Clean filesystem error (deadline-bounded), never a wedge |
@@ -859,8 +924,8 @@ flowchart LR
 
 1. **One door for state.** The confirmed map changes only via Initialize
    snapshots and stream events. Responses only adjudicate the outbox. The
-   sole exception is Create's ack carrying the new *id* — identity, not
-   state.
+   There is no exception: a create's id came from the client, so an ack
+   has nothing to add.
 2. **Initialize is one database transaction.** Adjudication, snapshot, and
    token position together, or the no-flicker/no-gap guarantees silently die.
    Do not let anyone "optimize" it apart.
@@ -872,8 +937,11 @@ flowchart LR
    error is returned to the caller. Ordering is what saves the bytes.
 5. **Order is sacred in the outbox.** Counter order in, counter order out;
    coalescing is per-entry, writes-only, boring, and unit-tested.
-6. **Versions are equality-only CAS tokens.** No client-side "newer than"
-   reasoning exists; staleness is resolved by re-entering the loop.
+6. **Versions are equality-only, per-property CAS tokens.** No client-side
+   "newer than" reasoning exists; staleness is resolved by re-entering the
+   loop. A token that was never issued at all is a *different class* of
+   failure from a stale one — it means the client's state is unsound, and the
+   only sound response is to discard it and re-Initialize.
 7. **Detach never discards.** A yjs doc with unsynced changes stays attached
    in the background until flushed; eviction (deletion) is the only path
    that wipes, and it always wipes.
@@ -883,14 +951,34 @@ flowchart LR
    draft); concurrent blob commits fail CAS rather than last-write-wins.
 10. **Blobs are immutable; hashes are forever.** A cached blob by hash can
     never be wrong — only pointers go stale.
-11. **One process per workspace.** "One controller per workspace" is only
-    true within a process: exactly one process may serve a workspace's
-    writes and streams. This is the first invariant a deployment engineer
-    can violate without touching code (`--workers 4`, an autoscaler's
-    max-instances > 1). Guard it: pin instances to one, keep the row lock
-    as split-brain insurance, add the per-workspace advisory lock so a
-    second instance fails loudly — and treat a cross-process bus behind
-    the controllers as the upgrade path when scale demands it.
+11. **One process serves a deployment.** "One controller per workspace" is
+    only true within a process, and positions are counted in that process's
+    memory — so a second process serving the same workspace hands out numbers
+    the first has already used. This is the first invariant a deployment
+    engineer can violate without touching code (`--workers 4`, an
+    autoscaler's max-instances > 1).
+
+    **Nothing in the code enforces it.** There is one guard, and it is
+    partial: the startup check reads `WEB_CONCURRENCY`, which is where the
+    mistake usually lives but not always — `WEB_CONCURRENCY` is only uvicorn's
+    default for `--workers`, so an explicit `--workers 4` sets nothing there
+    and starts four processes anyway. Running one instance is the operator's
+    promise, deliberately, and this is what it buys: the database holds no
+    lock, no lease and no connection on any workspace's behalf, so a live
+    workspace costs nothing to keep and their number is bounded by memory
+    rather than by `max_connections`.
+
+    What breaking it costs: two processes each counting positions from their
+    own reading of the logs, handing out the same numbers. Because events are
+    grouped by the transaction that wrote them rather than by position, the
+    result is a stream that is out of order rather than one that means the
+    wrong thing — but it is still wrong, and nothing will say so.
+
+    Making it the database's promise means a lease table with a heartbeat, not
+    a held lock: a held advisory lock costs one postgres backend per live
+    workspace, which is the ceiling this design exists to avoid. That, and a
+    cross-process bus behind the controllers, is the upgrade path when scale
+    demands it.
 
 ---
 
@@ -901,7 +989,7 @@ flowchart LR
 | Request types | 7 (Create, Delete, Rename, Reparent, Store, Write, Content) + Initialize |
 | Stream event types | 5 (create, write, delete, name, parent) |
 | Client loops | 1 per client per workspace |
-| Server tables beyond the domain schema | 3 (transactions, event buffer, tokens) |
+| Server tables beyond the domain schema | 1 (stream tokens) |
 | Client persistent stores | 4 (outbox + bytes-by-hash, content cache, drafts, y-indexeddb per open doc) |
 | Derived client state | 2 (confirmed map, effective view) |
 | Third-party dependencies in the sync core | 0 (Liveblocks serves only the collaboration plane) |
@@ -910,8 +998,8 @@ flowchart LR
 Everything in the sync core survives the subtraction test: remove any piece
 and a named goal breaks (outbox → lost work; CAS → silently destroyed
 collaborators' work; one-door → response/stream races; Initialize → stranded
-outboxes; token position → silent stream gaps; drafts → your Pyodide
-offline-create example loses its bytes).
+outboxes; token position → silent stream gaps; drafts → a write whose entry
+was deleted underneath it loses its bytes).
 
 ## 10. Deliberately not built (yet)
 
@@ -928,6 +1016,17 @@ offline-create example loses its bytes).
 - **Kind-transition automation** (size-based demotion of huge text files
   from live editability) — the content model (§5) already accommodates it;
   the trigger machinery can come later.
+- **Restore.** A tombstone is terminal, and a "restore" is a fresh Create.
+  Nobody should add it as "just a CAS write to `deleted`": the parent may have
+  been deleted since, and the name may have been taken while the entry was
+  gone, so a restore would have to re-run every create-time check. Until it
+  does, it does not exist.
+- **Case-insensitive names.** Sibling uniqueness is case-SENSITIVE, matching
+  the Linux-shaped runtime that reads the tree, where `Foo.py` and `foo.py`
+  are two importable modules. Names are NFC-normalised at the controller, so
+  a macOS client's `café` and a Linux client's `café` are one name. Reversing
+  the case decision later means reconciling workspaces that already hold
+  colliding pairs.
 
 The design is at the stage where the threat is no longer a flaw in it, but
 feature pressure gradually un-simplifying it. Each addition should be asked

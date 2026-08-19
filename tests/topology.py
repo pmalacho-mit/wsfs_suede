@@ -7,68 +7,55 @@ import pytest
 
 from sqlmodel import Session, select
 
-from conftest import Api, acknowledged, created, listening, open_workspace, serving, version_of
-from release.backend.models import Version
+from conftest import (
+    Api,
+    acknowledged,
+    content_version,
+    created,
+    listening,
+    name_version,
+    new_id,
+    open_workspace,
+    serving,
+)
+from host import MODELS
 
 
 async def test_writes_to_one_workspace_are_serialized(api: Api, session: Session):
-    await asyncio.gather(*(api.create(f"f{index}.py") for index in range(20)))
+    await asyncio.gather(
+        *(api.create(new_id(), name=f"f{index}.py") for index in range(20))
+    )
 
-    positions = sorted(session.exec(select(Version.position)).all())
+    positions = sorted(session.exec(select(MODELS.name.position)).all())
     assert positions == list(range(1, 21))
 
 
-async def test_a_second_process_is_refused_a_workspace_another_holds(api: Api, processes):
-    token = (await api.initialize())["token"]
-    async with listening(api, token):  # a live stream pins the controller, and its lease
-        async with serving(processes()) as elsewhere:
-            intruder = Api(elsewhere, api.workspace, user="ada@example.com")
-            assert (await intruder.create("a.py")).status_code == 503
-
-
-async def test_a_second_process_may_serve_a_different_workspace(api: Api, processes):
-    token = (await api.initialize())["token"]
-    async with listening(api, token):
-        async with serving(processes()) as elsewhere:
-            neighbour = Api(elsewhere, await open_workspace(elsewhere), user="ada@example.com")
-            assert created(await neighbour.create("a.py"))
-
-
-async def test_the_lease_transfers_once_its_holder_lets_go(processes):
-    async with serving(processes()) as first:
+async def test_a_restart_loses_nothing_and_the_stream_picks_up_where_it_left_off(
+    processes, tmp_path
+):
+    deployment = tmp_path / "one-deployment"
+    async with serving(processes(blob_root=deployment)) as first:
         workspace = await open_workspace(first)
         api = Api(first, workspace, user="ada@example.com")
-        file = created(await api.create("a.py"))
-
-    async with serving(processes()) as second:
-        successor = Api(second, workspace, user="ada@example.com")
-        assert [e["id"] for e in (await successor.initialize())["entries"]] == [file]
-        acknowledged(await successor.rename(file, await version_of(successor, file), "b.py"))
-
-
-async def test_a_restart_loses_nothing_and_the_stream_picks_up_where_it_left_off(processes):
-    async with serving(processes()) as first:
-        workspace = await open_workspace(first)
-        api = Api(first, workspace, user="ada@example.com")
-        file = created(await api.create("a.py"))
-        acknowledged(await api.write(file, await version_of(api, file), "work"))
+        file = await created(api, "a.py")
+        acknowledged(await api.write(file, await content_version(api, file), "work"))
         before = await api.initialize()
 
     # Controller memory is rebuildable from zero: postgres remains the truth.
-    async with serving(processes()) as second:
+    async with serving(processes(blob_root=deployment)) as second:
         api = Api(second, workspace, user="ada@example.com")
         after = await api.initialize()
         assert after["entries"] == before["entries"]
 
         async with listening(api, after["token"]) as heard:
-            acknowledged(await api.rename(file, await version_of(api, file), "b.py"))
+            acknowledged(await api.rename(file, await name_version(api, file), "b.py"))
             assert (await heard.until(1))[0]["value"] == "b.py"
 
         assert (await api.content(file)).json()["content"] == "work"
 
 
 async def test_an_idle_controller_is_retired_after_its_grace_period(api: Api, registry):
-    created(await api.create("a.py"))
+    await created(api, "a.py")
     workspace = UUID(api.workspace)
 
     assert registry.live(workspace) is not None
@@ -76,7 +63,9 @@ async def test_an_idle_controller_is_retired_after_its_grace_period(api: Api, re
     assert registry.live(workspace) is None
 
 
-async def test_a_reconnect_within_the_grace_period_finds_the_same_controller(api: Api, registry):
+async def test_a_reconnect_within_the_grace_period_finds_the_same_controller(
+    api: Api, registry
+):
     workspace = UUID(api.workspace)
     async with listening(api, (await api.initialize())["token"]):
         pinned = registry.live(workspace)
@@ -87,12 +76,49 @@ async def test_a_reconnect_within_the_grace_period_finds_the_same_controller(api
         assert registry.live(workspace) is pinned
 
 
-def test_several_workers_are_refused_unless_someone_says_they_are_pinned(monkeypatch, tmp_path):
-    from release.backend.main import SHARDING_ACKNOWLEDGED, create_app
+async def test_several_workers_are_refused_unless_someone_says_they_are_pinned(
+    monkeypatch, processes, tmp_path
+):
+    from wsfs_suede.release.backend.main import SHARDING_ACKNOWLEDGED
 
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
     with pytest.raises(RuntimeError, match="one workspace from several"):
-        create_app(blob_root=tmp_path / "blobs")
+        processes(blob_root=tmp_path / "blobs")
 
     monkeypatch.setenv(SHARDING_ACKNOWLEDGED, "1")
-    create_app(blob_root=tmp_path / "blobs").state.backend.engine.dispose()
+    assert processes(blob_root=tmp_path / "blobs") is not None
+
+
+async def test_positions_resume_from_the_logs_when_a_process_goes_away(
+    processes, session, tmp_path
+):
+    """Nothing writes a counter back, so a clean shutdown and a kill -9 leave
+    the database in exactly the same state: the next controller reads the
+    high-water mark out of the logs and carries on above it."""
+    deployment = tmp_path / "one-deployment"
+    async with serving(processes(blob_root=deployment)) as first:
+        workspace = await open_workspace(first)
+        api = Api(first, workspace, user="ada@example.com")
+        for index in range(3):
+            await created(api, f"f{index}.py")
+
+    async with serving(processes(blob_root=deployment)) as second:
+        api = Api(second, workspace, user="ada@example.com")
+        await created(api, "after-the-restart.py")
+
+    assert sorted(session.exec(select(MODELS.name.position)).all()) == [1, 2, 3, 4]
+
+
+async def test_a_controller_is_not_retired_while_a_submission_is_in_flight(
+    api: Api, registry
+):
+    """The controller carries the position counter, so its successor would
+    re-seed from rows this submission has not committed yet."""
+    workspace = UUID(api.workspace)
+
+    async with registry.visiting(workspace) as controller:
+        await asyncio.sleep(0.4)  # longer than grace_seconds
+        assert registry.live(workspace) is controller
+
+    await asyncio.sleep(0.4)
+    assert registry.live(workspace) is None

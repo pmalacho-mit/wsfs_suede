@@ -1,7 +1,7 @@
 namespace Utility {
   export type Expand<T> = T extends infer O ? { [K in keyof O]: O[K] } : never;
 
-  export type Typed<T extends string, Obj = {}> = Expand<Obj & {
+  export type Typed<T extends string, Obj = {}> = Utility.Expand<Obj & {
     type: T
   }>;
 }
@@ -10,31 +10,71 @@ export namespace Entry {
   export type Type = "file" | "folder";
 
   /**
+   * A version token: the id of the transaction that last set one property of
+   * one entry. Comparable by EQUALITY ONLY — it is a compare-and-swap token,
+   * not a counter, and there is no "newer than" relation on it.
+   *
+   * The client minted it, which is the whole point: it knows what token its
+   * own operation will produce before the response arrives, so it can chain a
+   * whole session's work offline without the server remapping anything.
+   */
+  export type Version = string;
+
+  /**
    * Deliberately PURE NAMESPACE: no content descriptor (kind/mime/size/hash).
    * The content plane is revealed by Content fetches and cached client-side
    * (see Client.Content). Stream "write" events are pure invalidation signals.
+   *
+   * The four tokens are per-PROPERTY, and that independence is load-bearing:
+   * a collaborator writing content does not invalidate your pending rename,
+   * because the two present different tokens.
    */
   export type Metadata = Utility.Typed<Type, {
-    id: string;      // server-assigned; clients never mint entry ids
-    version: string; // opaque version id — comparable by EQUALITY ONLY (CAS token)
+    /** Client-minted. See Identity below. */
+    id: string;
     name: string;
     parent?: string; // absent = workspace root
     deleted?: boolean; // tombstone: deleted entries remain present in snapshots
+
+    name_version: Version;
+    parent_version: Version;
+    deleted_version: Version;
+    /** Absent for an entry that has never been written. */
+    content_version?: Version;
   }>;
 
-  export type Versioned = Utility.Expand<Pick<Entry.Metadata, "id" | "version">>;
+  /**
+   * IDENTITY. Every id crossing this contract — entry ids and transaction ids
+   * alike — is minted by the client, with a platform CSPRNG
+   * (`crypto.randomUUID()`, never `Math.random()`). UUIDv7 is preferred: same
+   * collision safety, better index locality on the server's append-only
+   * tables, at the cost of leaking creation time (already visible here).
+   *
+   * Mint once and persist. A retry MUST reuse the same id — that is what
+   * makes a retry free rather than a duplicate.
+   *
+   * The server does not remap. An entry id already in use is answered with a
+   * typed refusal ("that id is already in use"), never with a "call it y
+   * instead" instruction: a remap would reintroduce exactly the local-id →
+   * server-id table that client-minted identity exists to delete, and every
+   * queued item still holding the old id would be wrong.
+   */
 }
 
 export namespace Events {
   export type Transactioned<Obj = {}> = Utility.Expand<Obj & {
     /**
-     * Transaction id, format `${client}:${counter}`:
-     * - client: GUID minted per client instance (one browser tab = one client)
-     * - counter: strictly increasing per client
-     * Globally unique (the server dedupes on it), and it encodes submission
-     * order — outbox persistence and replay MUST preserve counter order.
+     * Client-minted transaction id, unique across all clients.
+     *
+     * It does three jobs at once: it is the dedup key the server answers a
+     * retry from, it becomes the primary key of the row the server appends,
+     * and once applied it IS the new version token for the property this
+     * request changed. The client therefore knows the token its own work
+     * produces at mint time, without a round trip.
      */
-    transaction: string
+    transaction: string;
+    /** The entry this request is about. */
+    id: string;
   }>;
 
   export type Reasoned<Reason extends string, Obj = {}> = Utility.Expand<Obj & {
@@ -50,78 +90,164 @@ export namespace Events {
   export type Failure<Reason extends string, Obj = {}> = Responded<true, Obj & Reasoned<Reason>>;
 
   /**
+   * A refusal every operation can produce, and the only one that is not an
+   * ordinary conflict. A presented token is in one of three states:
+   *
+   *   current      → accepted
+   *   superseded   → ordinary conflict; rebase onto the token in the refusal
+   *   never issued → the client's state is unsound: discard it, re-Initialize
+   *
+   * Answering the third as an ordinary conflict sends a client into a retry
+   * loop it cannot win, which is why it has its own reason.
+   */
+  export type Unsound = Failure<"the version presented was never issued">;
+
+  /** The entry id names nothing this workspace has ever held. */
+  export type Unknown = Failure<"no such entry">;
+
+  /**
    * Assume that all client-sent requests (unless noted) are sent with an
    * authentication header, which encodes the user_id of the sender.
    *
-   * ONE DOOR FOR STATE: responses never carry applicable state — the client's
-   * confirmed map is mutated ONLY by ServerSent.Stream events (and Initialize
-   * snapshots). Responses exist to evict/adjudicate outbox entries. The single
-   * deliberate exception: Create's ack carries the server-assigned id, which
-   * is IDENTITY, not state — it cannot race, regress, or conflict.
+   * ONE DOOR FOR STATE, without exception: the client's confirmed map is
+   * mutated ONLY by ServerSent.Stream events and Initialize snapshots.
+   * Responses never carry state — they exist to evict/adjudicate outbox
+   * entries. (Create used to be the exception, because only the server could
+   * mint an entry id. It no longer is.)
    */
   export namespace ClientSent {
     export namespace Create {
       /**
-       * ONLINE-ONLY: creates are never queued in the outbox, and neither is
-       * anything that depends on an unacknowledged create. Offline, creation
-       * fails loudly (UI disables it; a Pyodide `open(path, "w")` on a new
-       * path raises a clean filesystem error rather than half-working) —
-       * but the CONTENT of the failed create is not discarded: it parks in
-       * Client.Drafts for one-click recovery on reconnect.
+       * Queued like everything else. The client already knows the id, so an
+       * offline create is an ordinary outbox entry rather than a failure with
+       * its bytes parked in a draft.
        *
-       * A lost ack is retried with the SAME transaction id; the server
-       * dedupes creates on it (this is the one place a duplicate would
-       * otherwise mint a duplicate entry).
+       * A lost ack is retried with the SAME transaction id AND the same entry
+       * id; the server answers from its record instead of minting a second
+       * entry.
        */
       export type Request = Transactioned<{
         type: Entry.Type;
         name: string;
-        /** id only — the sole precondition is "parent not deleted", checked server-side */
+        /** id only — the sole precondition is "parent still reachable" */
         parent?: string;
+        /**
+         * A file is born with its content; a folder is born with none.
+         * Required either way, so "empty file" is something a client SAYS
+         * (`{type: "text", content: ""}`) rather than something it omits.
+         *
+         * An entry therefore never exists in a contentless state, which is
+         * what lets every Write present a content token that is really there
+         * — and what lets a twenty-minute Pyodide computation finishing
+         * offline become one queued transaction rather than two.
+         */
+        content: Write.Text | Write.Binary | null;
       }>
 
       /**
-       * Ack carries the new entry's id so dependent operations (the write
-       * right after a create, the optimistic UI row) have something to
-       * reference. The entry itself still enters the confirmed map only via
-       * the stream's "create" event.
+       * NAME COLLISIONS ARE NOT REFUSED HERE. A create has no prior version
+       * to compare against, so refusing it would be the only thing standing
+       * between two offline clients and a lost `notes.md`.
+       *
+       * Instead the create is applied UNDER THE REQUESTED NAME, and the
+       * controller renames it to " (2)", " (3)" … in the same database
+       * transaction. Two events reach the stream — a `create` carrying the
+       * name that was asked for, then a `name` carrying the one that settled
+       * — so the client learns the outcome through the ordinary one door
+       * rather than through a special case in the create response.
+       *
+       * NAMES SETTLE AT THE END OF THE CALL, not at the create. So a queued
+       * `create notes.md` followed by a queued `rename report.md` produces NO
+       * controller rename at all: by the time names settle the entry is
+       * called `report.md` and nothing collides. That is the ordinary offline
+       * gesture — make a file, then type its name — and it costs nothing.
+       *
+       * When two entries do end up holding one name, the one whose name is
+       * older keeps it.
+       *
+       * The one identity failure: an entry id already in use. Checked
+       * globally, and answered without saying anything else, so an id cannot
+       * be used to probe for entries in workspaces the caller cannot see.
        */
-      export type Response = Acknowledged<{ id: string }> | Failure<"parent was deleted">;
+      export type Response =
+        | Acknowledged
+        | Failure<"that id is already in use">
+        | Failure<"parent was deleted">
+        | Failure<"content bytes were never stored">
+        | Failure<"that name is not permitted">
+        | Failure<"that destination is nested too deeply">
+        | Failure<"that folder already holds too many entries">;
     }
 
     export namespace Delete {
-      export type Request = Transactioned<Entry.Versioned>;
-      export type Response = Acknowledged | Failure<`later versions modified the ${"content" | "name" | "content and name"} of the entry`>;
+      /**
+       * Delete is the destructive operation, so it presents everything it was
+       * looking at rather than just the property it changes. "Has the deleted
+       * flag moved" is almost never the useful question; "is this still the
+       * thing I was told to destroy" is.
+       */
+      export type Seen = {
+        name_version: Entry.Version;
+        parent_version: Entry.Version;
+        deleted_version: Entry.Version;
+        /** Required, and null for a folder, which holds none. */
+        content_version: Entry.Version | null;
+      };
+
+      export type Request = Transactioned<{ seen: Seen }>;
+
+      /**
+       * Deleting what is already deleted is ACKNOWLEDGED, not refused: it is
+       * what the caller asked for, and there is no honest reason string for
+       * it. A move counts as a change of "name" below — both change where the
+       * entry lives in the namespace.
+       */
+      export type Response =
+        | Acknowledged
+        | Unknown
+        | Unsound
+        | Failure<`later versions modified the ${"content" | "name" | "content and name"} of the entry`>;
     }
 
     export namespace Reparent {
-      export type Request = Transactioned<Entry.Versioned & {
+      export type Request = Transactioned<{
         /**
          * Destination id only — no version. The only destination-related
-         * failure is "it was deleted"; requiring its version would make
-         * unrelated sibling activity spuriously invalidate this move.
+         * failures are structural; requiring its version would make unrelated
+         * sibling activity spuriously invalidate this move.
          */
         parent?: string;
+        parent_version: Entry.Version;
       }>;
 
-      export type Response = Acknowledged | Failure<
+      export type Response = Acknowledged | Unknown | Unsound | Failure<
         | "entry was deleted"
         | "the destination was deleted"
+        | "the destination is inside the entry"
         | "entry with name already exists within destination"
         | "entry had already been moved"
+        | "that destination is nested too deeply"
+        | "that folder already holds too many entries"
       >;
     }
 
     export namespace Rename {
-      export type Request = Transactioned<Entry.Versioned & {
+      export type Request = Transactioned<{
         /** The new desired name */
         name: string;
+        name_version: Entry.Version;
       }>;
 
-      export type Response = Acknowledged | Failure<
+      /**
+       * Unlike a create, a rename IS refused on collision: the user typed a
+       * specific name and deserves to be told, rather than silently given
+       * `notes (2).md`.
+       */
+      export type Response = Acknowledged | Unknown | Unsound | Failure<
         | "entry was deleted"
         | "entry with name already exists within destination"
         | "entry was already renamed"
+        | "that name is not permitted"
       >;
     }
 
@@ -139,6 +265,10 @@ export namespace Events {
        * acks immediately without reading the body — which is also the retry
        * story (retrying a Store can never double-store).
        *
+       * Content-Length is REQUIRED: without it the body's size is unknown
+       * until it has been buffered, which is the thing the limit exists to
+       * prevent.
+       *
        * Non-transactional, but remembered in the outbox so it can be retried
        * after a lost response. A Store must be acknowledged before any Write
        * referencing its hash is submitted.
@@ -150,7 +280,7 @@ export namespace Events {
         bytes: Blob | Uint8Array | ReadableStream<Uint8Array>; // request body
       }
 
-      export type Response = Acknowledged | Failure<"hash mismatch" | "too large" | "server out of memory">;
+      export type Response = Acknowledged | Failure<"hash mismatch" | "too large">;
     }
 
     export namespace Write {
@@ -160,26 +290,42 @@ export namespace Events {
 
       export type Binary = Utility.Typed<"binary", Pick<Store.Request, "hash" | "size" | "mime">>;
 
-      export type Request = Transactioned<Entry.Versioned & (Text | Binary)>;
+      export type Request = Transactioned<{
+        /**
+         * Never null: a file is born with content, so there is always a token
+         * to present. A folder has none, and a write to one is refused for
+         * being a folder before its token is ever considered.
+         */
+        content_version: Entry.Version;
+      } & (Text | Binary)>;
 
       export type Response =
         | Acknowledged
+        | Unknown
+        | Unsound
         | Failure<"content was already updated", {
-            // The newer version id that the request is conflicting with —
-            // fetch Content by (id, version) to drive the diff-editor UX.
-            version: string;
+            // The newer content token this request is conflicting with —
+            // fetch Content by (id, content_version) for the diff editor.
+            version: Entry.Version;
           }>
         // The target was deleted out from under the write (e.g. remotely,
         // while this client was offline). The transaction is evicted like
         // any typed failure, but the CONTENT routes to Client.Drafts rather
         // than evaporating with it.
-        | Failure<"entry was deleted">;
+        | Failure<"entry was deleted">
+        | Failure<"content cannot be written to a folder">
+        | Failure<"content bytes were never stored">;
     }
 
     export namespace Content {
       /**
-       * Non-transactional content fetch: GET /entries/{id}/content[?version=]
-       * Omitting version requests the latest.
+       * Non-transactional content fetch:
+       *
+       *   GET /workspaces/{ws}/entries/{id}/content[?content={content_version}]
+       *
+       * Omitting `content` requests the entry's newest. The token comes
+       * straight out of Entry.Metadata, so a client fetches with what it
+       * already holds.
        *
        * ROUTING SEMANTICS: the `type` in the response is what tells the
        * client how to treat this entry (collaborative text editor vs. blob
@@ -190,22 +336,22 @@ export namespace Events {
        * pre-sync placeholder that may lag the live yjs room by the
        * persistence debounce: attach the doc and prefer it.
        */
-      export type Request = Entry.Versioned | {
-        // Only providing an id indicates a request for the latest version
+      export type Request = {
         id: string;
+        content_version?: Entry.Version;
       };
 
       /**
        * Text is returned as JSON. Binary is returned as raw bytes with
-       * Content-Type: {mime} and ETag: {version} (or a short-lived redirect
-       * to object storage) — the Binary shape below describes the *parsed*
-       * result, not a JSON body carrying bytes.
+       * Content-Type: {mime} and ETag: {content_version} (or a short-lived
+       * redirect to object storage) — the Binary shape below describes the
+       * *parsed* result, not a JSON body carrying bytes.
        */
       type Binary = Utility.Typed<"binary", Omit<Store.Request, "bytes"> & { bytes: Blob }>;
       type Text = Write.Text;
 
       export type Response = (Binary | Text) & {
-        version: string;
+        version: Entry.Version;
       };
     }
 
@@ -220,10 +366,21 @@ export namespace Events {
          * The FULL outbox requests (not bare ids — the server cannot apply
          * an unseen transaction from an id alone), in counter order. May
          * include requests minted by OTHER client instances (orphan adoption
-         * after a tab closes — ids embed their originating client, so the
-         * server can adjudicate them no matter who presents them).
+         * after a tab closes — the server adjudicates them no matter who
+         * presents them).
+         *
+         * NOTHING IS REWRITTEN SERVER-SIDE. Each queued item presents the
+         * token it expects, and for a chain on one entry that token is the
+         * previous item's own transaction id — which the client minted. An
+         * outbox that would conflict with itself is a client bug, not
+         * something the server patches up mid-replay.
+         *
+         * If a queued Create is refused, every later item naming that entry
+         * is refused with "the create this depends on was refused" rather
+         * than being attempted and producing a cascade of "no such entry".
          */
         outbox: Array<
+          | Create.Request
           | Delete.Request
           | Rename.Request
           | Reparent.Request
@@ -233,20 +390,23 @@ export namespace Events {
 
       export type Rejection = {
         transaction: string;
-        /** The typed reason recorded at adjudication time */
+        /** The typed reason, computed at adjudication time */
         reason: string;
-        /** Current version of the affected entry, when applicable — the
-         *  material the conflict UX (diff editor, undo) needs NOW, not the
-         *  state at the historical moment of rejection. */
-        version?: string;
+        /** Current token of the property the request lost, when applicable —
+         *  the material the conflict UX (diff editor, undo) needs NOW, not
+         *  the state at the historical moment of rejection. A Delete gets
+         *  none: it presented four tokens, so what it needs back is a fresh
+         *  look at the entry, which `entries` already gave it. */
+        version?: Entry.Version;
       };
 
       /**
-       * All fields are produced inside ONE repeatable-read database
-       * transaction: outbox adjudication (unseen transactions are applied
-       * in order as part of this call), snapshot, and the stream position
-       * bound into the token. This is what guarantees evict + replace on the
-       * client cancel exactly, with no flicker and no gap.
+       * All fields are produced inside ONE database transaction, serialized
+       * against every other write to this workspace: outbox adjudication
+       * (unseen transactions are applied in order as part of this call),
+       * snapshot, and the stream position bound into the token. This is what
+       * guarantees evict + replace on the client cancel exactly, with no
+       * flicker and no gap.
        */
       export type Response = {
         /**
@@ -263,7 +423,8 @@ export namespace Events {
          */
         token: string;
         entries: Entry.Metadata[];
-        applied: Request["outbox"];
+        /** Transaction ids, which is all an eviction needs. */
+        applied: string[];
         rejected: Rejection[];
       }
     }
@@ -275,9 +436,6 @@ export namespace Events {
        *  operations, future automatic content-kind transitions). Clients
        *  must not assume every change traces to a client transaction. */
       user?: string;
-      /** Preserved from the originating request when one exists. Seeing a
-       *  transaction id you own = evict that outbox entry. */
-      transaction?: string;
     }
 
     type Valued<T, Obj = {}> = Obj & { value: T };
@@ -302,17 +460,25 @@ export namespace Events {
       }
 
       /**
-       * Every event carries the entry's NEW version (Entry.Versioned) — the
-       * CAS token the client must present on its next mutation of the entry.
+       * Every event carries `transaction`, which does both jobs: it is the id
+       * of the transaction that caused the change (seeing one you own = evict
+       * that outbox entry) AND it is the new version token for the property
+       * the event changed. The client's rule is uniform: on an event for
+       * property P, set the value and set P's token to `transaction`.
        *
-       * "write" is a PURE INVALIDATION SIGNAL: it carries no payload by
+       * "write" is a PURE INVALIDATION SIGNAL: it carries no value by
        * design. It means "cached content and content-metadata (including
        * kind) for this id are stale"; the next Content fetch reveals the
-       * rest. "create" is the one upsert-shaped event, since a new entry
-       * must arrive whole.
+       * rest. "create" is the one upsert-shaped event, since a new entry must
+       * arrive whole — and its metadata rides in `value` like every other
+       * event's payload, because spreading it over the event would shadow the
+       * entry's own `type` ("file"/"folder") with the event's.
        */
-      export type Response = Utility.Expand<Entry.Versioned & Traceable & (
-        | Utility.Typed<"create", Entry.Metadata>
+      export type Response = Utility.Expand<Traceable & {
+        id: string;
+        transaction: string;
+      } & (
+        | Utility.Typed<"create", Valued<Entry.Metadata>>
         | Utility.Typed<"write">
         | Utility.Typed<"delete", Valued<boolean>>
         | Utility.Typed<"name", Valued<string>>
@@ -339,14 +505,17 @@ export namespace Client {
        *  transaction counter, not this; the timestamp is for humans.) */
       timestamp: string;
       /**
-       * NOTE: Create is deliberately NOT in this union — creates are
-       * online-only and never queued (see ClientSent.Create). Store entries
-       * keep only {hash, mime, size} here; the bytes live in a separate
-       * IndexedDB store keyed by hash. Large Write.Text payloads may use the
-       * same trick (store by hash, reference here) so the log never balloons.
-       * Successive Writes to the same entry coalesce (the later supersedes).
+       * Creates ARE queued: the client minted the id, so nothing downstream
+       * of a create has to wait for a response to know what to reference.
+       * Store entries keep only {hash, mime, size} here; the bytes live in a
+       * separate IndexedDB store keyed by hash. Large Write.Text payloads may
+       * use the same trick. Successive Writes to the same entry coalesce (the
+       * later supersedes) — and because the later one presents the earlier
+       * one's transaction id as its token, coalescing means inheriting the
+       * SURVIVOR's content and the DROPPED entry's token.
        */
       request:
+      | Events.ClientSent.Create.Request
       | Events.ClientSent.Delete.Request
       | Events.ClientSent.Rename.Request
       | Events.ClientSent.Reparent.Request
@@ -366,10 +535,10 @@ export namespace Client {
      * correct by construction (tabs converge through the same stream; the
      * server dedupes by transaction id) — merely wasteful. A tab may adopt an
      * orphaned client queue (its tab closed with pending entries) by taking a
-     * Web Locks lock named for that client id and presenting its transaction
-     * ids in the next Initialize. Leader election (one loop for all tabs,
-     * fan-out via BroadcastChannel) is a later optimization, not a
-     * correctness requirement.
+     * Web Locks lock named for that client id and presenting its requests in
+     * the next Initialize. Leader election (one loop for all tabs, fan-out
+     * via BroadcastChannel) is a later optimization, not a correctness
+     * requirement.
      */
     export type Log =
       Map<
@@ -419,24 +588,22 @@ export namespace Client {
     /**
      * The parking lot — deliberately NOT sync machinery. A draft has no
      * version, cannot conflict, and never touches the stream: it exists
-     * precisely because its content has nowhere to live server-side yet.
-     * Its job is the last mile of "a user never loses work": when the sync
-     * design must fail an operation loudly, the BYTES survive the failure.
+     * precisely because its content has nowhere to live server-side.
      *
-     * A draft is captured when:
-     * - a Create cannot complete (offline / no ack): e.g. Pyodide finishing
-     *   a twenty-minute computation and writing the result to a new path
-     *   with no connectivity — the call fails cleanly, the content lands here
-     * - a Write fails with "entry was deleted": the typed failure evicts the
-     *   transaction as usual, but the content routes here instead of
-     *   evaporating with it
+     * It is now down to ONE intent. The offline-create case is gone: a
+     * client mints the entry id itself, so an offline create is an ordinary
+     * queued transaction and its content is an ordinary queued write.
+     *
+     * What remains is the case with genuinely nowhere to go: a Write refused
+     * with "entry was deleted". The typed failure evicts the transaction as
+     * usual, but the BYTES route here rather than evaporating with it.
      *
      * On reconnect (the sync loop re-entering Initialize is the natural
-     * hook), surface pending drafts ("2 files couldn't be saved while
-     * offline") with one-click recovery: replay Create -> Store (a no-op if
-     * the hash is already stored) -> Write, in order, online. Evict a draft
-     * only on successful recovery or explicit user dismissal — never
-     * silently.
+     * hook), surface pending drafts ("2 files couldn't be saved") with
+     * one-click recovery: mint a new entry id, replay Create -> Store (a
+     * no-op if the hash is already stored) -> Write. The original id is a
+     * tombstone and stays one. Evict a draft only on successful recovery or
+     * explicit user dismissal — never silently.
      */
     export type Draft = {
       id: string;        // GUID for the draft itself
@@ -445,29 +612,11 @@ export namespace Client {
       /** ISO 8601 UTC with explicit Z */
       timestamp: string;
       workspace: string;
-      intent:
-      | {
-        kind: "create";
-        /** Intended path at capture time (e.g. "/results/out.csv") —
-         *  recorded as a path, since no entry id ever existed */
-        path: string;
-        type: Entry.Type;
-      }
-      | {
-        kind: "write";
-        /** The entry that was deleted out from under the write */
-        entry: Entry.Metadata["id"];
-        /** Path at capture time, for display and for re-creation
-         *  (recovery of this case is a Create — the original id is a
-         *  tombstone and stays one) */
-        path: string;
-      };
-      /**
-       * Absent for folder creates. Bytes live in the same content-addressed
-       * IndexedDB store the outbox uses (keyed by hash) — a draft row is a
-       * pointer, so drafts stay cheap regardless of content size.
-       */
-      content?: {
+      /** The entry that was deleted out from under the write */
+      entry: Entry.Metadata["id"];
+      /** Path at capture time, for display and for re-creation */
+      path: string;
+      content: {
         hash: string;
         size: number;
         mime: string;
@@ -485,31 +634,32 @@ export namespace Server {
    */
 
   /**
-   * Durable record of every adjudicated transaction (the audit log, the
-   * dedup table, and the source of Initialize's applied/rejected — one
-   * table, three roles). Write payloads are stored content-addressed
-   * (hash -> blob store) so this stays rows-of-pointers, never ballooning.
-   * Retention must exceed the maximum tolerated client offline age; a
-   * presented transaction older than retention is answered "cannot
-   * reconcile", never guessed at.
+   * An entry is pure identity. Its name, its parent, its deletion and its
+   * content each live in their own append-only log, and each row records the
+   * workspace position it landed at. Current state is the newest row per log;
+   * there is no materialised "version" row, because there is nothing it would
+   * hold that those rows do not.
+   *
+   * There is no separate transaction table either. A transaction that was
+   * APPLIED is the row it appended — its client-minted id is that row's
+   * primary key, so dedup is primary-key identity rather than a secondary
+   * index somebody has to remember to keep.
+   *
+   * A transaction that was REFUSED is recorded nowhere, because nothing
+   * happened. Adjudication is a pure function of the workspace, so presenting
+   * a refused transaction again recomputes its reason — against the workspace
+   * as it stands, which is the answer the client can actually act on.
    */
-  export type Transaction = {
-    id: string;        // the client transaction id (globally unique by construction)
-    user: string;
-    workspace: string;
-    outcome: { rejected: false } | { rejected: true; reason: string };
-    position: number;  // internal stream position at which it applied (if applied)
-  };
 
   /**
    * Internal per-workspace monotonic stream position:
-   * - assigned under a per-workspace lock, in the SAME database transaction
-   *   as the mutation, the Transaction record, and the stream event row —
-   *   the event log is generated from the truth, so it cannot drift from it
+   * - assigned under a per-workspace lock and stamped onto the rows the
+   *   transaction appends, in one database transaction — those rows ARE the
+   *   event stream, so there is no second write to fail independently
+   * - one transaction takes exactly one position, and WHICH LOG its rows
+   *   landed in is which event it was. Only a create writes more than one log
+   *   at a position, which is what makes a birth recognisable from a change
    * - orders the SSE stream and anchors tokens
-   * - retention of event rows: MINUTES, not days — a resume never spans more
-   *   than the Initialize->connect gap plus reconnect blips; anything longer
-   *   re-enters through Initialize and gets a fresh snapshot
    * - never client-visible: clients reason only via Initialize + the stream
    */
   export type Token = {
@@ -533,12 +683,11 @@ The client keeps a CONFIRMED map of filesystem metadata:
 The confirmed map is mutated ONLY by:
 - the `entries` snapshot of an Initialize response (replace-all)
 - Events.ServerSent.Stream events (create upserts; delete/name/parent set
-  fields; every event also advances the entry's version)
+  a field and that field's token)
 
-Request responses NEVER mutate the confirmed map (the one-door rule). They
-adjudicate the outbox: an ack or a failure evicts the transaction. The
-exception that proves the rule: Create's ack yields the new entry's id —
-identity, not state.
+Request responses NEVER mutate the confirmed map. They adjudicate the outbox:
+an ack or a failure evicts the transaction. There is no exception to this — a
+create's id came from the client, so an ack has nothing to add.
 
 What the UI and the Pyodide filesystem read is the EFFECTIVE view:
 
@@ -550,31 +699,38 @@ change and the overlay removal cancel exactly (no flicker). When it is
 evicted by a failure, the effective view snaps back automatically — "undo on
 failure" is not an operation, it is a recomputation.
 
+TOKENS, AND CHAINING OFFLINE:
+
+Because the client mints the transaction id, and that id becomes the property's
+token, a queued chain needs no server help:
+
+  rename A  (transaction T1, name_version = whatever the client held)
+  rename A  (transaction T2, name_version = T1)
+  rename A  (transaction T3, name_version = T2)
+
+All three apply in order on replay. The same holds across operations: a queued
+create with transaction C is followed by a write presenting content_version C,
+and a rename presenting name_version C — because a create sets ALL FOUR of an
+entry's tokens to its own transaction id. A create whose name has to be
+deduped is the only thing that moves a token nobody minted, and it settles
+after the whole outbox — so a rename queued behind it has already won by then.
+
+The per-property split is what keeps this from being over-eager: a
+collaborator's write moves content_version and nothing else, so a queued
+rename still applies.
+
 OUTBOX LIFECYCLE:
 
 Before sending any transactional request, the client persists it to the
 outbox (IndexedDB). It is evicted when: (a) its response arrives (ack or
 typed failure — failures route to the conflict UX), (b) its transaction id
 is echoed on the stream, or (c) an Initialize response reports it applied or
-rejected. A create is never persisted: it either round-trips online (with a
-same-id retry on a lost ack) or fails loudly — with its content parked in
-drafts.
-
-DRAFTS (the parking lot):
-
-The outbox guarantees no ACCEPTED work is lost; drafts guarantee no CONTENT
-is lost when an operation must fail loudly. Offline create -> the call fails,
-the bytes park in Client.Drafts. Write to a remotely-deleted entry -> the
-typed failure evicts the transaction, the bytes park. On reconnect, drafts
-are surfaced for one-click recovery (Create -> Store -> Write, replayed
-online) and evicted only on success or explicit dismissal. Drafts carry no
-version and cannot conflict — they live deliberately outside the sync
-machinery, which is why they add no complexity to it.
+rejected.
 
 SYNC LOOP (cold start == reconnect == recovery):
 
   loop:
-    Initialize(workspace, outbox txn ids)      // adjudicates + snapshots
+    Initialize(workspace, outbox)              // adjudicates + snapshots
     evict applied/rejected; replace confirmed  // same server tx -> no flicker
     connect EventSource with the token         // single-use, position-bound
     consume events until failure/watchdog
@@ -595,7 +751,9 @@ FAILURE HANDLING remains the client's policy decision, e.g.:
   the doc is the truth there, and all text mutations flow through it
 - displaying a diff editor when a text write fails on a non-live editor
   (fetch Content at the failure's `version` for the other side of the diff)
-- parking content in Client.Drafts when the failure would otherwise discard
-  bytes (offline create, write to a deleted entry)
+- parking content in Client.Drafts when a write is refused because its entry
+  was deleted
 - letting a failed move/rename/delete snap back in the UI via eviction
+- treating "the version presented was never issued" as a HARD RESYNC signal
+  rather than a conflict: discard local state and re-enter the loop
 */

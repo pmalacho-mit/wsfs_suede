@@ -10,7 +10,8 @@ here works on the utf-16-le encoding rather than on Python's code points. The
 two agree until the first emoji, and then they disagree silently.
 """
 
-from typing import Iterable, List, Required, Tuple, TypedDict
+from collections.abc import Iterable
+from typing import Required, TypedDict
 
 from fast_diff_match_patch import diff
 
@@ -52,6 +53,9 @@ def utf16_len(text: str) -> int:
 class _Base:
     """A cursor over the text a delta is being applied to, in UTF-16 units."""
 
+    _units: bytes
+    _at: int
+
     def __init__(self, text: str) -> None:
         self._units = _units(text)
         self._at = 0
@@ -87,7 +91,7 @@ def _appended(op: YjsDeltaOp, base: _Base, *, validate: bool) -> bytes:
     if "delete" in op:
         base.drop(op["delete"], validate=validate)
         return b""
-    raise ValueError(f"unknown delta operation: {op!r}")
+    raise ValueError(f"unknown delta operation: {op!r}")  # pyright: ignore[reportUnreachable]
 
 
 def apply_delta(base: str, delta: Delta, *, validate: bool = True) -> str:
@@ -125,7 +129,7 @@ _AS_OPERATION = {
 
 def diff_to_delta(before: str, after: str, *, cleanup: str = "Efficiency") -> Delta:
     """The delta taking `before` to `after`. cleanup: Semantic | Efficiency | No"""
-    parts: List[Tuple[str, str]] = diff(
+    parts: list[tuple[str, str]] = diff(
         before, after, counts_only=False, cleanup=cleanup
     )
     delta: Delta = []

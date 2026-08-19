@@ -8,30 +8,39 @@ because nothing about a refusal happened -- presenting the same transaction
 again re-runs this function and produces the same answer, computed against the
 workspace as it stands rather than as it once stood.
 
-`approve()` is the choke point, and it is the only thing that writes: position
-bump, transaction rows and version row all land in the caller's single
-database transaction, so the event log cannot drift from the truth it is
-generated out of.
+`approve()` is the choke point, and it is the only thing that writes: it takes
+the next workspace position, stamps it onto the rows, and appends them -- all
+in the caller's single database transaction. The rows ARE the event log, so
+there is nothing that could drift from them.
 
 Dedup therefore only has to protect what was applied: finding a transaction id
 in its table means the change already happened, and the recorded answer is
 served instead of a second application.
+
+Every CAS token is per-property. A write does not invalidate a concurrent
+rename, because the rename presents the name's token and the write moved the
+content's -- the two are independent by construction.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from itertools import count, islice
+from uuid import uuid4
+from collections.abc import Awaitable, Callable, Iterator
+from typing import Any, final
 from uuid import UUID
 
-from sqlmodel import Session, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import stream, text, tree
+from . import stream
 from .blobs import Blobs
 from .contract import (
     Acknowledged,
+    BinaryBody,
+    Body,
     Create,
-    Created,
     Delete,
     Kind,
     Metadata,
@@ -41,27 +50,22 @@ from .contract import (
     Rename,
     Reparent,
     Response,
+    Seen,
     Submitted,
+    TextBody,
     Transacted,
-    Versioned,
     WriteBinary,
     WriteText,
 )
 from .diff import diff_to_delta
-from .models import (
-    BlobContent,
-    Deletion,
-    Entry,
-    Event,
-    Name,
-    Parent,
-    TextContent,
-    Transaction,
-    User,
-    Version,
-    Workspace,
-)
-from .tree import Node
+from .models import ContentRow, EntryRow, Models, NameRow, TransactionRow
+from .text import Text
+from .tree import Lineage, Node, Tree
+
+MOST_NESTING = 64
+MOST_SIBLINGS = 10_000
+LONGEST_NAME_IN_BYTES = 255
+UNNAMEABLE = re.compile(r"[/\\\x00-\x1f\x7f]")
 
 
 @dataclass
@@ -72,133 +76,354 @@ class Outcome:
     events: list[stream.Emitted] = field(default_factory=list)
 
 
+class Deferrals:
+    """Entries created during this unit of work, whose names settle at the end.
+
+    A create that collides on name is resolved by renaming it. The ordinary
+    reason a create collides at all is a client that made an entry and then
+    typed a real name over it -- so settling at the end of the unit of work
+    rather than at the create itself lets that rename land first, and the
+    collision usually turns out never to have mattered.
+    """
+
+    def __init__(self) -> None:
+        self._created: list[UUID] = []
+
+    def note(self, entry_id: UUID) -> None:
+        self._created.append(entry_id)
+
+    def __iter__(self):
+        return iter(self._created)
+
+
+@final
+@dataclass(frozen=True)
+class Workspaces:
+    """One wsfs schema, with the queries that read it.
+
+    Built once, when a host says which tables its users and workspaces live
+    in, and carried from there. Nothing in this package reaches a table any
+    other way, which is what lets two of these coexist in one process.
+    """
+
+    models: Models
+    tree: Tree
+    stream: stream.Stream
+    text: Text
+
+    @classmethod
+    def over(cls, models: Models) -> "Workspaces":
+        return cls(models, Tree(models), stream.Stream(models), Text(models))
+
+
 @dataclass(frozen=True)
 class Submission:
     """One request being adjudicated against one workspace."""
 
-    session: Session
+    schema: Workspaces
+    session: AsyncSession
     workspace: UUID
-    user: User
+    user: UUID
     blobs: Blobs
+    positions: stream.Positions
+    deferrals: Deferrals = field(default_factory=Deferrals)
 
-    def node(self, entry_id: UUID) -> Node | None:
-        return tree.node(self.session, self.workspace, entry_id)
+    @property
+    def models(self) -> Models:
+        return self.schema.models
 
-    def name_taken(self, *, parent: UUID | None, name: str, excluding: UUID | None) -> bool:
-        return tree.name_taken(
+    @property
+    def text(self) -> Text:
+        return self.schema.text
+
+    @property
+    def stream(self) -> "stream.Stream":
+        return self.schema.stream
+
+    async def node(self, entry_id: UUID) -> Node | None:
+        return await self.schema.tree.node(self.session, self.workspace, entry_id)
+
+    async def lineage(self, entry_id: UUID) -> Lineage:
+        return await self.schema.tree.lineage(self.session, self.workspace, entry_id)
+
+    async def claimed_first(self, node: Node) -> bool:
+        return await self.schema.tree.claimed_first(
+            self.session,
+            self.workspace,
+            parent=node.parent,
+            name=node.name,
+            before=node.name_position,
+            excluding=node.id,
+        )
+
+    async def name_taken(
+        self, *, parent: UUID | None, name: str, excluding: UUID | None
+    ) -> bool:
+        return await self.schema.tree.name_taken(
             self.session, self.workspace, parent=parent, name=name, excluding=excluding
         )
 
-    def can_receive(self, parent: UUID | None) -> bool:
-        """A folder still reachable from the root, or the root itself."""
-        if parent is None:
-            return True
-        holder = self.node(parent)
-        return holder is not None and holder.is_folder and self.is_reachable(holder)
+    async def children(self, parent: UUID | None) -> int:
+        return await self.schema.tree.children(self.session, self.workspace, parent)
 
-    def is_reachable(self, node: Node) -> bool:
-        return not node.deleted and not tree.has_deleted_ancestor(
-            self.session, self.workspace, node.id
+    async def descends_from(self, entry_id: UUID, ancestor_id: UUID) -> bool:
+        return await self.schema.tree.descends_from(
+            self.session, self.workspace, entry_id, ancestor_id
         )
 
 
-def _stale(node: Node, request: Versioned) -> bool:
-    return node.version.id != request.version
+# -- tokens ---------------------------------------------------------------------
 
 
-def _already_gone(node: Node | None) -> bool:
-    return node is not None and node.deleted
+async def _was_issued(
+    submission: Submission,
+    node: Node,
+    token: UUID | None,
+    among: tuple[type[TransactionRow], ...],
+) -> bool:
+    """A token is real if a transaction on THIS entry minted it.
+
+    `None` is real too: it is what an entry with no content has always
+    presented. A token belonging to another entry is not -- accepting it would
+    let one entry's history vouch for another's.
+    """
+    if token is None:
+        return True
+    for table in among:
+        row = await submission.session.get(table, token)
+        if row is not None and row.entry_id == node.id:
+            return True
+    return False
+
+
+async def _cas(
+    submission: Submission,
+    node: Node,
+    presented: UUID | None,
+    *,
+    current: UUID | None,
+    among: tuple[type[TransactionRow], ...],
+    stale: str,
+) -> str | None:
+    """Compare-and-swap on one property.
+
+    A token that is not current either lost a race or was never issued at all,
+    and a client's answer to those differs entirely: rebase and retry, or
+    discard local state and re-Initialize.
+    """
+    if presented == current:
+        return None
+    if not await _was_issued(submission, node, presented, among):
+        return Refusal.UNKNOWN_VERSION
+    return stale
+
+
 
 
 # -- judgement: why a request cannot be applied, if it cannot --------------------
 
 
-def _refuses_create(submission: Submission, request: Create) -> str | None:
-    if not submission.can_receive(request.parent):
+def _refuses_name(name: str) -> str | None:
+    if not name or name in (".", ".."):
+        return Refusal.NAME_INVALID
+    if UNNAMEABLE.search(name) or name != name.strip():
+        return Refusal.NAME_INVALID
+    if len(name.encode()) > LONGEST_NAME_IN_BYTES:
+        return Refusal.NAME_INVALID
+    return None
+
+
+async def _reachable(submission: Submission, parent: UUID | None) -> bool:
+    """A folder still reachable from the root, or the root itself."""
+    if parent is None:
+        return True
+    holder = await submission.node(parent)
+    if holder is None or not holder.is_folder or holder.deleted:
+        return False
+    return not (await submission.lineage(holder.id)).interrupted
+
+
+async def _overfull(submission: Submission, parent: UUID | None) -> str | None:
+    """A client that mints its own ids can mint unbounded ones offline, so the
+    shape of the tree is bounded here rather than by how much a client sends."""
+    if (
+        parent is not None
+        and (await submission.lineage(parent)).depth + 1 >= MOST_NESTING
+    ):
+        return Refusal.TOO_DEEP
+    if await submission.children(parent) >= MOST_SIBLINGS:
+        return Refusal.FOLDER_FULL
+    return None
+
+
+async def _refuses_create(submission: Submission, request: Create) -> str | None:
+    if (unnameable := _refuses_name(request.name)) is not None:
+        return unnameable
+    if await _bytes_are_missing(submission, request.content):
+        return Refusal.BYTES_NEVER_STORED
+    if not await _reachable(submission, request.parent):
         return Refusal.PARENT_DELETED
-    if submission.name_taken(parent=request.parent, name=request.name, excluding=None):
-        return Refusal.NAME_TAKEN
-    return None
+    return await _overfull(submission, request.parent)
 
 
-def _refuses_delete(submission: Submission, request: Delete) -> str | None:
-    node = submission.node(request.id)
+async def _bytes_are_missing(submission: Submission, body: Body | None) -> bool:
+    return isinstance(body, BinaryBody) and not await submission.blobs.holds(body.hash)
+    # A name collision is NOT refused here: a create has no prior version to
+    # CAS against, so refusing it would be the only thing standing between two
+    # offline clients and a lost `notes.md`. `_deduplicated_name` settles it.
+
+
+async def _refuses_delete(submission: Submission, request: Delete) -> str | None:
+    node = await submission.node(request.id)
     if node is None:
-        return Refusal.ENTRY_DELETED
-    if _already_gone(node):
+        return Refusal.ENTRY_UNKNOWN
+    if node.deleted:
         return None  # already what was asked for; nothing to refuse
-    if _stale(node, request):
-        return _what_later_versions_touched(submission, node, request.version)
+    if (fabricated := await _any_unissued(submission, node, request.seen)) is not None:
+        return fabricated
+    if _still_as_seen(node, request.seen):
+        return None
+    return _what_later_versions_touched(node, request.seen)
+
+
+def _presented(
+    models: Models, seen: Seen
+) -> tuple[tuple[UUID | None, tuple[type[TransactionRow], ...]], ...]:
+    return (
+        (seen.name_version, (models.name,)),
+        (seen.parent_version, (models.parent,)),
+        (seen.deleted_version, (models.deletion,)),
+        (seen.content_version, models.content),
+    )
+
+
+async def _any_unissued(submission: Submission, node: Node, seen: Seen) -> str | None:
+    for token, among in _presented(submission.models, seen):
+        if not await _was_issued(submission, node, token, among):
+            return Refusal.UNKNOWN_VERSION
     return None
 
 
-def _what_later_versions_touched(
-    submission: Submission, node: Node, presented: UUID
-) -> str:
+def _still_as_seen(node: Node, seen: Seen) -> bool:
+    return (
+        seen.name_version,
+        seen.parent_version,
+        seen.deleted_version,
+        seen.content_version,
+    ) == (
+        node.name_version,
+        node.parent_version,
+        node.deleted_version,
+        node.content_version,
+    )
+
+
+def _what_later_versions_touched(node: Node, seen: Seen) -> str:
     """Delete's refusal names what the client would have destroyed unseen.
 
     A move counts as a change of name: both change where the entry lives in
     the namespace, and the contract's reasons have no third word.
     """
-    was = submission.session.get(Version, presented)
-    if was is None or was.entry_id != node.id:
-        return Refusal.modified(name=True, content=True)
-    now = node.version
     return Refusal.modified(
-        name=(was.name_id, was.parent_id) != (now.name_id, now.parent_id),
-        content=(was.text_content_id, was.blob_content_id)
-        != (now.text_content_id, now.blob_content_id),
+        name=(seen.name_version, seen.parent_version)
+        != (node.name_version, node.parent_version),
+        content=seen.content_version != node.content_version,
     )
 
 
-def _refuses_rename(submission: Submission, request: Rename) -> str | None:
-    node = submission.node(request.id)
-    if node is None or node.deleted:
+async def _refuses_rename(submission: Submission, request: Rename) -> str | None:
+    node = await submission.node(request.id)
+    if node is None:
+        return Refusal.ENTRY_UNKNOWN
+    if node.deleted:
         return Refusal.ENTRY_DELETED
-    if _stale(node, request):
-        return Refusal.ALREADY_RENAMED
-    if submission.name_taken(parent=node.parent, name=request.name, excluding=node.id):
+    if (unnameable := _refuses_name(request.name)) is not None:
+        return unnameable
+    if (
+        conflict := await _cas(
+            submission,
+            node,
+            request.name_version,
+            current=node.name_version,
+            among=(submission.models.name,),
+            stale=Refusal.ALREADY_RENAMED,
+        )
+    ) is not None:
+        return conflict
+    if await submission.name_taken(
+        parent=node.parent, name=request.name, excluding=node.id
+    ):
         return Refusal.NAME_TAKEN
     return None
 
 
-def _refuses_reparent(submission: Submission, request: Reparent) -> str | None:
-    node = submission.node(request.id)
-    if node is None or node.deleted:
+async def _refuses_reparent(submission: Submission, request: Reparent) -> str | None:
+    node = await submission.node(request.id)
+    if node is None:
+        return Refusal.ENTRY_UNKNOWN
+    if node.deleted:
         return Refusal.ENTRY_DELETED
-    if _stale(node, request):
-        return Refusal.ALREADY_MOVED
-    if not submission.can_receive(request.parent):
+    if (
+        conflict := await _cas(
+            submission,
+            node,
+            request.parent_version,
+            current=node.parent_version,
+            among=(submission.models.parent,),
+            stale=Refusal.ALREADY_MOVED,
+        )
+    ) is not None:
+        return conflict
+    if not await _reachable(submission, request.parent):
         return Refusal.DESTINATION_DELETED
-    if _would_detach_the_subtree(submission, node, request.parent):
+    if await _would_detach_the_subtree(submission, node, request.parent):
         return Refusal.DESTINATION_INSIDE_ENTRY
-    if submission.name_taken(parent=request.parent, name=node.name, excluding=node.id):
+    if (full := await _overfull(submission, request.parent)) is not None:
+        return full
+    if await submission.name_taken(
+        parent=request.parent, name=node.name, excluding=node.id
+    ):
         return Refusal.NAME_TAKEN
     return None
 
 
-def _would_detach_the_subtree(
+async def _would_detach_the_subtree(
     submission: Submission, moving: Node, destination: UUID | None
 ) -> bool:
     """Moving a folder inside itself severs it from the root, unreachably."""
-    return destination is not None and tree.descends_from(
-        submission.session, submission.workspace, destination, moving.id
+    return destination is not None and await submission.descends_from(
+        destination, moving.id
     )
 
 
-def _refuses_write(submission: Submission, request: WriteText | WriteBinary) -> str | None:
-    node = submission.node(request.id)
-    if node is None or node.deleted:
+async def _refuses_write(
+    submission: Submission, request: WriteText | WriteBinary
+) -> str | None:
+    node = await submission.node(request.id)
+    if node is None:
+        return Refusal.ENTRY_UNKNOWN
+    if node.deleted:
         # The bytes are not lost with the transaction: the client parks them.
         return Refusal.ENTRY_DELETED
-    if _stale(node, request):
-        return Refusal.ALREADY_WRITTEN
-    if isinstance(request, WriteBinary) and not submission.blobs.holds(request.hash):
+    if node.is_folder:
+        return Refusal.NOT_A_FILE
+    if (
+        conflict := await _cas(
+            submission,
+            node,
+            request.content_version,
+            current=node.content_version,
+            among=submission.models.content,
+            stale=Refusal.ALREADY_WRITTEN,
+        )
+    ) is not None:
+        return conflict
+    if await _bytes_are_missing(submission, _body_of(request)):
         return Refusal.BYTES_NEVER_STORED
     return None
 
 
-_JUDGEMENT: dict[Operation, Callable[[Submission, Any], str | None]] = {
+_JUDGEMENT: dict[Operation, Callable[[Submission, Any], Awaitable[str | None]]] = {
     Operation.CREATE: _refuses_create,
     Operation.DELETE: _refuses_delete,
     Operation.RENAME: _refuses_rename,
@@ -207,185 +432,278 @@ _JUDGEMENT: dict[Operation, Callable[[Submission, Any], str | None]] = {
 }
 
 
-def refusal(submission: Submission, request: Submitted) -> str | None:
+async def refusal(submission: Submission, request: Submitted) -> str | None:
     """Why this request cannot be applied to this workspace, if it cannot.
 
     Reads only. Re-running it is how the reason for an earlier refusal is
     recovered, so no refusal is ever written down.
     """
-    return _JUDGEMENT[request.op](submission, request)
+    return await _JUDGEMENT[request.op](submission, request)
+
+
+_TOKEN_AT_STAKE: dict[Operation, Callable[[Node], UUID | None]] = {
+    Operation.RENAME: lambda node: node.name_version,
+    Operation.REPARENT: lambda node: node.parent_version,
+    Operation.WRITE: lambda node: node.content_version,
+}
+
+
+async def _conflicting_version(
+    submission: Submission, request: Submitted
+) -> UUID | None:
+    """What a client rebases onto: the current token of the property it lost.
+
+    A delete gets none -- it presented four tokens, so what it needs back is a
+    fresh look at the entry, not one value.
+    """
+    at_stake = _TOKEN_AT_STAKE.get(request.op)
+    node = None if at_stake is None else await submission.node(request.id)
+    return None if node is None or at_stake is None else at_stake(node)
 
 
 # -- the choke point ---------------------------------------------------------------
 
 
-def _next_position(submission: Submission) -> int:
-    """Serialized by the workspace controller; the row lock is the insurance
-    that turns an accidental second process from corruption into contention."""
-    workspace = submission.session.exec(
-        select(Workspace).where(Workspace.id == submission.workspace).with_for_update()
-    ).one()
-    workspace.position += 1
-    submission.session.add(workspace)
-    return workspace.position
+async def approve(submission: Submission, *applied: TransactionRow) -> int:
+    """Take the next position, stamp it onto the rows, append them.
+
+    The position comes from the controller that owns this workspace, in
+    memory. Nothing is locked because nothing else writes here.
+
+    Rows sharing a position are one transaction, and only a create writes more
+    than one -- which is how the stream tells a birth from a change.
+    """
+    position = submission.positions.take()
+    for row in applied:
+        row.position = position
+    submission.session.add_all(applied)
+    await submission.session.flush()
+    return position
 
 
-def _carried_over(previous: Version | None) -> dict[str, Any]:
-    if previous is None:
-        return {}
-    return {
-        "name_id": previous.name_id,
-        "parent_id": previous.parent_id,
-        "deleted_id": previous.deleted_id,
-        "text_content_id": previous.text_content_id,
-        "blob_content_id": previous.blob_content_id,
-    }
+async def _acknowledge(submission: Submission, position: int) -> Outcome:
+    return Outcome(Acknowledged(), await _announcing(submission, position))
 
 
-def approve(
-    submission: Submission,
-    *,
-    entry_id: UUID,
-    event: Event,
-    applied: list[Transaction],
-    previous: Version | None,
-    **introduced: Any,
-) -> Version:
-    """Append the changes and the version they compose, at the next position."""
-    version = Version(
-        entry_id=entry_id,
-        event=event,
-        position=_next_position(submission),
-        **{**_carried_over(previous), **introduced},
-    )
-    submission.session.add_all([*applied, version])
-    submission.session.flush()
-    return version
+async def _announcing(
+    submission: Submission, *positions: int | None
+) -> list[stream.Emitted]:
+    return [
+        await submission.stream.at(submission.session, submission.workspace, position)
+        for position in positions
+        if position is not None
+    ]
 
 
-def _acknowledge(
-    submission: Submission, version: Version, response: Response | None = None
-) -> Outcome:
-    return Outcome(response or Acknowledged(), [stream.of(submission.session, version.id)])
-
-
-def _by(user: User, request: Transacted) -> dict[str, Any]:
-    return {"user_id": user.id, "transaction": request.transaction}
+def _by(user: UUID, request: Transacted) -> dict[str, Any]:
+    """A transaction's own id is the primary key of every row it applies."""
+    return {"id": request.transaction, "user_id": user}
 
 
 # -- application: what an accepted request appends ------------------------------------
 
 
-def _apply_create(submission: Submission, request: Create) -> Outcome:
-    entry = Entry(workspace_id=submission.workspace, type=request.type)
-    submission.session.add(entry)
-    stamp = _by(submission.user, request)
-    naming = Name(entry_id=entry.id, name=request.name, **stamp)
-    parentage = Parent(entry_id=entry.id, parent_entry_id=request.parent, **stamp)
-    deletion = Deletion(entry_id=entry.id, deleted=False, **stamp)
-    version = approve(
-        submission,
-        entry_id=entry.id,
-        event=Event.CREATE,
-        applied=[naming, parentage, deletion],
-        previous=None,
-        name_id=naming.id,
-        parent_id=parentage.id,
-        deleted_id=deletion.id,
+def _numbered(name: str, suffix: object) -> str:
+    stem, dot, extension = name.rpartition(".")
+    if not stem:  # a dotfile has no extension to protect
+        return f"{name} ({suffix})"
+    return f"{stem} ({suffix}){dot}{extension}"
+
+
+def _candidates(desired: str) -> Iterator[str]:
+    for index in islice(count(2), 98):
+        yield _numbered(desired, index)
+
+
+async def _available_name(submission: Submission, node: Node) -> str:
+    for candidate in _candidates(node.name):
+        if not await submission.name_taken(
+            parent=node.parent, name=candidate, excluding=node.id
+        ):
+            return candidate
+    return _numbered(node.name, node.id.hex)
+
+
+async def _identify(submission: Submission, request: Create) -> EntryRow:
+    """The entry has to exist before the logs that point at it do, and nothing
+    else in this transaction reads it into being."""
+    entry = submission.models.entry(
+        id=request.id, workspace_id=submission.workspace, type=request.type
     )
-    return _acknowledge(submission, version, Created(id=entry.id))
+    submission.session.add(entry)
+    await submission.session.flush()
+    return entry
 
 
-def _apply_delete(submission: Submission, request: Delete) -> Outcome:
-    node = _live(submission, request)
-    if _already_gone(node):
+async def _apply_create(submission: Submission, request: Create) -> Outcome:
+    entry = await _identify(submission, request)
+    stamp = _by(submission.user, request)
+    # One minted id names every row, so a client can predict all four of its
+    # own tokens. They diverge on first mutation.
+    # A file is born with content and a folder with none, so a create is the
+    # only transaction that writes a fourth log.
+    models = submission.models
+    appended: list[TransactionRow] = [
+        models.name(entry_id=entry.id, name=request.name, **stamp),
+        models.parent(entry_id=entry.id, parent_entry_id=request.parent, **stamp),
+        models.deletion(entry_id=entry.id, deleted=False, **stamp),
+    ]
+    written = await _content_row(
+        submission, entry.id, request, request.content, base=""
+    )
+    if written is not None:
+        appended.append(written)
+    born = await approve(submission, *appended)
+    await _anchor_text(submission, written, request.content)
+    submission.deferrals.note(entry.id)
+    return await _acknowledge(submission, born)
+
+
+async def _anchor_text(
+    submission: Submission, written: ContentRow | None, body: Body | None
+) -> None:
+    if isinstance(written, submission.models.text_content) and isinstance(body, TextBody):
+        await submission.text.remember(submission.session, written, body.content)
+
+
+async def settle(submission: Submission) -> list[stream.Emitted]:
+    """Rename anything created here that is still sharing a sibling's name.
+
+    Runs once, at the end of the unit of work, after every queued transaction
+    has had its say. Rather than quietly substituting a name nobody asked for,
+    the create was applied as asked and is renamed now -- so a client learns
+    the settled name through the ordinary `name` event, and nothing about the
+    create response is special.
+    """
+    return await _announcing(
+        submission,
+        *[await _settled(submission, entry) for entry in submission.deferrals],
+    )
+
+
+async def _settled(submission: Submission, entry_id: UUID) -> int | None:
+    node = await submission.node(entry_id)
+    if node is None or node.deleted:
+        return None  # a tombstone holds no name to collide with
+    if not await submission.claimed_first(node):
+        return None
+    return await approve(submission, await _issued_by_the_controller(submission, node))
+
+
+async def _issued_by_the_controller(submission: Submission, node: Node) -> NameRow:
+    """The one transaction no client minted. Its id is the controller's, and
+    it reaches every client as an ordinary name event. Attributed to whoever
+    is presenting the work, because their work is what needed settling."""
+    return submission.models.name(
+        id=uuid4(),
+        entry_id=node.id,
+        user_id=submission.user,
+        name=await _available_name(submission, node),
+    )
+
+
+async def _apply_delete(submission: Submission, request: Delete) -> Outcome:
+    node = await _live(submission, request)
+    if node.deleted:
         # Acknowledging beats inventing a refusal for work already done.
         return Outcome(Acknowledged())
-    deletion = Deletion(entry_id=node.id, deleted=True, **_by(submission.user, request))
-    version = approve(
-        submission,
-        entry_id=node.id,
-        event=Event.DELETE,
-        applied=[deletion],
-        previous=node.version,
-        deleted_id=deletion.id,
-    )
-    return _acknowledge(submission, version)
-
-
-def _apply_rename(submission: Submission, request: Rename) -> Outcome:
-    node = _live(submission, request)
-    naming = Name(entry_id=node.id, name=request.name, **_by(submission.user, request))
-    version = approve(
-        submission,
-        entry_id=node.id,
-        event=Event.NAME,
-        applied=[naming],
-        previous=node.version,
-        name_id=naming.id,
-    )
-    return _acknowledge(submission, version)
-
-
-def _apply_reparent(submission: Submission, request: Reparent) -> Outcome:
-    node = _live(submission, request)
-    parentage = Parent(
-        entry_id=node.id, parent_entry_id=request.parent, **_by(submission.user, request)
-    )
-    version = approve(
-        submission,
-        entry_id=node.id,
-        event=Event.PARENT,
-        applied=[parentage],
-        previous=node.version,
-        parent_id=parentage.id,
-    )
-    return _acknowledge(submission, version)
-
-
-def _apply_write(submission: Submission, request: WriteText | WriteBinary) -> Outcome:
-    node = _live(submission, request)
-    content = _content_of(submission, node, request)
-    version = approve(
-        submission,
-        entry_id=node.id,
-        event=Event.WRITE,
-        applied=[content],
-        previous=node.version,
-        text_content_id=content.id if isinstance(content, TextContent) else None,
-        blob_content_id=content.id if isinstance(content, BlobContent) else None,
-    )
-    if isinstance(request, WriteText):
-        text.remember(submission.session, version, request.content)
-    return _acknowledge(submission, version)
-
-
-def _content_of(
-    submission: Submission, node: Node, request: WriteText | WriteBinary
-) -> TextContent | BlobContent:
     stamp = _by(submission.user, request)
+    return await _acknowledge(
+        submission,
+        await approve(
+            submission,
+            submission.models.deletion(entry_id=node.id, deleted=True, **stamp),
+        ),
+    )
+
+
+async def _apply_rename(submission: Submission, request: Rename) -> Outcome:
+    node = await _live(submission, request)
+    stamp = _by(submission.user, request)
+    return await _acknowledge(
+        submission,
+        await approve(
+            submission,
+            submission.models.name(entry_id=node.id, name=request.name, **stamp),
+        ),
+    )
+
+
+async def _apply_reparent(submission: Submission, request: Reparent) -> Outcome:
+    node = await _live(submission, request)
+    stamp = _by(submission.user, request)
+    return await _acknowledge(
+        submission,
+        await approve(
+            submission,
+            submission.models.parent(
+                entry_id=node.id, parent_entry_id=request.parent, **stamp
+            ),
+        ),
+    )
+
+
+async def _apply_write(
+    submission: Submission, request: WriteText | WriteBinary
+) -> Outcome:
+    node = await _live(submission, request)
+    body = _body_of(request)
+    written = await _content_row(
+        submission,
+        node.id,
+        request,
+        body,
+        base=await submission.text.at(
+            submission.session, node.id, node.content_position
+        ),
+    )
+    assert written is not None
+    position = await approve(submission, written)
+    await _anchor_text(submission, written, body)
+    return await _acknowledge(submission, position)
+
+
+def _body_of(request: WriteText | WriteBinary) -> Body:
     if isinstance(request, WriteBinary):
-        return BlobContent(
-            entry_id=node.id, hash=request.hash, size=request.size, mime=request.mime, **stamp
+        return BinaryBody(hash=request.hash, size=request.size, mime=request.mime)
+    return TextBody(content=request.content)
+
+
+async def _content_row(
+    submission: Submission,
+    entry_id: UUID,
+    request: Transacted,
+    body: Body | None,
+    *,
+    base: str,
+) -> ContentRow | None:
+    if body is None:
+        return None
+    stamp = _by(submission.user, request)
+    if isinstance(body, BinaryBody):
+        return submission.models.blob_content(
+            entry_id=entry_id, hash=body.hash, size=body.size, mime=body.mime, **stamp
         )
-    return TextContent(
-        entry_id=node.id,
-        size=len(request.content.encode()),
+    return submission.models.text_content(
+        entry_id=entry_id,
+        size=len(body.content.encode()),
         mime="text/plain",
-        delta=diff_to_delta(text.at(submission.session, node.version), request.content),
+        delta=diff_to_delta(base, body.content),
         **stamp,
     )
 
 
-def _live(submission: Submission, request: Versioned) -> Node:
+async def _live(submission: Submission, request: Transacted) -> Node:
     """The entry an accepted request names -- judgement has already found it."""
-    node = submission.node(request.id)
+    node = await submission.node(request.id)
     if node is None:
-        raise LookupError(f"entry {request.id} vanished between judgement and application")
+        raise LookupError(
+            f"entry {request.id} vanished between judgement and application"
+        )
     return node
 
 
-_APPLICATION: dict[Operation, Callable[[Submission, Any], Outcome]] = {
+_APPLICATION: dict[Operation, Callable[[Submission, Any], Awaitable[Outcome]]] = {
     Operation.CREATE: _apply_create,
     Operation.DELETE: _apply_delete,
     Operation.RENAME: _apply_rename,
@@ -396,51 +714,67 @@ _APPLICATION: dict[Operation, Callable[[Submission, Any], Outcome]] = {
 
 # -- dedup, and the two halves joined -------------------------------------------------
 
-_TRANSACTION_TABLE: dict[Operation, type[Transaction]] = {
-    Operation.CREATE: Name,
-    Operation.RENAME: Name,
-    Operation.REPARENT: Parent,
-    Operation.DELETE: Deletion,
-}
+def _table_for(models: Models, request: Submitted) -> type[TransactionRow]:
+    """Which log a transaction of this shape would have landed in."""
+    if request.op is Operation.WRITE:
+        return models.text_content if request.type is Kind.TEXT else models.blob_content
+    return {
+        Operation.CREATE: models.name,
+        Operation.RENAME: models.name,
+        Operation.REPARENT: models.parent,
+        Operation.DELETE: models.deletion,
+    }[request.op]
 
 
-def _table_for(request: Submitted) -> type[Transaction]:
-    if request.op is not Operation.WRITE:
-        return _TRANSACTION_TABLE[request.op]
-    return TextContent if request.type is Kind.TEXT else BlobContent
+async def _already_applied(
+    submission: Submission, request: Submitted
+) -> Outcome | None:
+    """A transaction id is spent once.
 
-
-def _already_applied(submission: Submission, request: Submitted) -> Outcome | None:
-    table = _table_for(request)
-    recorded = submission.session.exec(
-        select(table).where(table.transaction == request.transaction)
-    ).first()
+    Finding it against this entry means the change already happened, and the
+    retry is free. Finding it against a DIFFERENT entry means the client
+    reused an id -- which would otherwise collide on the primary key it is
+    about to write, so it is refused rather than crashed into.
+    """
+    recorded = await submission.session.get(
+        _table_for(submission.models, request), request.transaction
+    )
     if recorded is None:
         return None
-    if request.op is Operation.CREATE:
-        return Outcome(Created(id=recorded.entry_id))
+    if recorded.entry_id != request.id:
+        return Outcome(Rejected(reason=Refusal.ID_TAKEN))
     return Outcome(Acknowledged())
 
 
-def _conflicting_version(submission: Submission, request: Submitted) -> UUID | None:
-    """What the conflict UX needs NOW: the affected entry's current version."""
-    if isinstance(request, Create):
-        return None
-    node = submission.node(request.id)
-    return None if node is None else node.version.id
+async def _minted_elsewhere(submission: Submission, request: Create) -> bool:
+    """An entry id already in use.
+
+    Checked globally rather than within the workspace: a client that can
+    assert an id must not learn, from the shape of the refusal, that the id
+    exists somewhere it cannot see.
+    """
+    return (
+        await submission.session.get(submission.models.entry, request.id) is not None
+    )
 
 
-def adjudicate(submission: Submission, request: Submitted) -> Outcome:
-    applied = _already_applied(submission, request)
+async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
+    applied = await _already_applied(submission, request)
     if applied is not None:
-        return applied
-    refused = refusal(submission, request)
+        return applied  # a replay after a dropped response: free, by design
+    if isinstance(request, Create) and await _minted_elsewhere(submission, request):
+        return Outcome(Rejected(reason=Refusal.ID_TAKEN))
+    refused = await refusal(submission, request)
     if refused is not None:
         return Outcome(
-            Rejected(reason=refused, version=_conflicting_version(submission, request))
+            Rejected(
+                reason=refused, version=await _conflicting_version(submission, request)
+            )
         )
-    return _APPLICATION[request.op](submission, request)
+    return await _APPLICATION[request.op](submission, request)
 
 
-def snapshot(session: Session, workspace_id: UUID) -> list[Metadata]:
-    return [node.metadata for node in tree.nodes(session, workspace_id)]
+async def snapshot(
+    schema: Workspaces, session: AsyncSession, workspace_id: UUID
+) -> list[Metadata]:
+    return [node.metadata for node in await schema.tree.nodes(session, workspace_id)]

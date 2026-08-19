@@ -13,9 +13,9 @@ services:
     # Live source, so editing a file needs no rebuild. Read-only so the container
     # can't drop __pycache__ / .pytest_cache into the working tree.
     volumes:
-      - ../release:/app/release:ro
-      - ../wsfs_suede__sqlmodel_utils_suede:/app/wsfs_suede__sqlmodel_utils_suede:ro
-      - ../tests:/app/tests:ro
+      - ../release:/app/wsfs_suede/release:ro
+      - ../wsfs_suede__sqlmodel_utils_suede:/app/wsfs_suede/wsfs_suede__sqlmodel_utils_suede:ro
+      - ../tests:/app/wsfs_suede/tests:ro
     depends_on:
       test-db:
         condition: service_healthy

@@ -6,7 +6,10 @@ ENV \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+# The project sits one level below the import root, so `release/` resolves its
+# sibling dependencies the way a consumer that installed it would: by relative
+# import out of the project package. Renaming this folder breaks those imports.
+WORKDIR /app/wsfs_suede
 
 # fast_diff_match_patch ships no aarch64 wheel, so it is compiled here.
 RUN apt-get update \
