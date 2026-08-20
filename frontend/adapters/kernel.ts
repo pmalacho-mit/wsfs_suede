@@ -67,12 +67,14 @@ export const filesystem = (workspace: Workspace): Reading & Writing => {
     },
 
     put: async (path, value) => {
-      if (value === null) return workspace.folder(path).then(() => undefined);
-      await workspace.write(path, value);
+      // The filesystem's caller waits for the server's answer, because a
+      // script that writes a file and reads it back expects to be told.
+      if (value === null) await workspace.folder(path).settled;
+      else await workspace.write(path, value).settled;
     },
 
-    move: ({ from, to }) => workspace.move(from, to),
+    move: async ({ from, to }) => void (await workspace.move(from, to).settled),
 
-    delete: (path) => workspace.remove(path),
+    delete: async (path) => void (await workspace.remove(path).settled),
   };
 };
