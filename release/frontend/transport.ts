@@ -5,8 +5,15 @@
  * how to authenticate, because both belong to whoever mounted it, and it
  * turns the generated shapes into requests.
  */
-import type { Held } from "./content";
-import type { Id, Response, Snapshot, StreamEvent, Submitted, Version } from "./contract";
+import type { Payload } from "./content";
+import type {
+  Id,
+  Response,
+  Snapshot,
+  StreamEvent,
+  Submitted,
+  Version,
+} from "./contract";
 
 export type Authorized = () => HeadersInit | Promise<HeadersInit>;
 
@@ -22,8 +29,13 @@ export type Subscription = { close: () => void };
 export type Transport = {
   initialize: (workspace: Id, outbox: Submitted[]) => Promise<Snapshot>;
   submit: (workspace: Id, request: Submitted) => Promise<Response>;
-  content: (workspace: Id, entry: Id, version?: Version) => Promise<Held>;
-  store: (workspace: Id, digest: string, bytes: Uint8Array, mime: string) => Promise<void>;
+  content: (workspace: Id, entry: Id, version?: Version) => Promise<Payload>;
+  store: (
+    workspace: Id,
+    digest: string,
+    bytes: Uint8Array,
+    mime: string,
+  ) => Promise<void>;
   follow: (workspace: Id, token: string, reading: Reading) => Subscription;
 };
 
@@ -33,10 +45,15 @@ const json = async <T>(response: Response_) => (await response.json()) as T;
 
 type Response_ = globalThis.Response;
 
-const held = async (response: Response_): Promise<Held> => {
-  const mime = response.headers.get("content-type") ?? "application/octet-stream";
+const held = async (response: Response_): Promise<Payload> => {
+  const mime =
+    response.headers.get("content-type") ?? "application/octet-stream";
   if (!mime.startsWith("application/json")) {
-    return { kind: "binary", bytes: new Uint8Array(await response.arrayBuffer()), mime };
+    return {
+      kind: "binary",
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      mime,
+    };
   }
   const body = (await response.json()) as { content: string };
   return { kind: "text", text: body.content };
@@ -95,20 +112,29 @@ export const http = (base: string, authorize: Authorized): Transport => {
 
   return {
     initialize: async (workspace, outbox) =>
-      json<Snapshot>(await posted(`${workspaces(workspace)}/initialize`, { outbox })),
+      json<Snapshot>(
+        await posted(`${workspaces(workspace)}/initialize`, { outbox }),
+      ),
 
     submit: async (workspace, request) =>
-      json<Response>(await posted(`${workspaces(workspace)}/transactions`, request)),
+      json<Response>(
+        await posted(`${workspaces(workspace)}/transactions`, request),
+      ),
 
     content: async (workspace, entry, version) => {
       const query = version === undefined ? "" : `?content=${version}`;
-      return held(await send(`${workspaces(workspace)}/entries/${entry}/content${query}`));
+      return held(
+        await send(`${workspaces(workspace)}/entries/${entry}/content${query}`),
+      );
     },
 
     store: async (workspace, digest, bytes, mime) => {
       await send(`${workspaces(workspace)}/blobs/${digest}`, {
         method: "PUT",
-        headers: { "content-type": mime, "content-length": String(bytes.byteLength) },
+        headers: {
+          "content-type": mime,
+          "content-length": String(bytes.byteLength),
+        },
         body: bytes as BodyInit,
       });
     },

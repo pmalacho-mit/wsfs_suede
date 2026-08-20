@@ -24,14 +24,17 @@
   const tabs = { file: FileView };
   type Grid = ViewAPI<"grid", typeof snippets>;
 
+  type Dispose = (() => void) | { dispose: () => void };
   const cleanup = Object.assign(
     () => {
-      for (const fn of cleanup.set) fn();
+      for (const entry of cleanup.set)
+        typeof entry === "function" ? entry() : entry.dispose();
       cleanup.set.clear();
     },
     {
-      set: new Set<() => void>(),
-      add: (fn: () => void) => cleanup.set.add(fn),
+      set: new Set<Dispose>(),
+      add: (...entries: Dispose[]) =>
+        entries.forEach((entry) => cleanup.set.add(entry)),
     },
   );
 
@@ -41,11 +44,11 @@
     const tree = new FileTreeModel(workspace.workspace);
 
     type TabsAPI = ViewAPI<"dock", typeof tabs>;
-    let tabsAPI: TabsAPI | undefined = undefined;
+    let _tabsAPI: TabsAPI | undefined = undefined;
 
     const dock = await api.addSnippetPanel(
       "dock",
-      { onready: (api) => (tabsAPI = api) },
+      { onready: (api) => (_tabsAPI = api) },
       {
         priority: LayoutPriority.High,
       },
@@ -74,21 +77,25 @@
       ),
     ]);
 
-    if (tabsAPI === undefined)
+    if (_tabsAPI === undefined)
       throw new Error("Tabs API did not initialize in time");
 
+    const tabsAPI: TabsAPI = _tabsAPI!;
+
     const tab = (idOrEntry: FileTreeModel.Entry | FileTreeModel.Entry["id"]) =>
-      tabsAPI!.getPanel(
+      tabsAPI.getPanel(
         typeof idOrEntry === "string" ? idOrEntry : idOrEntry.id,
       );
 
     cleanup.add(
+      tabsAPI.onDidActivePanelChange(({ panel }) => tree.select(panel?.id)),
+      tabsAPI.onDidRemovePanel((panel) => tree.deselect(panel.id)),
       tree.subscribe({
         open: async ({ id, path }) => {
           const panel = tab(id);
           if (panel) return panel.api.setActive();
           const title = nameOf(path);
-          await tabsAPI!.addComponentPanel(
+          await _tabsAPI!.addComponentPanel(
             "file",
             { path, workspace },
             { id, title },

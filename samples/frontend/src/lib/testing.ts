@@ -244,3 +244,25 @@ export const focused = (within: HTMLElement): string | undefined =>
     )
     ?.getAttribute("data-item-path") ??
   undefined;
+
+/** The path of the row the tree is showing as selected, if any. */
+export const selected = (within: HTMLElement): string | undefined =>
+  everythingIn(within)
+    .find(
+      (element) =>
+        element.getAttribute("data-item-selected") === "true" &&
+        element.hasAttribute("data-item-path"),
+    )
+    ?.getAttribute("data-item-path") ?? undefined;
+
+/**
+ * Closes an open panel by its tab's close control.
+ *
+ * Dispatched rather than driven through `userEvent`: the control cancels
+ * `pointerdown` to stop the tab being dragged, and user-event's pointer
+ * bookkeeping does not survive that.
+ */
+export const closeTab = (tab: HTMLElement): void => {
+  const shut = tab.querySelector(".dv-default-tab-action");
+  shut?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+};

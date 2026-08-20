@@ -7,7 +7,13 @@
  * a consumer knows it has a buffer open, so preferring it is its rule to make.
  */
 export { connect } from "./workspace";
-export type { Changed, Creating, Options, Submitting, Workspace } from "./workspace";
+export type {
+  Changed,
+  Creating,
+  Options,
+  Submitting,
+  Workspace,
+} from "./workspace";
 
 /** What a `watch` listener is handed: one entry, one thing about it, and who. */
 export type { Change, Watching } from "./changes";
@@ -19,7 +25,7 @@ export { mint, session } from "./identity";
 export { inMemory, digestOf } from "./bytes";
 export type { Digest, Store } from "./bytes";
 
-export type { Held } from "./content";
+export type { Payload as Held } from "./content";
 export type { Path, Index } from "./paths";
 export type { View } from "./effective";
 

@@ -46,12 +46,4 @@ const configured = applyConfig(
   config as Parameters<typeof applyConfig>[0],
 ) as UserConfig;
 
-/**
- * The helper still reaches for esbuild's pre-bundler, which vite 8 replaced
- * with rolldown -- and the plugin it registers there throws "Not implemented"
- * before a single dependency is scanned. Everything else it does is what the
- * editor actually needs, so only this comes back off.
- */
-delete configured.optimizeDeps?.esbuildOptions;
-
 export default configured;

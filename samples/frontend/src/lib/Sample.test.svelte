@@ -22,6 +22,7 @@
   import {
     alongside,
     clickRow,
+    closeTab,
     drawn,
     everythingIn,
     focused,
@@ -32,6 +33,7 @@
     regions,
     renaming,
     rowFor,
+    selected,
     tabs,
     until,
   } from "$lib/testing";
@@ -781,6 +783,73 @@
     <div class="panel" bind:this={p.root}>
       {#if p.tree}
         <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the tree shows which panel is in front, and lets go when it closes"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    await workspace.workspace.create("front.md", "one").settled;
+    await workspace.workspace.create("behind.md", "two").settled;
+
+    const { root } = await harness.definition("root");
+    await until("both drawn", () => !!rowFor(root, "front.md") && !!rowFor(root, "behind.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    // Opening one highlights its row.
+    await clickRow(rowFor(root, "front.md")!);
+    await until("the row is highlighted", () => selected(root) === "front.md", () =>
+      String(selected(root)),
+    );
+
+    // Opening another moves the highlight, because the front moved.
+    await clickRow(rowFor(root, "behind.md")!);
+    await until("the highlight followed", () => selected(root) === "behind.md", () =>
+      String(selected(root)),
+    );
+    await until(
+      "both files are open",
+      () => tabs(root).length === 2,
+      () => tabs(root).map((tab) => tab.textContent).join(" | "),
+    );
+
+    // Closing the one in front lets its row go, and hands the highlight to
+    // whatever came forward -- not to nothing.
+    closeTab(tabs(root).find((tab) => tab.textContent?.includes("behind.md"))!);
+    await until("the front went back", () => selected(root) === "front.md", () =>
+      `${selected(root)} of ${tabs(root).length}`,
+    );
+
+    // And the last one closing leaves nothing highlighted, so the row can be
+    // clicked to open it again.
+    closeTab(tabs(root).find((tab) => tab.textContent?.includes("front.md"))!);
+    await until("nothing is highlighted", () => selected(root) === undefined, () =>
+      String(selected(root)),
+    );
+
+    await clickRow(rowFor(root, "front.md")!);
+    await until(
+      "clicking it opens it again",
+      () => tabs(root).some((tab) => tab.textContent?.includes("front.md")),
+      () => tabs(root).map((tab) => tab.textContent).join(" | "),
+    );
+    harness.expect(selected(root)).toBe("front.md");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
       {/if}
     </div>
   {/snippet}

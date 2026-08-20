@@ -193,6 +193,7 @@
 
     /** What has happened here that the workspace has not been told yet. */
     #held: (() => void)[] | undefined;
+    #selecting = false;
 
     constructor(workspace: Workspace) {
       super();
@@ -235,6 +236,53 @@
       const held = this.#held;
       this.#held = undefined;
       held?.forEach((say) => say());
+    }
+
+    /**
+     * Shows an entry as the selected one, or clears the selection.
+     *
+     * A row is selected because its panel is in front, and a panel is in
+     * front because its row was selected -- the same fact said in two places,
+     * and each has to be able to hear the other without answering back.
+     * Selecting a row is how a USER asks for something to be opened, so this
+     * makes the row look right without asking for anything.
+     *
+     * An entry the tree has never heard of leaves the selection alone: not
+     * knowing where something is is not a reason to stop showing where the
+     * user is.
+     */
+    select(entry: Id | undefined): void {
+      if (entry === undefined) return this.#quietly(() => this.tree.selection.clear());
+      const path = this.mapping.at(entry);
+      if (path === undefined || this.tree.selection.has(path)) return;
+      this.#quietly(() => this.tree.selection.only(path));
+    }
+
+    /**
+     * Clears the selection, but only if `entry` is what it is showing.
+     *
+     * A panel closing hands the front to another one, which has already
+     * claimed the selection -- so this has to check rather than assume, and
+     * then the order the two arrive in stops mattering.
+     */
+    deselect(entry: Id): void {
+      const path = this.mapping.at(entry);
+      if (path === undefined || !this.tree.selection.has(path)) return;
+      this.select(undefined);
+    }
+
+    /** Whether the selection is being set from outside rather than by hand. */
+    get selecting(): boolean {
+      return this.#selecting;
+    }
+
+    #quietly(act: () => void): void {
+      this.#selecting = true;
+      try {
+        act();
+      } finally {
+        this.#selecting = false;
+      }
     }
 
     #say(announcement: () => void): void {
@@ -432,6 +480,9 @@
           console.log("focus changed", path);
         },
         "selection changed": ([path]) => {
+          // Set from outside, to show which panel is in front. Answering it
+          // would be asking for the thing that just happened.
+          if (model.selecting) return;
           if (path === undefined || Tree.isDirectory(tree.item(path))) return;
           // A draft has a row and no entry, and selecting one is not asking
           // for anything to be opened -- there is nothing there yet.
