@@ -29,7 +29,7 @@
   const read = () => {
     params.workspace.read(params.opened.path).then((content) => {
       if (!content) return;
-      if (content.kind === "text") params.opened.share();
+      if (content.kind === "text") params.opened.share(content.text);
       else binary = content;
     });
   };

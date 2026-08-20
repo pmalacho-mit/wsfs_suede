@@ -647,6 +647,16 @@
     // shadow root, so `document.activeElement` is the host and user-event
     // types at that instead.
     await until("the editor handed itself over", () => pocket.editor !== undefined);
+    // Focused, because typing is what stores a version and focus is how a
+    // person is told apart from an update arriving from the room.
+    pocket.editor!.focus();
+    // Opened on what the file holds, rather than on nothing -- an editor
+    // that opens empty writes empty straight back over the file.
+    await until(
+      "the editor opened on the file",
+      () => pocket.editor!.getModel()?.getValue() === "before",
+      () => JSON.stringify(pocket.editor!.getModel()?.getValue()),
+    );
     const model = pocket.editor!.getModel()!;
     const line = model.getLineCount();
     const column = model.getLineMaxColumn(line);
@@ -657,9 +667,11 @@
     // Nothing writes the shared text back to the workspace except the file
     // itself, on a debounce -- so this is the assertion that the editor is
     // not a place work goes to be lost.
+    // The whole text, not just the new part: anything less would pass while
+    // the file was being replaced by what the editor happened to be showing.
     await until(
       "the other client has the typing",
-      () => texted(other.workspace.holding("draft.md")).includes("after"),
+      () => texted(other.workspace.holding("draft.md")) === "before after",
       () => JSON.stringify(other.workspace.holding("draft.md")),
       15_000,
     );
@@ -855,6 +867,62 @@
       () => tabs(root).map((tab) => tab.textContent).join(" | "),
     );
     harness.expect(selected(root)).toBe("front.md");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the assistant is offered what the user can actually see"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    await workspace.workspace.create("seen.md", "one").settled;
+    await workspace.workspace.create("hidden.md", "two").settled;
+
+    const { root } = await harness.definition("root");
+    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
+    await until("both drawn", () => !!rowFor(root, "seen.md") && !!rowFor(root, "hidden.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    const offered = () =>
+      [...region(root, "assistant")!.querySelectorAll("[data-path]")]
+        .map((item) => item.getAttribute("data-path"))
+        .sort();
+
+    harness.expect(offered()).toEqual([]);
+
+    await clickRow(rowFor(root, "seen.md")!);
+    await until("the open file is offered", () => offered().join() === "seen.md", () =>
+      offered().join(" | "),
+    );
+
+    // Opened on top of it, in the same group. One panel per group is on
+    // screen, so the first is now open and NOT visible -- which is the
+    // distinction the assistant needs and "which file is open" cannot make.
+    await clickRow(rowFor(root, "hidden.md")!);
+    await until("the one in front replaces it", () => offered().join() === "hidden.md", () =>
+      offered().join(" | "),
+    );
+
+    // And it keeps up as the layout moves, rather than being worked out when
+    // somebody finally asks.
+    closeTab(tabs(root).find((tab) => tab.textContent?.includes("hidden.md"))!);
+    await until("the one behind comes back", () => offered().join() === "seen.md", () =>
+      offered().join(" | "),
+    );
     void harness.capture("png", tall);
   }}
 >
