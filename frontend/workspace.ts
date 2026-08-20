@@ -17,6 +17,7 @@ import {
   type Response,
   type Submitted,
   type Transaction,
+  type Write,
 } from "./contract";
 import * as effective from "./effective";
 import { mint } from "./identity";
@@ -24,6 +25,8 @@ import { offset } from "./minted";
 import * as loop from "./loop";
 import * as outbox from "./outbox";
 import * as paths from "./paths";
+import * as writes from "./writes";
+import { heldAs } from "./writes";
 import type { Transport } from "./transport";
 
 export type Options = {
@@ -90,15 +93,10 @@ const TEXT = "text/plain";
 const isText = (content: string | Uint8Array): content is string =>
   typeof content === "string";
 
-const heldAs = (payload: string | Uint8Array, mime: string): Payload =>
-  isText(payload)
-    ? { kind: "text", text: payload }
-    : { kind: "binary", bytes: payload, mime };
-
 export const connect = (options: Options): Workspace => {
   const { workspace, transport } = options;
   const bytes = options.bytes ?? inMemory();
-  const queue = outbox.queue(bytes);
+  const queue = outbox.queue();
   const listeners = new Set<Changed>();
 
   let map = confirmed.empty();
@@ -199,6 +197,21 @@ export const connect = (options: Options): Workspace => {
    * the caller needs the first before the second has happened: `submit`
    * announces the change it makes before the request leaves.
    */
+  /**
+   * Content writes go through here rather than straight to `submit`, because
+   * they are the one op whose token can be invalidated by this client's OWN
+   * work in flight. See `writes.ts`.
+   */
+  const flight = writes.pump({
+    queue,
+    bytes,
+    send: (request) => transport.submit(workspace, request),
+    announced: recomputed,
+    remembered: content.remember,
+    token: (entry) => map.get(entry)?.content_version ?? null,
+    unsound: () => sync.nudge(),
+  });
+
   const written = (
     entry: Metadata,
     payload: string | Uint8Array,
@@ -207,15 +220,22 @@ export const connect = (options: Options): Workspace => {
     const seen = entry.content_version;
     if (seen == null) throw new Error(`Not a file: ${entry.name}`);
     const transaction = mint();
+    /**
+     * The token here is the one the CACHE knows, and it is only a starting
+     * point: `flight` chooses what actually goes on the wire, because by the
+     * time this leaves there may be a write of this client's own in front of
+     * it that the confirmed view has not heard about yet.
+     */
     const settled = (async () =>
-      submit(
+      flight.write(
+        entry.id,
         {
           op: "write",
           transaction,
           id: entry.id,
           content_version: seen,
           content: await staged(payload, mime),
-        },
+        } as Write,
         payload,
         mime,
       ))();
@@ -227,7 +247,7 @@ export const connect = (options: Options): Workspace => {
       reconcile: async () => {
         const snapshot = await transport.initialize(
           workspace,
-          outbox.presented(queue.entries()),
+          await outbox.presenting(queue.entries(), queue, bytes),
         );
         bytes.forget(
           queue.evict([
@@ -238,6 +258,7 @@ export const connect = (options: Options): Workspace => {
         map = confirmed.snapshot(snapshot.entries);
         recomputed();
         snapshot.entries.forEach(readied);
+        flight.resume();
         return snapshot.token;
       },
       follow: (token, alive, until) =>

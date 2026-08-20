@@ -2,21 +2,58 @@
  * The queue of work this client has accepted and the server has not yet
  * answered.
  *
- * Two rules hold its size down, and neither is a compression scheme.
+ * Successive writes to one entry CHAIN. They used to coalesce -- a later write
+ * replaced an earlier one and inherited its token -- which kept the queue at
+ * one item per file but threw away every snapshot but the last. A consumer
+ * that writes at particular moments, so it can later say what the code was
+ * when the user did some thing, needs all of them to reach the server. So each
+ * one is kept, in order, and `writes.ts` puts one on the wire at a time.
  *
- * Successive writes to one entry COALESCE: a later write supersedes an earlier
- * one, so a file edited a thousand times queues one item, not a thousand. The
- * survivor keeps its own content and inherits the DROPPED item's token,
- * because that is the token the server still knows about.
+ * What keeps that from costing a document per keystroke is that a chained
+ * write is stored as a DELTA against the one before it -- see `delta.ts`. The
+ * head of a chain holds whole text; everything behind it holds an edit script,
+ * which is the size of what changed rather than the size of the file. A queue
+ * that has been offline all afternoon is a document and a pile of diffs.
  *
  * And an item is a row of POINTERS: content lives in the byte store under its
- * hash, so a long offline session queues a list of hashes rather than a list
- * of documents.
+ * hash, never inline on the request. That was the claim this file already
+ * made, and for text it was false -- the text sat in `request.content` AND
+ * under its digest, so the store bought nothing on the commonest payload
+ * there is. `content: null` on a queued write means "the bytes are the store's
+ * business", and `writes.ts` puts them back on the way out.
  */
 import type { Digest, Store } from "./bytes";
-import { isWrite, type Id, type Submitted, type Transaction, type Write } from "./contract";
+import { applyDelta, deltaBetween, type Delta } from "./delta";
+import {
+  isWrite,
+  type Body,
+  type Id,
+  type Submitted,
+  type Transaction,
+  type Write,
+} from "./contract";
 import { session } from "./identity";
 import { mintedAt } from "./minted";
+
+/**
+ * A text write with its body elided while it waits. `null` is the marker, and
+ * it is a marker rather than an empty string so that a request which somehow
+ * escapes without being filled in is refused by the server rather than
+ * silently blanking a file.
+ */
+export type Elided = Omit<Write, "content"> & { content: Body | null };
+
+export type Held = Exclude<Submitted, Write> | Elided;
+
+/**
+ * What a chained write's stored bytes are a delta against.
+ *
+ * `content` is empty while the predecessor is still queued -- its digest is
+ * simply read off it. It gets filled in when the predecessor LEAVES, because
+ * at that moment this delta becomes the only thing that can still read those
+ * bytes back, and the byte store would otherwise be told to forget them.
+ */
+export type Basis = { after: Transaction; content?: Digest };
 
 export type Entry = {
   /** Which page load queued this. An older one never reached the screen. */
@@ -32,82 +69,199 @@ export type Entry = {
    * one this client showed would be the one nobody else could see.
    */
   at: string;
-  request: Submitted;
+  request: Held;
   /** Set when the request's payload lives in the byte store. */
   content?: Digest;
+  /** Set when those bytes are a delta rather than the payload itself. */
+  basis?: Basis;
 };
 
 export type Queue = {
   entries: () => Entry[];
-  capture: (request: Submitted, content?: Digest) => Entry;
+  capture: (request: Submitted, content?: Digest, basis?: Transaction) => Entry;
   evict: (transactions: Iterable<Transaction>) => Digest[];
-  pendingFor: (entry: Id) => Entry | undefined;
+  /** Every queued write for one entry, oldest first. */
+  chain: (entry: Id) => Entry[];
+  find: (transaction: Transaction) => Entry | undefined;
+  /**
+   * Replace a chained write's delta with the whole text it works out to, now
+   * that it is the one going on the wire. Returns the digests that stopped
+   * being needed.
+   */
+  promote: (transaction: Transaction, content: Digest) => Digest[];
   size: () => number;
 };
 
-const stamped = (request: Submitted, content?: Digest): Entry => ({
+const stamped = (
+  request: Held,
+  content?: Digest,
+  basis?: Transaction,
+): Entry => ({
   session,
   at: (mintedAt(request.transaction) ?? new Date()).toISOString(),
   request,
   ...(content === undefined ? {} : { content }),
+  ...(basis === undefined ? {} : { basis: { after: basis } }),
 });
-
-const supersedes = (queued: Entry, arriving: Submitted) =>
-  isWrite(queued.request) && isWrite(arriving) && queued.request.id === arriving.id;
 
 /**
- * The survivor presents the token the server has actually seen, which is the
- * one the item it replaced was going to present.
+ * A text write goes in without its body. A binary one goes in whole, because
+ * its body is ALREADY a pointer -- a hash, a size and a mime type -- so there
+ * is no bulk on the request to take off it.
  */
-const inheriting = (arriving: Write, dropped: Write): Write => ({
-  ...arriving,
-  content_version: dropped.content_version,
-});
+const elided = (request: Submitted): Held =>
+  isWrite(request) && request.content.type === "text"
+    ? { ...request, content: null }
+    : request;
 
-export const queue = (bytes: Store, held: Entry[] = []): Queue => {
+export const isElided = (request: Held): request is Elided =>
+  isWrite(request as Submitted) && (request as Elided).content === null;
+
+export const queue = (held: Entry[] = []): Queue => {
   const items = [...held];
 
-  const coalesced = (arriving: Submitted, content?: Digest) => {
-    const at = items.findIndex((queued) => supersedes(queued, arriving));
-    if (at < 0 || !isWrite(arriving)) return undefined;
-    const dropped = items[at]!;
-    const replacement = stamped(
-      inheriting(arriving, dropped.request as Write),
-      content,
+  /**
+   * Two items can name one digest -- the store is content-addressed, so
+   * identical text hashes to one place -- and a chained write names its
+   * predecessor's. Nothing is released while anything still points at it.
+   */
+  const referenced = (digest: Digest) =>
+    items.some(
+      (item) => item.content === digest || item.basis?.content === digest,
     );
-    items[at] = replacement;
-    void bytes.forget(dropped.content === undefined ? [] : [dropped.content]);
-    return replacement;
+
+  const freeing = (digests: (Digest | undefined)[]) => {
+    const released: Digest[] = [];
+    for (const digest of digests)
+      if (digest !== undefined && !referenced(digest) && !released.includes(digest))
+        released.push(digest);
+    return released;
   };
 
   return {
     entries: () => [...items],
     size: () => items.length,
-    pendingFor: (entry) => items.find(({ request }) => request.id === entry),
-    capture: (request, content) => {
-      const replaced = coalesced(request, content);
-      if (replaced) return replaced;
-      const captured = stamped(request, content);
+    find: (transaction) =>
+      items.find((item) => item.request.transaction === transaction),
+    chain: (entry) =>
+      items.filter(
+        (item) => isWrite(item.request as Submitted) && item.request.id === entry,
+      ),
+
+    capture: (request, content, basis) => {
+      const captured = stamped(elided(request), content, basis);
       items.push(captured);
       return captured;
     },
+
+    promote: (transaction, content) => {
+      const item = items.find(
+        (queued) => queued.request.transaction === transaction,
+      );
+      if (item === undefined) return [];
+      const stale = [item.content, item.basis?.content];
+      item.content = content;
+      delete item.basis;
+      return freeing(stale);
+    },
+
     evict: (transactions) => {
       const answered = new Set(transactions);
-      const released: Digest[] = [];
+      const stale: (Digest | undefined)[] = [];
       for (let at = items.length - 1; at >= 0; at -= 1) {
         const item = items[at]!;
         if (!answered.has(item.request.transaction)) continue;
-        if (item.content !== undefined) released.push(item.content);
         items.splice(at, 1);
+        /**
+         * A chained write behind this one is a delta against bytes that are
+         * about to be forgotten. Hand it the digest on the way past: it is now
+         * the only reason those bytes are worth keeping.
+         */
+        const behind = items.find(
+          (queued) => queued.basis?.after === item.request.transaction,
+        );
+        if (behind?.basis !== undefined && item.content !== undefined)
+          behind.basis.content = item.content;
+        stale.push(item.content, item.basis?.content);
       }
-      return released;
+      return freeing(stale);
     },
   };
 };
 
 /**
- * What Initialize is given: the requests themselves, in the order they were
- * queued, because replay depends on it.
+ * The text a queued write would send, whether it is holding the whole thing or
+ * a delta against the one in front of it.
+ *
+ * A delta's basis is read from the entry the chain names while that entry is
+ * still queued, and from the digest it left behind once it is gone.
  */
-export const presented = (items: Entry[]): Submitted[] =>
-  items.map(({ request }) => request);
+export const textOf = async (
+  item: Entry,
+  queue: Queue,
+  bytes: Store,
+): Promise<string> => {
+  const stored = item.content === undefined ? undefined : await bytes.text(item.content);
+  if (stored === undefined)
+    throw new Error(`Queued write ${item.request.transaction} has lost its bytes`);
+  if (item.basis === undefined) return stored;
+
+  /**
+   * Resolved through the entry the chain names while it is still queued, so a
+   * chain three deep unwinds all the way to the whole text at its head. The
+   * digest left behind by an entry that has gone needs no unwinding: nothing
+   * leaves without being promoted first, so those bytes are already whole.
+   */
+  const ahead = queue.find(item.basis.after);
+  const before =
+    item.basis.content !== undefined
+      ? await bytes.text(item.basis.content)
+      : ahead === undefined
+        ? undefined
+        : await textOf(ahead, queue, bytes);
+  if (before === undefined)
+    throw new Error(
+      `Queued write ${item.request.transaction} is a delta against ` +
+        `${item.basis.after}, which is no longer readable`,
+    );
+  return applyDelta(before, JSON.parse(stored) as Delta);
+};
+
+/** The edit script from one queued text to the next, ready to be stored. */
+export const chained = (before: string, after: string): string =>
+  JSON.stringify(deltaBetween(before, after));
+
+/**
+ * What Initialize is given: the requests themselves, in the order they were
+ * queued, with elided bodies filled back in.
+ *
+ * Only the FIRST queued write per entry is presented. The rest are chained
+ * behind it, and each one's token is the transaction of the one in front --
+ * which is a token the server can only agree with after it has accepted that
+ * one. Replay is a single batch with no answers in it, so there is nowhere for
+ * that agreement to happen; the followers go out afterwards, through the pump,
+ * one answer at a time.
+ */
+export const presenting = async (
+  items: Entry[],
+  queue: Queue,
+  bytes: Store,
+): Promise<Submitted[]> => {
+  const led = new Set<Id>();
+  const presented: Submitted[] = [];
+  for (const item of items) {
+    if (isWrite(item.request as Submitted)) {
+      if (led.has(item.request.id)) continue;
+      led.add(item.request.id);
+    }
+    presented.push(
+      isElided(item.request)
+        ? {
+            ...(item.request as Elided),
+            content: { type: "text", content: await textOf(item, queue, bytes) },
+          }
+        : (item.request as Submitted),
+    );
+  }
+  return presented;
+};
