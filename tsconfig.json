@@ -18,6 +18,7 @@
     "types": []
   },
   "include": [
-    "release/frontend/**/*.ts"
+    "release/frontend/**/*.ts",
+    "wsfs_suede.python-web-kernel-suede/**/*.ts"
   ]
 }

@@ -55,7 +55,8 @@ export class Open {
       this.paths = [...this.workspace.index().paths()].sort();
       this.revision += 1;
     });
-    if (provides) Editor.provideFiles(provider(this.workspace), { searchRoot: "" });
+    if (provides)
+      Editor.provideFiles(provider(this.workspace), { searchRoot: "" });
   }
 
   edit(path: string) {
@@ -76,7 +77,8 @@ export class Open {
     // rule -- it does not know a buffer exists -- so it is made here.
     const trusting: Workspace = {
       ...this.workspace,
-      holding: (path) => this.buffers.holding(path) ?? this.workspace.holding(path),
+      holding: (path) =>
+        this.buffers.holding(path) ?? this.workspace.holding(path),
     };
     this.#kernel ??= new Kernel({
       fs: fs.readWrite({ ...filesystem(trusting), root: ROOT }),

@@ -9,3 +9,4 @@ export const pointAsRect = (x: number, y: number) => ({
   x,
   y,
 });
+

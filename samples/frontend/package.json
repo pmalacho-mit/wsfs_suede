@@ -25,6 +25,8 @@
     "vite": "^8.2.1"
   },
   "dependencies": {
+    "@liveblocks/client": "^3.24.1",
+    "@liveblocks/yjs": "^3.24.1",
     "@pierre/theme": "^1.1.0",
     "@pierre/trees": "^1.0.0-beta.6",
     "dockview": "^8.1.0",

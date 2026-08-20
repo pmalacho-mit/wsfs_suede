@@ -169,6 +169,8 @@
   type Path = string;
   /** An entry as anybody outside needs it: what it is, and where it is now. */
   export type Entry = { id: Id; path: Path };
+  export type Directory = Entry & { children: Entry[] };
+  export type Snapshot = Directory["children"]; // snapshot is from root
 
   /**
    * The tree's filesystem, announced.
@@ -252,7 +254,8 @@
      * user is.
      */
     select(entry: Id | undefined): void {
-      if (entry === undefined) return this.#quietly(() => this.tree.selection.clear());
+      if (entry === undefined)
+        return this.#quietly(() => this.tree.selection.clear());
       const path = this.mapping.at(entry);
       if (path === undefined || this.tree.selection.has(path)) return;
       this.#quietly(() => this.tree.selection.only(path));

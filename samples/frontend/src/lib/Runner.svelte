@@ -7,10 +7,12 @@
    * of siblings nobody has saved by hand.
    */
   import { snippets, type Output } from "wsfs_suede.python-web-kernel-suede";
+  import type { KernelPool, SharedTextFile } from "./Workspace.svelte";
 
-  import type { Open } from "$lib/workspace.svelte";
-
-  let { workspace, path }: { workspace: Open; path: string } = $props();
+  let {
+    kernelPool,
+    shared,
+  }: { kernelPool: KernelPool; shared: SharedTextFile } = $props();
 
   let outputs = $state<Output.Specific[]>([]);
   let running = $state<{ interrupt: () => void } | undefined>(undefined);
@@ -20,35 +22,37 @@
     if (running) return;
     failure = undefined;
     outputs = [];
-    const code = await workspace.workspace.read(path);
-    if (code === undefined || code.kind !== "text") {
-      failure = `Nothing to run in ${path}`;
-      return;
-    }
-    const job = workspace.kernel().run({
-      code: code.text,
-      path,
-      on: { output: (output) => (outputs = [...outputs, output]) },
+
+    kernelPool.use(async (kernel) => {
+      const job = kernel.run({
+        code: shared.source,
+        path: shared.file.path,
+        on: { output: (output) => (outputs = [...outputs, output]) },
+      });
+      running = job;
+      try {
+        await job.result;
+      } catch (reason) {
+        failure = reason instanceof Error ? reason.message : String(reason);
+      } finally {
+        running = undefined;
+      }
     });
-    running = job;
-    try {
-      await job.result;
-    } catch (reason) {
-      failure = reason instanceof Error ? reason.message : String(reason);
-    } finally {
-      running = undefined;
-    }
   };
 </script>
 
 <section class="runner">
   <header>
-    <button onclick={run} disabled={!!running}>{running ? "Running…" : "Run"}</button>
+    <button onclick={run} disabled={!!running}
+      >{running ? "Running…" : "Run"}</button
+    >
     {#if running}
       <button onclick={() => running?.interrupt()}>Stop</button>
     {/if}
-    <button onclick={() => (outputs = [])} disabled={outputs.length === 0}>Clear</button>
-    <span class="path">{path}</span>
+    <button onclick={() => (outputs = [])} disabled={outputs.length === 0}
+      >Clear</button
+    >
+    <span class="path">{shared.file.path}</span>
   </header>
   <output>
     {#each outputs as produced}
@@ -75,7 +79,10 @@
     padding: 0.35rem 0.5rem;
   }
   button {
-    font: 500 0.75rem/1 ui-sans-serif, system-ui, sans-serif;
+    font:
+      500 0.75rem/1 ui-sans-serif,
+      system-ui,
+      sans-serif;
     padding: 0.35rem 0.7rem;
     border: 1px solid var(--wsfs-line, #e5e7eb);
     border-radius: 6px;
@@ -88,14 +95,19 @@
   }
   .path {
     margin-left: auto;
-    font: 0.7rem/1 ui-monospace, monospace;
+    font:
+      0.7rem/1 ui-monospace,
+      monospace;
     color: var(--wsfs-muted, #6b7280);
   }
   output {
     display: block;
     overflow: auto;
     padding: 0.5rem 0.75rem 0.75rem;
-    font: 0.78rem/1.55 ui-monospace, SFMono-Regular, monospace;
+    font:
+      0.78rem/1.55 ui-monospace,
+      SFMono-Regular,
+      monospace;
     white-space: pre-wrap;
   }
   .failure {

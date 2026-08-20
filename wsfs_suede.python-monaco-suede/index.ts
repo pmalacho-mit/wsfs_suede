@@ -1,4 +1,7 @@
-import { default as EditorComponent } from "./Editor.svelte";
+import {
+  default as EditorComponent,
+  type Props as EditorProps,
+} from "./Editor.svelte";
 import { default as NotebookComponent } from "./Notebook.svelte";
 import { EditableFile } from "./models.svelte";
 import { Notebook as NotebookModel } from "./notebook/models.svelte";
@@ -29,10 +32,7 @@ export const DiagnosticFilter = {
   missingImports,
   missingStubs,
 };
-export type {
-  KernelFilesystem,
-  SyncFileProvider,
-} from "./kernel/filesystem";
+export type { KernelFilesystem, SyncFileProvider } from "./kernel/filesystem";
 
 type Registration = Pick<EditableFile, "path" | "source">;
 
@@ -89,6 +89,7 @@ export const Editor = {
 export namespace Editor {
   export type Model = EditableFile;
   export type Component = EditorComponent;
+  export type Props = EditorProps;
 }
 
 export const Notebook = {

@@ -6,31 +6,28 @@
  * arrive, and an open file is answered by its document rather than by anything
  * that was written down. What Python reads is what the editor shows.
  */
+import type {
+  FileSystem,
+  Contents,
+} from "../../../wsfs_suede.python-web-kernel-suede";
 import type { Metadata } from "../contract";
 import type { Path } from "../paths";
 import type { Workspace } from "../workspace";
-
-export type Contents = string | Uint8Array;
-
-export type Reading = {
-  get: (path: Path) => Promise<Contents | undefined | { directory: true }>;
-  listDirectory: (path: Path) => Promise<string[] | undefined>;
-  stat: (path: Path) => Promise<{ size: number; directory: boolean } | undefined>;
-};
-
-export type Writing = {
-  put: (path: Path, value: Contents | null) => Promise<void>;
-  move: (request: { from: Path; to: Path }) => Promise<void>;
-  delete: (path: Path) => Promise<void>;
-};
+import type { FileOverride } from ".";
 
 const DIRECTORY = { directory: true } as const;
 
 const sized = (held: Contents) =>
-  typeof held === "string" ? new TextEncoder().encode(held).byteLength : held.byteLength;
+  typeof held === "string"
+    ? new TextEncoder().encode(held).byteLength
+    : held.byteLength;
 
-export const filesystem = (workspace: Workspace): Reading & Writing => {
-  const entryAt = (path: Path): Metadata | undefined => workspace.index().at(path);
+export const filesystem = (
+  workspace: Workspace,
+  fileOverride?: FileOverride,
+): FileSystem.CreateReadWrite => {
+  const entryAt = (path: Path): Metadata | undefined =>
+    workspace.index().at(path);
 
   const contentsOf = async (path: Path): Promise<Contents | undefined> => {
     const held = (await workspace.read(path)) ?? undefined;
@@ -43,13 +40,16 @@ export const filesystem = (workspace: Workspace): Reading & Writing => {
       const entry = entryAt(path);
       if (entry === undefined) return undefined;
       if (entry.type === "folder") return DIRECTORY;
-      return contentsOf(path);
+      return fileOverride?.get(path) ?? contentsOf(path);
     },
 
     listDirectory: async (path) => {
       const holder = path === "" ? undefined : entryAt(path);
       if (path !== "" && holder?.type !== "folder") return undefined;
-      return workspace.index().under(path).map((entry) => entry.name);
+      return workspace
+        .index()
+        .under(path)
+        .map((entry) => entry.name);
     },
 
     /**
@@ -60,17 +60,26 @@ export const filesystem = (workspace: Workspace): Reading & Writing => {
       const entry = entryAt(path);
       if (entry === undefined) return undefined;
       if (entry.type === "folder") return { size: 0, directory: true };
+
+      const override = fileOverride?.get(path);
+      if (override !== undefined)
+        return { size: sized(override), directory: false };
+
       const held = workspace.holding(path);
       return held === undefined
         ? undefined
-        : { size: sized(held.kind === "text" ? held.text : held.bytes), directory: false };
+        : {
+            size: sized(held.kind === "text" ? held.text : held.bytes),
+            directory: false,
+          };
     },
 
     put: async (path, value) => {
       // The filesystem's caller waits for the server's answer, because a
       // script that writes a file and reads it back expects to be told.
       if (value === null) await workspace.folder(path).settled;
-      else await workspace.write(path, value).settled;
+      else if (typeof value === "string" && fileOverride?.put(path, value)) {
+      } else await workspace.write(path, value).settled;
     },
 
     move: async ({ from, to }) => void (await workspace.move(from, to).settled),

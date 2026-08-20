@@ -76,6 +76,10 @@ export namespace FileSystem {
     /** Delete a path from the filesystem. */
     delete?: Delete;
   };
+
+  export type CreateReadWrite = FileSystem.Read &
+    FileSystem.Write &
+    FileSystem.CreationOptions;
 }
 
 /**
@@ -244,7 +248,7 @@ export const writeOnly = (
 
 /** Create a read-write filesystem facade by composing read-only and write-only adapters. */
 export const readWrite = (
-  options: FileSystem.Read & FileSystem.Write & FileSystem.CreationOptions,
+  options: FileSystem.CreateReadWrite,
   base?: RootedFileSystem,
 ): RootedFileSystem => {
   setDefaults(options);

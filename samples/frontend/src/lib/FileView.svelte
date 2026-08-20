@@ -8,59 +8,64 @@
    */
   import type { IDockviewPanelProps } from "dockview";
 
-  import Editor from "$lib/Editor.svelte";
+  import { Editor } from "wsfs_suede.python-monaco-suede";
   import Preview from "$lib/Preview.svelte";
   import Runner from "$lib/Runner.svelte";
-  import type { Held } from "$wsfs";
-  import type { Open } from "$lib/workspace.svelte";
+  import type { Workspace } from "$wsfs";
+  import type { KernelPool, OpenFile } from "./Workspace.svelte";
+  import type { Payload } from "../../../../release/frontend/content";
+  import { onMount } from "svelte";
 
-  type Params = { workspace: Open; path: string };
+  type Params = {
+    opened: OpenFile;
+    workspace: Workspace;
+    kernelPool: KernelPool;
+  };
 
   let { params }: IDockviewPanelProps<Params> = $props();
-  const workspace = $derived(params.workspace);
-  const path = $derived(params.path);
 
-  let held = $state<Held | undefined>(undefined);
+  let binary = $state<Extract<Payload, { kind: "binary" }>>();
 
-  const runnable = $derived(path.endsWith(".py"));
+  const read = () => {
+    params.workspace.read(params.opened.path).then((content) => {
+      if (!content) return;
+      if (content.kind === "text") params.opened.share();
+      else binary = content;
+    });
+  };
 
-  /**
-   * Whether the workspace holds this path at all, which is a different
-   * question from whether its content can be read yet. A panel is opened the
-   * moment a file is created, and reading a path the workspace does not have
-   * throws -- so presence is what gates the read, and what "no such file"
-   * actually means.
-   */
-  const present = $derived(workspace.paths.includes(path));
-
-  // Re-read while there is nothing in hand: content arrives on its own event,
-  // after the entry does, and one attempt would land between the two.
   $effect(() => {
-    if (held !== undefined) return;
-    void workspace.revision;
-    if (!present) return;
-    let current = true;
-    void workspace.workspace
-      .read(path)
-      .then((content) => current && content && (held = content))
-      .catch(() => undefined);
-    return () => (current = false);
+    const {
+      opened: { sharedText, id },
+      workspace,
+    } = params;
+
+    if (sharedText) return; // shared text can't become binary
+    return workspace.watch((changes) => {
+      if (changes.some(({ kind, entry }) => entry === id && kind === "written"))
+        read();
+    });
   });
+
+  onMount(read);
+
+  let runnable = $derived(params.opened.path.endsWith(".py"));
 </script>
 
-{#if !present}
-  <p class="note">No such file: {path}</p>
-{:else if !held}
-  <p class="note">Opening {path}…</p>
-{:else if held.kind === "binary"}
-  <Preview {path} {held} />
-{:else}
+{#if binary}
+  <Preview path={params.opened.path} held={binary} />
+{:else if params.opened.sharedText}
   <div class="text" class:runnable>
-    <Editor {workspace} {path} />
+    <Editor.Component file={params.opened.sharedText.file} />
     {#if runnable}
-      <Runner {workspace} {path} />
+      <Runner
+        kernelPool={params.kernelPool}
+        shared={params.opened.sharedText}
+      />
     {/if}
   </div>
+{:else}
+  <p class="note">Opening {params.opened.path}…</p>
 {/if}
 
 <style>
@@ -74,7 +79,10 @@
     grid-template-rows: 1fr minmax(7rem, 30%);
   }
   .note {
-    font: 0.85rem/1.6 ui-sans-serif, system-ui, sans-serif;
+    font:
+      0.85rem/1.6 ui-sans-serif,
+      system-ui,
+      sans-serif;
     color: var(--wsfs-muted, #6b7280);
     padding: 1rem;
   }
