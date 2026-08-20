@@ -137,6 +137,25 @@ minted at page load. One client = one transaction counter = one outbox queue
 drafts to distinguish "this session already rendered this optimistically"
 from "survived a reload, definitely not reflected in the UI."
 
+**Occurrence** — when one transaction happened, in *both* clocks that saw it:
+`{minted?, offset?, accepted}`. `minted` is the client's, and it is when the
+user acted; `accepted` is the server's, and it is when the change entered the
+workspace. An offline week puts days between them, so neither is the other's
+approximation, and the server's is the one to trust when a client's clock is
+wrong.
+
+`minted` is never sent. A transaction id is a UUIDv7 minted the moment the
+user acts, so the millisecond is already in the primary key and the server
+reads it back out — and since every version token *is* such an id, the
+client-side time of any one property change is derivable client-side with
+nothing on the wire. `offset` is the one part that cannot be derived: a v7's
+timestamp is an *instant*, identical in Cupertino and in Berlin, so it says
+nothing about the clock the user was reading. It travels on each **request**
+rather than on the connection, because an outbox filled offline in one zone
+may only be replayed after landing in another, and each item has to keep its
+own. An entry's metadata carries the occurrence of its newest change as
+`modified`; a stream event carries its transaction's as `at`.
+
 **Position** — the server-internal, per-workspace, monotonic stream position.
 Orders the event stream and anchors tokens. *Never client-visible.*
 

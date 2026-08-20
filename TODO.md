@@ -68,7 +68,12 @@ is a worked example. What remains:
 [ ] alembic baseline from SQLModel.metadata. Deliberately not started yet:
     where it lives depends on §1 -- migrations are a deployment concern, and
     release/ is heading towards holding none. Worth doing before any real
-    data exists. `create_all` is already opt-in (tests only)
+    data exists. `create_all` is already opt-in (tests only).
+    For whoever writes it: `utc_offset` is declared on the abstract
+    TransactionRow, so it lands on all FIVE logs -- wsfs_names,
+    wsfs_parentage, wsfs_deletions, wsfs_text_content, wsfs_blob_content.
+    Nullable, no default: "the client did not say" is a real answer and not
+    the same as UTC
 ```
 
 ## 3. Blobs to object storage

@@ -110,10 +110,30 @@ class TransactionRow(Minted, Positioned, WithTime, IsAbstractClass):
     Finding a client's transaction id here is the whole of dedup: the change
     it names already happened, so presenting it again is answered rather than
     applied a second time. It is also the property's current CAS token.
+
+    TWO CLOCKS, ONE NEW COLUMN. `timestamp`, from `WithTime`, is this server's
+    -- stamped as the row is applied, and the only time here anybody has a
+    reason to believe. The client's is already in `id`: a UUIDv7 carries the
+    millisecond it was minted, which is the moment the user acted, and
+    `minted.minted_at` reads it back out. Storing that in a column beside the
+    primary key would be storing the key's own contents twice, where the two
+    can drift. What is genuinely NOT derivable is which clock the client was
+    reading, and that is the one thing added below.
     """
 
     entry_id: ID
     user_id: ID
+
+    utc_offset: int | None = Field(default=None, nullable=True)
+    """The client's minutes east of UTC when it minted `id`, or null if it did
+    not say.
+
+    Not a timezone name. A name would survive a rule change -- Samoa crossing
+    the date line, a country abolishing DST -- and would be the better thing to
+    store for a time still to come. This is a past one, and for a past instant
+    the offset IS the answer: it is what the clock said, whatever any database
+    of rules later decides it should have said.
+    """
 
 
 class NameRow(TransactionRow, IsAbstractClass):

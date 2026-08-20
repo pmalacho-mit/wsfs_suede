@@ -20,6 +20,7 @@ import {
 } from "./contract";
 import * as effective from "./effective";
 import { mint } from "./identity";
+import { offset } from "./minted";
 import * as loop from "./loop";
 import * as outbox from "./outbox";
 import * as paths from "./paths";
@@ -146,6 +147,12 @@ export const connect = (options: Options): Workspace => {
   };
 
   /**
+   * The offset is stamped HERE rather than at each mint, so that every
+   * transaction this client sends carries one and none can be forgotten. It is
+   * per-transaction and not per-connection because an outbox filled offline in
+   * one zone may only be replayed after landing in another -- see
+   * `Transacted.offset` on the wire.
+   *
    * Queued work leaves the outbox when the STREAM carries it, not when the
    * response acknowledges it -- those are different moments, and dropping it
    * at the first one opens a window where the entry is in neither the outbox
@@ -154,10 +161,11 @@ export const connect = (options: Options): Workspace => {
    * is the one this evicts itself.
    */
   const submit = async (
-    request: Submitted,
+    submitted: Submitted,
     payload?: string | Uint8Array,
     mime = TEXT,
   ): Promise<Response> => {
+    const request = { ...submitted, offset: offset() };
     const digest = payload === undefined ? undefined : await bytes.put(payload);
     queue.capture(request, digest);
     if (payload !== undefined)

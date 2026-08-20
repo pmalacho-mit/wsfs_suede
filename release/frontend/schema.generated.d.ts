@@ -58,10 +58,12 @@ export interface paths {
         /**
          * Store
          * @description Under a workspace because that is the only question a host's
-         *     `authorize` can answer. The bytes themselves are stored once for the
-         *     deployment and named by their hash -- two workspaces holding the same
-         *     file hold one copy -- but somebody who may reach no workspace at all
-         *     may not fill the deployment's disk either.
+         *     `authorize` can answer -- which is also why the id appears in the path
+         *     and not in this signature: the host's dependency is what reads it. The
+         *     bytes themselves are stored once for the deployment and named by their
+         *     hash -- two workspaces holding the same file hold one copy -- but
+         *     somebody who may reach no workspace at all may not fill the
+         *     deployment's disk either.
          */
         put: operations["store_wsfs_workspaces__workspace_id__blobs__digest__put"];
         post?: never;
@@ -142,6 +144,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Offset */
+            offset?: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -167,6 +171,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Offset */
+            offset?: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -241,6 +247,7 @@ export interface components {
             deleted_version: string;
             /** Content Version */
             content_version?: string | null;
+            modified: components["schemas"]["Occurrence"];
         };
         /**
          * Move
@@ -262,6 +269,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Offset */
+            offset?: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -292,6 +301,25 @@ export interface components {
             /** Parent */
             parent?: string | null;
         };
+        /**
+         * Occurrence
+         * @description When one transaction happened, in both clocks that saw it.
+         *
+         *     Two clocks because they answer different questions and disagree for honest
+         *     reasons. `minted` is the client's, and it is when the USER acted -- which,
+         *     after a week offline, is the only one that means anything to them. `accepted`
+         *     is this server's, and it is when the change entered the workspace and became
+         *     something other clients could see. An offline session makes the gap between
+         *     them days wide, and neither number is the other's approximation.
+         */
+        Occurrence: {
+            /** Minted */
+            minted?: string | null;
+            /** Offset */
+            offset?: number | null;
+            /** Accepted */
+            accepted: string | null;
+        };
         /** Rejection */
         Rejection: {
             /**
@@ -316,6 +344,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Offset */
+            offset?: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -341,6 +371,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Offset */
+            offset?: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -409,6 +441,7 @@ export interface components {
             value?: components["schemas"]["Metadata"] | components["schemas"]["Moved"] | string | boolean | null;
             /** User */
             user?: string | null;
+            at: components["schemas"]["Occurrence"];
         };
         /** TextBody */
         TextBody: {
@@ -450,6 +483,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Offset */
+            offset?: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -579,7 +614,6 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                workspace_id: string;
                 digest: string;
             };
             cookie?: never;

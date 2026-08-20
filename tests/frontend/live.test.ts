@@ -11,7 +11,7 @@
 import { beforeAll, expect, it } from "vitest";
 
 import { connect, inMemory, type Workspace } from "../../release/frontend";
-import { mint } from "../../release/frontend/identity";
+import { accepted, localised, offset } from "../../release/frontend/minted";
 import { describeLive, project, reachable, transport } from "./backend";
 
 const settled = (workspace: Workspace, holds: () => boolean, within = 5_000) =>
@@ -82,6 +82,45 @@ describeLive("a workspace against a live backend", () => {
     await settled(workspace, () => workspace.index().at("doomed.py") === undefined);
 
     expect(workspace.index().paths()).not.toContain("doomed.py");
+  });
+
+  it("times a change in both clocks, and in the zone it was made in", async () => {
+    // The only place the two halves meet for real: this client derives the
+    // client instant from the id it minted, the server derives the same one
+    // from the same id, and the offset is the single thing that travelled.
+    const before = Date.now();
+    await workspace.create("timed.py", "x").settled;
+    await settled(workspace, () => {
+      const entry = workspace.index().at("timed.py");
+      return entry !== undefined && entry.modified.accepted !== null;
+    });
+
+    const entry = workspace.index().at("timed.py")!;
+    const local = localised(entry.modified)!;
+
+    expect(local.instant.getTime()).toBeGreaterThanOrEqual(before - 1);
+    expect(local.zoned).toBe(true);
+    expect(local.offset).toBe(offset());
+    // The server's clock is its own, and it saw this after the client did.
+    expect(accepted(entry.modified)!.getTime()).toBeGreaterThanOrEqual(
+      local.instant.getTime(),
+    );
+  });
+
+  it("keeps each queued item's own zone when an outbox is replayed", async () => {
+    // Somebody works in one zone and reconnects in another. The offset rides
+    // on the transaction, so the server records what each item was made in
+    // rather than where the connection happened to be.
+    const id = await project();
+    const moved = connect({ workspace: id, transport: transport(), bytes: inMemory() });
+    await settled(moved, () => true);
+
+    await moved.create("packed.py", "x");
+    await settled(moved, () => moved.index().at("packed.py") !== undefined);
+
+    const entry = moved.index().at("packed.py")!;
+    expect(entry.modified.offset).toBe(offset());
+    moved.stop();
   });
 
   it("shows one client the work of another", async () => {

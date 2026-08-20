@@ -14,6 +14,7 @@ export type Version = string;
 export type Transaction = string;
 
 export type Metadata = Schemas["Metadata"];
+export type Occurrence = Schemas["Occurrence"];
 export type Type = Schemas["Type"];
 export type Seen = Schemas["Seen"];
 

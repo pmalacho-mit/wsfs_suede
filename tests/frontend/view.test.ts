@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import * as confirmed from "../../release/frontend/confirmed";
-import type { Metadata, StreamEvent } from "../../release/frontend/contract";
+import type { Metadata, Occurrence, StreamEvent } from "../../release/frontend/contract";
 import * as effective from "../../release/frontend/effective";
 import { mint } from "../../release/frontend/identity";
+import { mintedAt } from "../../release/frontend/minted";
 import { inMemory } from "../../release/frontend";
 import { queue } from "../../release/frontend/outbox";
+
+/** A server-accepted moment. These fixtures are about what changes, not when. */
+const SETTLED = new Date("2026-01-01T00:00:00Z").toISOString();
+
+/** Every event announces a transaction, and every transaction happened. */
+const announced = (transaction: string): Occurrence => ({
+  minted: mintedAt(transaction)!.toISOString(),
+  accepted: SETTLED,
+});
 
 const entry = (over: Partial<Metadata> = {}): Metadata => {
   const born = mint();
@@ -18,6 +28,7 @@ const entry = (over: Partial<Metadata> = {}): Metadata => {
     parent_version: born,
     deleted_version: born,
     content_version: born,
+    modified: { minted: mintedAt(born)!.toISOString(), accepted: SETTLED },
     ...over,
   };
 };
@@ -32,11 +43,13 @@ describe("the confirmed map", () => {
 
   it("advances the token of whichever property an event announced", () => {
     const file = entry();
+    const naming = mint();
     const renaming: StreamEvent = {
       type: "name",
       id: file.id,
-      transaction: mint(),
+      transaction: naming,
       value: "b.py",
+      at: announced(naming),
     };
 
     const after = confirmed.applied(confirmed.snapshot([file]), renaming);
@@ -51,11 +64,13 @@ describe("the confirmed map", () => {
   it("applies a move to both halves at once", () => {
     const file = entry();
     const folder = mint();
+    const moved = mint();
     const moving: StreamEvent = {
       type: "move",
       id: file.id,
-      transaction: mint(),
+      transaction: moved,
       value: { name: "b.py", parent: folder },
+      at: announced(moved),
     };
 
     const after = confirmed.applied(confirmed.snapshot([file]), moving);
@@ -71,11 +86,13 @@ describe("the confirmed map", () => {
   it("leaves a caller's previous map alone", () => {
     const file = entry();
     const before = confirmed.snapshot([file]);
+    const naming = mint();
     confirmed.applied(before, {
       type: "name",
       id: file.id,
-      transaction: mint(),
+      transaction: naming,
       value: "b.py",
+      at: announced(naming),
     });
     expect(before.get(file.id)!.name).toBe("a.py");
   });

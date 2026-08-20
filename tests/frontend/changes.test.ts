@@ -147,7 +147,7 @@ describe("what a workspace says changed", () => {
     });
   });
 
-  it("says nothing when the server confirms work this client already showed", async () => {
+  it("says only that it landed when the server confirms this client's own work", async () => {
     await attach();
     const created = workspace.create("a.py", "hello");
     await settle();
@@ -162,9 +162,13 @@ describe("what a workspace says changed", () => {
     });
     await settle();
 
-    // The overlay's removal and the confirmed value cancel exactly. A
-    // consumer that acted on this would be undoing and redoing its own work.
-    expect(seen).toEqual([]);
+    // The overlay's removal and the confirmed value cancel exactly, so
+    // nothing describes the file as having changed -- a consumer acting on
+    // that would be undoing and redoing its own work. What IS said is that
+    // the work landed, which no value can say and something has to.
+    expect(seen).toEqual([
+      { kind: "accepted", entry: created.entry, by: created.transaction },
+    ]);
     expect(workspace.index().paths()).toEqual(["a.py"]);
   });
 

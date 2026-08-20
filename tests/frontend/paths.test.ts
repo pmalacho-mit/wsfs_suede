@@ -4,7 +4,11 @@ import * as confirmed from "../../release/frontend/confirmed";
 import type { Metadata } from "../../release/frontend/contract";
 import * as effective from "../../release/frontend/effective";
 import { mint } from "../../release/frontend/identity";
+import { mintedAt } from "../../release/frontend/minted";
 import { index } from "../../release/frontend/paths";
+
+/** A server-accepted moment. These fixtures are about what changes, not when. */
+const SETTLED = new Date("2026-01-01T00:00:00Z").toISOString();
 
 const at = (name: string, over: Partial<Metadata> = {}): Metadata => {
   const born = mint();
@@ -17,6 +21,7 @@ const at = (name: string, over: Partial<Metadata> = {}): Metadata => {
     parent_version: born,
     deleted_version: born,
     content_version: born,
+    modified: { minted: mintedAt(born)!.toISOString(), accepted: SETTLED },
     ...over,
   };
 };

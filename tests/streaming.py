@@ -50,6 +50,8 @@ async def test_a_create_event_carries_the_whole_entry_and_its_tokens(api: Api):
         "name_version": born,
         "parent_version": born,
         "deleted_version": born,
+        # A birth is one transaction, so the entry's mtime is that transaction.
+        "modified": event["at"],
     }
 
 
@@ -73,7 +75,7 @@ async def test_a_write_event_is_a_pure_invalidation_signal(api: Api):
         acknowledged(await api.write(file, await content_version(api, file), "secret"))
         event = (await heard.until(1))[0]
 
-    assert set(event) == {"type", "id", "transaction", "user"}
+    assert set(event) == {"type", "id", "transaction", "user", "at"}
     assert "secret" not in str(event)
     assert event["transaction"] == await content_version(api, file)
 
@@ -113,6 +115,7 @@ async def test_a_deduping_rename_reaches_the_client_as_an_ordinary_name_event(ap
         "transaction": events[1]["transaction"],
         "value": "notes (2).md",
         "user": events[0]["user"],
+        "at": events[1]["at"],
     }
     assert events[1]["transaction"] != events[0]["transaction"]
 

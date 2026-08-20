@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import datetime
+from operator import itemgetter
 from typing import Any, NamedTuple, final
 from uuid import UUID
 
@@ -22,7 +24,8 @@ from sqlalchemy.orm import aliased
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from .contract import Kind, Metadata
+from .contract import Kind, Metadata, Occurrence
+from .minted import minted_at
 from .models import (
     ContentRow,
     DeletionRow,
@@ -36,6 +39,20 @@ from .models import (
 
 BEFORE_ANY_POSITION = 0
 
+
+def occurred(transaction: UUID, offset: int | None, accepted: datetime) -> Occurrence:
+    """Both clocks that saw one transaction, from the three things a row holds.
+
+    Taken apart rather than taking a row, because content reaches this through
+    a union of two logs and arrives as columns rather than as an object.
+    """
+    return Occurrence(minted=minted_at(transaction), offset=offset, accepted=accepted)
+
+
+def occurrence_of(row: TransactionRow) -> Occurrence:
+    return occurred(row.id, row.utc_offset, row.timestamp)
+
+
 Lookup = Callable[[UUID], Awaitable["Node | None"]]
 """How a walk asks for one entry -- so a caller can answer from what it knows."""
 
@@ -48,6 +65,7 @@ class Held:
     version: UUID
     position: int
     kind: Kind
+    at: Occurrence
 
 
 @final
@@ -64,6 +82,8 @@ class Node:
     deleted: bool
     deleted_version: UUID
     content: Held | None
+    modified: Occurrence
+    """Whichever of the four rows above landed last -- the entry's mtime."""
 
     @property
     def id(self) -> UUID:
@@ -93,6 +113,7 @@ class Node:
             parent_version=self.parent_version,
             deleted_version=self.deleted_version,
             content_version=self.content_version,
+            modified=self.modified,
         )
 
 
@@ -105,8 +126,35 @@ class Namespace(NamedTuple):
     deletion: type[DeletionRow]
 
 
+def modified_of(
+    name: NameRow,
+    parent: ParentRow,
+    deletion: DeletionRow,
+    content: Held | None,
+) -> Occurrence:
+    """Of the rows that currently place an entry, when the last of them landed.
+
+    By position, because position is what orders a workspace -- not by either
+    clock. A client's is not trusted enough to sort by, and the server's is
+    only as fine as the machine's, so two transactions applied inside one
+    microsecond could tie. The choke point already answered this question.
+
+    A tie is not a problem when it happens: rows sharing a position share a
+    transaction, so they share an occurrence too.
+    """
+    landed = [(row.position, occurrence_of(row)) for row in (name, parent, deletion)]
+    if content is not None:
+        landed.append((content.position, content.at))
+    return max(landed, key=itemgetter(0))[1]
+
+
 def node_of(row: Row[Any]) -> Node:
-    entry, name, parent, deletion, version, position, kind = row
+    entry, name, parent, deletion, version, position, kind, accepted, offset = row
+    content = (
+        None
+        if version is None
+        else Held(version, position, Kind(kind), occurred(version, offset, accepted))
+    )
     return Node(
         entry=entry,
         name=name.name,
@@ -116,7 +164,8 @@ def node_of(row: Row[Any]) -> Node:
         parent_version=parent.id,
         deleted=deletion.deleted,
         deleted_version=deletion.id,
-        content=None if version is None else Held(version, position, Kind(kind)),
+        content=content,
+        modified=modified_of(name, parent, deletion, content),
     )
 
 
@@ -189,6 +238,8 @@ class Tree:
                     col(log.id).label("version"),
                     col(log.position).label("position"),
                     literal(kind.value).label("kind"),
+                    col(log.timestamp).label("accepted"),
+                    col(log.utc_offset).label("offset"),
                 )
                 .join(entry, col(entry.id) == col(log.entry_id))
                 .where(col(entry.workspace_id) == workspace_id)
@@ -200,7 +251,14 @@ class Tree:
             written(self.models.blob_content, Kind.BINARY),
         ).subquery()
         return (
-            select(both.c.entry_id, both.c.version, both.c.position, both.c.kind)
+            select(
+                both.c.entry_id,
+                both.c.version,
+                both.c.position,
+                both.c.kind,
+                both.c.accepted,
+                both.c.offset,
+            )
             .distinct(both.c.entry_id)
             .order_by(both.c.entry_id, both.c.position.desc())
             .subquery()
@@ -210,7 +268,11 @@ class Tree:
         placed = self._namespace(workspace_id, entry_id)
         content = self._newest_content(workspace_id, entry_id)
         return placed.statement.add_columns(
-            content.c.version, content.c.position, content.c.kind
+            content.c.version,
+            content.c.position,
+            content.c.kind,
+            content.c.accepted,
+            content.c.offset,
         ).outerjoin(content, content.c.entry_id == self.models.entry.id)
 
     # -- reading it ------------------------------------------------------------
