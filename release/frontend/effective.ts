@@ -23,11 +23,10 @@ import type {
   Occurrence,
   Rename,
   Reparent,
-  Submitted,
   Transaction,
 } from "./contract";
 import { mintedAt } from "./minted";
-import type { Entry } from "./outbox";
+import type { Entry, Held } from "./outbox";
 
 export type View = ReadonlyMap<Id, Metadata>;
 
@@ -59,7 +58,7 @@ export type Effective = {
  * entry underneath carries a real `accepted` -- so the null resolves by the
  * same cancellation that makes every other optimistic change stop flickering.
  */
-const pending = (request: Submitted): Occurrence => ({
+const pending = (request: Held): Occurrence => ({
   minted: mintedAt(request.transaction)?.toISOString() ?? null,
   offset: request.offset ?? null,
   accepted: null,
@@ -78,7 +77,7 @@ const pending = (request: Submitted): Occurrence => ({
  */
 type Overlay = {
   touches: readonly Property[];
-  apply: (entry: Metadata, request: Submitted) => Metadata;
+  apply: (entry: Metadata, request: Held) => Metadata;
 };
 
 const OVERLAYS: Record<string, Overlay> = {

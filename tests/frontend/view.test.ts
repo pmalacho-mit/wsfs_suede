@@ -5,7 +5,6 @@ import type { Metadata, Occurrence, StreamEvent } from "../../release/frontend/c
 import * as effective from "../../release/frontend/effective";
 import { mint } from "../../release/frontend/identity";
 import { mintedAt } from "../../release/frontend/minted";
-import { inMemory } from "../../release/frontend";
 import { queue } from "../../release/frontend/outbox";
 
 /** A server-accepted moment. These fixtures are about what changes, not when. */
@@ -101,7 +100,7 @@ describe("the confirmed map", () => {
 describe("the effective view", () => {
   it("shows queued work before the server has answered", () => {
     const file = entry();
-    const items = queue(inMemory());
+    const items = queue();
     items.capture({
       op: "rename",
       transaction: mint(),
@@ -117,7 +116,7 @@ describe("the effective view", () => {
 
   it("shows an entry that exists nowhere but the queue", () => {
     const id = mint();
-    const items = queue(inMemory());
+    const items = queue();
     items.capture({
       op: "create",
       transaction: mint(),
@@ -135,7 +134,7 @@ describe("the effective view", () => {
 
   it("snaps back when the queue drops the work, with nothing to undo", () => {
     const file = entry();
-    const items = queue(inMemory());
+    const items = queue();
     const request = {
       op: "rename" as const,
       transaction: mint(),

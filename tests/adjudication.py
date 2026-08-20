@@ -1,5 +1,7 @@
 """Every typed refusal the contract names, and the ones it does not."""
 
+import asyncio
+
 from conftest import (
     Api,
     meta,
@@ -366,3 +368,43 @@ async def test_a_move_may_not_swallow_its_own_subtree(api: Api):
         )
     )
     assert refusal["reason"] == "the destination is inside the entry"
+
+
+async def test_a_write_on_a_token_another_write_replaced_is_refused(api: Api):
+    """The compare-and-swap on content, at its plainest.
+
+    Worth stating on its own because the refusal carries the token to rebase
+    onto, and a client with nothing to rebase from would rather be told it
+    lost than be quietly overwritten.
+    """
+    file = await created(api, "notes.md")
+    token = await content_version(api, file)
+
+    acknowledged(await api.write(file, token, "one"))
+    refusal = refused(await api.write(file, token, "two"))
+
+    assert refusal["reason"] == "content was already updated"
+    assert refusal["version"] == await content_version(api, file)
+    assert (await api.content(file)).json()["content"] == "one"
+
+
+async def test_two_writes_in_flight_at_once_do_not_both_land(api: Api):
+    """Both sent before either is answered, which is what a debounced save
+    and an explicit one look like when they arrive together.
+
+    The controller serialises writes, so one has to lose -- and it has to
+    lose by being REFUSED. Applying both and keeping whichever arrived last
+    would make the outcome depend on scheduling.
+    """
+    file = await created(api, "racing.md")
+    token = await content_version(api, file)
+
+    first, second = await asyncio.gather(
+        api.write(file, token, "one"),
+        api.write(file, token, "two"),
+    )
+
+    assert sorted(response.json()["rejected"] for response in (first, second)) == [
+        False,
+        True,
+    ]

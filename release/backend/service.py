@@ -856,7 +856,7 @@ async def _content_row(
         entry_id=entry_id,
         size=len(body.content.encode()),
         mime="text/plain",
-        delta=diff_to_delta(base, body.content),
+        delta=diff_to_delta(base, after=body.content),
         **stamp,
     )
 

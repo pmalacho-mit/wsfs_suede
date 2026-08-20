@@ -25,6 +25,15 @@ export { mint, session } from "./identity";
 export { mintedAt, localised, accepted, offset, reading, written } from "./minted";
 export type { Reading } from "./minted";
 export { inMemory, digestOf } from "./bytes";
+
+/**
+ * Text diffing, as the outbox uses it to store a chained write as an edit
+ * script rather than another copy of the file -- and as a consumer holding a
+ * CRDT document needs it, to turn "the file now says this" into the smallest
+ * set of edits that makes it say that.
+ */
+export { deltaBetween, applyDelta, invertDelta, editsFor } from "./delta";
+export type { Delta, Operation, Edit } from "./delta";
 export type { Digest, Store } from "./bytes";
 
 export type { Payload as Held } from "./content";

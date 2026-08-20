@@ -89,7 +89,7 @@ describe("what a transaction carries about when it happened", () => {
   it("dates an outbox entry from the request rather than from the clock", async () => {
     // Two clock reads would be two answers to one question, and the one shown
     // here would be the one the server could never confirm.
-    const items = queue(inMemory());
+    const items = queue();
     const request: Submitted = {
       op: "rename",
       transaction: mint(),
@@ -102,7 +102,7 @@ describe("what a transaction carries about when it happened", () => {
   });
 
   it("still dates an entry whose id was not minted as a v7", async () => {
-    const items = queue(inMemory());
+    const items = queue();
     const request: Submitted = {
       op: "rename",
       transaction: "f3a2b1c0-1234-4567-89ab-cdef01234567",
@@ -130,7 +130,7 @@ describe("the mtime a client shows before the server has answered", () => {
 
   it("moves to the queued transaction, in the zone it was made in", () => {
     const file = born();
-    const items = queue(inMemory());
+    const items = queue();
     const request = rename(file);
     items.capture(request);
 
@@ -142,7 +142,7 @@ describe("the mtime a client shows before the server has answered", () => {
 
   it("says nobody has accepted it yet, and that is what null means", () => {
     const file = born();
-    const items = queue(inMemory());
+    const items = queue();
     items.capture(rename(file));
 
     const { view } = effective.of(confirmed.snapshot([file]), items.entries());
@@ -154,7 +154,7 @@ describe("the mtime a client shows before the server has answered", () => {
 
   it("moves for a write, which changes nothing else about an entry", () => {
     const file = born();
-    const items = queue(inMemory());
+    const items = queue();
     const writing = {
       op: "write" as const,
       transaction: mint(),
@@ -174,7 +174,7 @@ describe("the mtime a client shows before the server has answered", () => {
 
   it("snaps back to the confirmed mtime when the work is refused", () => {
     const file = born();
-    const items = queue(inMemory());
+    const items = queue();
     const request = rename(file);
     items.capture(request);
     const map = confirmed.snapshot([file]);
@@ -188,7 +188,7 @@ describe("the mtime a client shows before the server has answered", () => {
 
   it("gives a queued create an mtime of its own", () => {
     const id = mint();
-    const items = queue(inMemory());
+    const items = queue();
     const creating = {
       op: "create" as const,
       transaction: mint(),

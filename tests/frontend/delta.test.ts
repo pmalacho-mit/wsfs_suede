@@ -13,7 +13,7 @@ import {
   deltaBetween,
   editsFor,
   invertDelta,
-} from "../../samples/frontend/src/lib/delta";
+} from "../../release/frontend/delta";
 
 /** Applying the edits by hand, the way a Y.Text has them applied. */
 const edited = (base: string, delta: ReturnType<typeof deltaBetween>): string => {

@@ -24,11 +24,13 @@ const settled = (workspace: Workspace, holds: () => boolean, within = 5_000) =>
 
 describeLive("a workspace against a live backend", () => {
   let workspace: Workspace;
+  let id: string;
 
   beforeAll(async () => {
     if (!(await reachable())) throw new Error("WSFS_BACKEND is set but not answering");
+    id = await project();
     workspace = connect({
-      workspace: await project(),
+      workspace: id,
       transport: transport(),
       bytes: inMemory(),
     });
@@ -140,5 +142,41 @@ describeLive("a workspace against a live backend", () => {
     expect(await mine.read("shared.py")).toEqual({ kind: "text", text: "theirs" });
     mine.stop();
     theirs.stop();
+  });
+
+  /**
+   * The one this whole chain exists for.
+   *
+   * A consumer writing at the moments it cares about -- a debounce firing, an
+   * explicit save, a snapshot taken because the user asked a question -- can
+   * put several writes in the air before any of them is answered. Every one of
+   * them used to read the same content token, so the server correctly refused
+   * all but the first and the rest were dropped with the text still in them.
+   */
+  it("lands every write of a run against one file, in the order they were made", async () => {
+    await workspace.create("chained.py", "").settled;
+    await settled(workspace, () => workspace.index().at("chained.py") !== undefined);
+
+    const texts = ["one", "one\ntwo", "one\ntwo\nthree", "one\ntwo\nthree\nfour"];
+    const sent = texts.map((text) => workspace.write("chained.py", text));
+    const answers = await Promise.all(sent.map(({ settled }) => settled));
+
+    expect(answers.map((answer) => answer.rejected)).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
+
+    await settled(
+      workspace,
+      () =>
+        workspace.index().at("chained.py")?.content_version ===
+        sent[sent.length - 1]!.transaction,
+    );
+    expect(await workspace.read("chained.py")).toEqual({
+      kind: "text",
+      text: texts[texts.length - 1],
+    });
   });
 });

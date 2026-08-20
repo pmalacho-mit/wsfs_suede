@@ -1,7 +1,7 @@
 Client tests.
 
-`npx vitest run` on its own exercises logic only: the outbox's coalescing, the
-two state layers, the path index, the sync loop's timing. Nothing here needs a
+`npx vitest run` on its own exercises logic only: the outbox's write chains,
+the two state layers, the path index, the sync loop's timing. Nothing here needs a
 network, so it runs anywhere in under a second.
 
 Point it at a server and six more files wake up:

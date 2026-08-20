@@ -1,13 +1,23 @@
 <script lang="ts" module>
-  import { createClient } from "@liveblocks/client";
-  import { LiveblocksYjsProvider } from "@liveblocks/yjs";
+  import { createClient, type Status } from "@liveblocks/client";
+  import {
+    getYjsProviderForRoom,
+    type LiveblocksYjsProvider,
+  } from "@liveblocks/yjs";
   import * as Y from "yjs";
   import { Editor } from "wsfs_suede.python-monaco-suede";
   import { nameOf, holderOf } from "$lib/paths";
-  import { filesystem, MappedDebouncer, provider, type Workspace } from "$wsfs";
-  import { WithEvents } from "wsfs_suede.with-events-suede";
-  import { SvelteSet } from "svelte/reactivity";
-  import { deltaBetween, editsFor } from "$lib/delta";
+  import {
+    deltaBetween,
+    editsFor,
+    filesystem,
+    MappedDebouncer,
+    provider,
+    type Workspace,
+  } from "$wsfs";
+  import type { editor } from "monaco-editor";
+  import { UserEdits } from "./edits";
+  import { cleaner } from "./utils";
 
   type LiveblocksClient = ReturnType<typeof createClient>;
   type LiveblocksRoom = ReturnType<LiveblocksClient["enterRoom"]>;
@@ -18,46 +28,6 @@
     idleMs: 500,
     maxWaitMs: 2000,
   });
-
-  /** What the editor hands to `onEditor`, named once. */
-  type CodeEditor = Parameters<NonNullable<Editor.Props["onEditor"]>>[0];
-
-  /**
-   * Something a person did to a file, named.
-   *
-   * The editor reports that its model changed and says nothing about why, so
-   * this is assembled from the parts that DO say: a paste announces itself,
-   * undo and redo are flagged on the change, and what is left is read off the
-   * shape of the change -- text arriving, text going, or one swapped for the
-   * other. Downstream this is worth more than "it changed": it is what a log
-   * of a session is made of, and it is what tells a person's work apart from
-   * an update arriving from the room.
-   */
-  export type UserAction =
-    | { did: "typed"; text: string }
-    | { did: "pasted"; text: string }
-    | { did: "deleted"; length: number }
-    | { did: "replaced"; text: string; length: number }
-    | { did: "undid" }
-    | { did: "redid" };
-
-  /** What a content change was, given what the editor already told us. */
-  const asAction = (
-    change: { isUndoing: boolean; isRedoing: boolean; changes: readonly { text: string; rangeLength: number }[] },
-    pasted: boolean,
-  ): UserAction | undefined => {
-    if (change.isUndoing) return { did: "undid" };
-    if (change.isRedoing) return { did: "redid" };
-
-    const text = change.changes.map((edit) => edit.text).join("");
-    const length = change.changes.reduce((total, edit) => total + edit.rangeLength, 0);
-
-    if (pasted) return { did: "pasted", text };
-    if (text.length > 0 && length > 0) return { did: "replaced", text, length };
-    if (text.length > 0) return { did: "typed", text };
-    if (length > 0) return { did: "deleted", length };
-    return undefined;
-  };
 
   export class OpenFile {
     readonly id: Id;
@@ -86,10 +56,6 @@
       this.sharedText?.path(path);
     }
 
-    dispose() {
-      this.sharedText?.dispose();
-    }
-
     /**
      * `content` is what the workspace holds, and it is needed for two
      * different reasons: the editor opens on it, and an empty room is filled
@@ -104,34 +70,8 @@
         content,
         liveblocks,
         editorProps,
-        // The transaction, not the promise: a snapshot has to be able to
-        // name the version it just asked for, and the answer comes far later.
-        () => {
-          const { transaction, settled } = this.workspace.write(
-            this.path,
-            this.sharedText!.source,
-          );
-          void settled;
-          return transaction;
-        },
+        this.workspace,
       );
-    }
-
-    /**
-     * Writes what the editor is showing to the workspace, now.
-     *
-     * The moment to call this is a moment the USER made: they stopped typing,
-     * or they ran the code, or they closed the file. Anything that wants a
-     * version stored says so by calling this, rather than by arranging for
-     * something to notice.
-     */
-    store() {
-      return this.sharedText?.store();
-    }
-
-    /** Whether there is anything to store -- see `SharedTextFile.dirty`. */
-    get dirty() {
-      return this.sharedText?.dirty === true;
     }
   }
 
@@ -144,7 +84,7 @@
   }
 
   /**
-   * One text file, shared with whoever else has it open.
+   * One text file, shared with whoever else has it open (via yjs / liveblocks).
    *
    * It owns its own editor wiring, because the events worth having are the
    * editor's: a person focusing this file and a person changing it are facts
@@ -152,28 +92,25 @@
    * else -- storing versions here, an assistant panel elsewhere -- hangs off
    * those events rather than reaching for the editor again.
    */
-  export class SharedTextFile extends WithEvents<{
-    /** The person put their cursor in this file. */
-    focused: [editor: CodeEditor];
-    blurred: [editor: CodeEditor];
-    /**
-     * The person did something to this text. Not somebody else in the room,
-     * and not the shared doc arriving -- see `#watch` for how those are told
-     * apart from a person.
-     */
-    acted: [action: UserAction, editor: CodeEditor];
-  }> {
+  export class SharedTextFile {
     readonly id: Id;
+    readonly workspace: Workspace;
     readonly file: Editor.Model;
     readonly parent: PsuedoParent;
     readonly doc: Y.Doc;
-    readonly text: Y.Text;
     readonly room: LiveblocksRoom;
     readonly provider: LiveblocksYjsProvider;
     readonly props: NonModelEditorProps;
+    readonly initialContent: string;
+
+    readonly cleanup = cleaner();
+
+    status = $state<Status>();
+    editor = $state<editor.IStandaloneCodeEditor>();
+    userEdits = $state<UserEdits>();
 
     /**
-     * Whether this holds anything that has not been stored as a version.
+     * Whether this holds anything that has NOT been submitted as a version.
      *
      * The question it answers is "does what the user is looking at exist
      * anywhere else yet" -- which is what anything about to send this file
@@ -182,75 +119,52 @@
      */
     dirty = $state(false);
 
-    /**
-     * Whether the room has said what it holds.
-     *
-     * Nothing may be written into this text before it has -- not the editor,
-     * not a script -- because until then there is no telling whether a write
-     * is filling an empty file or duplicating one.
-     */
-    ready = $state(false);
-
-    readonly #persist: () => string;
-
     constructor(
       id: Id,
       path: string,
       content: string,
       liveblocks: LiveblocksClient,
       props: Omit<Editor.Props, "file">,
-      /** Submits a version and hands back the transaction that will carry it. */
-      persist: () => string,
+      workspace: Workspace,
     ) {
-      super();
       this.id = id;
-      this.#persist = persist;
-      this.doc = new Y.Doc();
-      this.text = this.doc.getText("content");
+      this.initialContent = content;
+      this.workspace = workspace;
       this.room = liveblocks.enterRoom(id);
-      this.provider = new LiveblocksYjsProvider(this.room.room, this.doc);
+      this.provider = getYjsProviderForRoom(this.room.room);
+      this.doc = this.provider.getYDoc();
       this.parent = new PsuedoParent(holderOf(path));
       this.file = new Editor.Model({
         name: nameOf(path),
         parent: this.parent,
-        // The editor opens on this and the shared text takes over. Without
-        // it the editor opens on nothing, and the editor writes what it is
-        // showing back through the file provider -- over the file.
         source: content,
-        sourceSync: this.text,
       });
-      this.#fill(content);
-      // Its own wiring, layered over whatever the caller wanted, so a
-      // consumer passing `onEditor` still gets it.
+      this.cleanup.add(
+        this.room.room.subscribe("status", (status) => {
+          this.status = status;
+          if (status !== "connected" || this.file.sourceSync) return;
+          this.file.sourceSync = this.doc.getText("content");
+          this.userEdits?.dispose();
+          if (this.editor)
+            this.userEdits = new UserEdits(this.editor, this.file.sourceSync);
+        }),
+      );
       this.props = {
         ...props,
-        onEditor: (editor) => this.#watch(editor, props.onEditor?.(editor)),
+        onEditor: (editor) => {
+          this.editor = editor;
+          const disposable = props.onEditor?.(editor);
+          this.userEdits?.dispose();
+          const userEdits = new UserEdits(this.editor, this.file.sourceSync);
+          this.userEdits = userEdits;
+          return {
+            dispose: () => {
+              disposable?.dispose();
+              userEdits?.dispose();
+            },
+          };
+        },
       };
-    }
-
-    /**
-     * Fills an empty room from the workspace, once, and only once the room
-     * has SAID it is empty.
-     *
-     * The first person to open a file arrives to a room with nothing in it,
-     * and a room with nothing in it stored over the file is the file gone.
-     * But filling one before it has answered is worse: Yjs merges, so the
-     * content the room was about to deliver arrives on top of the copy just
-     * inserted and the file says everything twice.
-     *
-     * There is no way to know what a room holds until it says, so this waits
-     * for it to say. A room that never answers leaves the file unopened,
-     * which is recoverable; a file saved with its contents doubled is not.
-     */
-    #fill(content: string) {
-      const fill = () => {
-        if (this.#disposed) return;
-        if (content.length > 0 && this.text.length === 0)
-          this.doc.transact(() => this.text.insert(0, content));
-        this.ready = true;
-      };
-      if (this.provider.synced) return fill();
-      this.provider.once("synced", fill);
     }
 
     /**
@@ -260,76 +174,33 @@
      * flight has to leave this dirty again, and it will.
      */
     store() {
-      if (typingDebouncer.has(this.id)) typingDebouncer.clear(this.id);
-      if (!this.ready) return undefined;
+      const { id, file, source } = this;
+      typingDebouncer.clear(id);
       this.dirty = false;
-      return this.#persist();
+      const { transaction } = this.workspace.write(file.path, source);
+      return transaction;
     }
 
     /**
      * Makes the shared text say `value`, changing as little as possible.
      *
-     * The difference is worked out properly rather than as one span from the
-     * first change to the last -- see `delta.ts`. What reaches the room is
-     * what actually moved, so cursors between two edits stay where they are
-     * and a merge has something to work with.
-     */
-    replace(value: string): boolean {
-      if (this.source === value) return false;
-      this.doc.transact(() => {
-        for (const edit of editsFor(deltaBetween(this.source, value)))
-          if ("insert" in edit) this.text.insert(edit.at, edit.insert);
-          else this.text.delete(edit.at, edit.remove);
-      });
-      return true;
-    }
-
-    /**
-     * The editor's own events, and the one judgement call in here.
+     * This shouldn't be used with changes coming from the server
+     * (we rely on yjs / liveblocks for that).
      *
-     * The model changing is the only signal that catches everything a person
-     * can do -- typing, backspace, paste, undo -- and it also fires for every
-     * update arriving from the room. Focus is what separates the two: a
-     * change while this editor has the caret is this person's. The mistake it
-     * can still make is attributing somebody else's edit that landed while
-     * the caret was here, which stores the same text this client would have
-     * stored anyway.
+     * Instead, this is for cases when a user's local environment wants to update
+     * their content (and thus they are responsible for it -- e.g. python writes, monaco refactors)
      */
-    #watch(editor: CodeEditor, theirs: { dispose: () => void } | undefined) {
-      // A paste says so just before the change it causes, and nothing else
-      // distinguishes pasted text from typed text after the fact.
-      let pasted = false;
-
-      const attached = [
-        editor.onDidFocusEditorText(() => this.fire("focused", editor)),
-        editor.onDidBlurEditorText(() => this.fire("blurred", editor)),
-        editor.onDidPaste(() => (pasted = true)),
-        editor.onDidChangeModelContent((change) => {
-          const was = pasted;
-          pasted = false;
-          if (!editor.hasTextFocus()) return;
-          const action = asAction(change, was);
-          if (action !== undefined) this.fire("acted", action, editor);
-        }),
-        // Storing is a listener like any other, so that anything else wanting
-        // to know what a person did hooks in beside it rather than instead.
-        this.subscribe({
-          acted: () => {
-            this.dirty = true;
-            typingDebouncer.enqueue(this.id, () => this.store());
-          },
-        }),
-        theirs,
-      ];
-
-      return {
-        dispose: () => {
-          for (const attachment of attached)
-            typeof attachment === "function" ? attachment() : attachment?.dispose();
-          // Closing is the last chance to keep what was typed into it.
-          if (this.dirty) this.store();
-        },
-      };
+    forceReplace(value: string): boolean {
+      if (this.source === value) return false;
+      const yText = this.file.sourceSync;
+      if (yText)
+        this.doc.transact(() => {
+          for (const edit of editsFor(deltaBetween(this.source, value)))
+            if ("insert" in edit) yText.insert(edit.at, edit.insert);
+            else yText.delete(edit.at, edit.remove);
+        });
+      else if (this.editor) this.editor.getModel()?.setValue(value);
+      return true;
     }
 
     path(path: string) {
@@ -338,7 +209,11 @@
     }
 
     get source() {
-      return this.text.toString();
+      return (
+        this.file.sourceSync?.toString() ??
+        this.editor?.getModel()?.getValue() ??
+        this.initialContent
+      );
     }
 
     #disposed = false;
@@ -346,6 +221,8 @@
     dispose() {
       if (this.#disposed) return;
       this.#disposed = true;
+      this.cleanup();
+      this.userEdits?.dispose();
       this.room.leave();
       this.provider.destroy();
       this.doc.destroy();
@@ -413,50 +290,6 @@
     resolveDirty?: boolean;
   };
 
-  /**
-   * Which panels are on screen, kept up to date as the layout is moved.
-   *
-   * "In front" is not the same question as "visible": dockview shows one
-   * panel per GROUP, so two groups side by side means two visible panels and
-   * neither of them stops being visible when the other is clicked. The panel
-   * api answers it directly, and says when the answer changes -- so this can
-   * be read live rather than worked out at the moment somebody asks.
-   */
-  class InView {
-    readonly #showing = new SvelteSet<Id>();
-    readonly #watching = new Map<Id, { dispose: () => void }>();
-
-    /**
-     * Read as a whole rather than asked per entry, so that anything
-     * rendering from it depends on the SET and not on whichever entries
-     * happened to exist the first time it looked.
-     */
-    get showing(): ReadonlySet<Id> {
-      return this.#showing;
-    }
-
-    watch(panel: { id: string; api: { isVisible: boolean; onDidVisibilityChange: (listen: (event: { isVisible: boolean }) => void) => { dispose: () => void } } }) {
-      this.forget(panel.id);
-      const settle = (visible: boolean) =>
-        visible ? this.#showing.add(panel.id) : this.#showing.delete(panel.id);
-      settle(panel.api.isVisible);
-      this.#watching.set(
-        panel.id,
-        panel.api.onDidVisibilityChange(({ isVisible }) => settle(isVisible)),
-      );
-    }
-
-    forget(entry: Id) {
-      this.#watching.get(entry)?.dispose();
-      this.#watching.delete(entry);
-      this.#showing.delete(entry);
-    }
-
-    dispose() {
-      for (const entry of [...this.#watching.keys()]) this.forget(entry);
-    }
-  }
-
   const ROOT = "/home/pyodide";
 
   export type KernelPool = WarmPool<Kernel>;
@@ -484,6 +317,7 @@
   import { Kernel } from "wsfs_suede.python-web-kernel-suede";
   import { WarmPool } from "./pool";
   import fs from "wsfs_suede.python-web-kernel-suede/fs";
+  import { InView } from "./inview.svelte";
 
   let {
     workspace,
@@ -507,19 +341,7 @@
   const tabs = { file: FileView };
   type Grid = ViewAPI<"grid", typeof snippets>;
 
-  type Dispose = (() => void) | { dispose: () => void };
-  const cleanup = Object.assign(
-    () => {
-      for (const entry of cleanup.set)
-        typeof entry === "function" ? entry() : entry.dispose();
-      cleanup.set.clear();
-    },
-    {
-      set: new Set<Dispose>(),
-      add: (...entries: Dispose[]) =>
-        entries.forEach((entry) => cleanup.set.add(entry)),
-    },
-  );
+  const cleanup = cleaner();
 
   const onAPI = async (api: Grid) => {
     cleanup();
@@ -545,9 +367,9 @@
       const stored = new Map<Id, string>();
       if (resolveDirty)
         for (const [entry, open] of openFiles) {
-          if (!open.dirty) continue;
-          const transaction = open.store();
-          if (transaction !== undefined) stored.set(entry, transaction);
+          if (!open.sharedText?.dirty) continue;
+          const transaction = open.sharedText?.store();
+          stored.set(entry, transaction);
         }
 
       const index = workspace.index();
@@ -572,7 +394,7 @@
           },
           open: open !== undefined,
           visible: showing.has(entry.id),
-          dirty: open?.dirty === true,
+          dirty: open?.sharedText?.dirty === true,
           ...(stored.has(entry.id) ? { stored: stored.get(entry.id) } : {}),
         });
       }
@@ -582,7 +404,6 @@
         visible: entries.filter((held) => held.visible),
       };
     };
-
 
     type TabsAPI = ViewAPI<"dock", typeof tabs>;
     let _tabsAPI: TabsAPI | undefined = undefined;
@@ -646,7 +467,8 @@
         // would be a version identical to the one before it -- which is waste
         // at best, and at worst a second write racing the first with the same
         // token to present.
-        if (sharedText.replace(value)) openFiles.get(id)?.store();
+        if (sharedText.forceReplace(value))
+          openFiles.get(id)?.sharedText?.store();
         return true;
       },
     };
@@ -844,7 +666,9 @@
     margin: 0;
     padding: 0 0.75rem;
     list-style: none;
-    font: 0.8rem/1.8 ui-monospace, monospace;
+    font:
+      0.8rem/1.8 ui-monospace,
+      monospace;
     color: var(--wsfs-muted, #6b7280);
   }
 
