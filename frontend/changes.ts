@@ -58,6 +58,16 @@ export type Change = Attributed &
     | { kind: "restored" }
     /** The content token moved. What it moved TO is read, never carried. */
     | { kind: "written" }
+    /**
+     * The server agreed to something this client had only proposed.
+     *
+     * Nothing else says so. Confirming your own work changes no value a
+     * reader can see -- that is the whole point of the overlay and the
+     * confirmation cancelling -- but `modified.accepted` stops being null at
+     * exactly this moment, and anything marking work as pending has to hear
+     * about it to stop.
+     */
+    | { kind: "accepted" }
   );
 
 export type Watching = (changes: readonly Change[]) => void;
@@ -201,5 +211,39 @@ export const between = (before: Effective, after: Effective): Change[] => {
     altered.push(...changed(before, after, was, now));
   }
 
-  return [...gone, ...arrived, ...altered];
+  return [...gone, ...arrived, ...altered, ...accepted(before, after, [
+    ...gone,
+    ...arrived,
+    ...altered,
+  ])];
+};
+
+/**
+ * Every queued transaction that has left the outbox with its value intact.
+ *
+ * Leaving is either an acceptance or a refusal, and a refusal has already
+ * said so: it is the `retracting` on the change that took it back. What is
+ * left over landed.
+ *
+ * A refusal that happened to change nothing a reader can see would be counted
+ * here as an acceptance. It takes a transaction whose value was already the
+ * confirmed one, which is a request that asked for nothing.
+ */
+const accepted = (
+  before: Effective,
+  after: Effective,
+  said: readonly Change[],
+): Change[] => {
+  const takenBack = new Set(
+    said.map((change) => change.retracting).filter((by) => by !== undefined),
+  );
+  const landed: Change[] = [];
+
+  for (const [entry, properties] of before.overlaid) {
+    for (const by of new Set(Object.values(properties))) {
+      if (by === undefined || after.queued.has(by) || takenBack.has(by)) continue;
+      landed.push({ kind: "accepted", entry, by });
+    }
+  }
+  return landed;
 };

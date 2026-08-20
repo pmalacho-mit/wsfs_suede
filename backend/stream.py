@@ -28,7 +28,7 @@ from .models import (
     TextContentRow,
     TransactionRow,
 )
-from .tree import Held, Node
+from .tree import Held, Node, occurrence_of
 
 
 @final
@@ -134,7 +134,15 @@ class Stream:
             deleted_version=deletion.id,
             content=None
             if content is None
-            else Held(content.id, content.position, self._kind(content)),
+            else Held(
+                content.id,
+                content.position,
+                self._kind(content),
+                occurrence_of(content),
+            ),
+            # A birth is ONE transaction, so every row here shares an
+            # occurrence and there is nothing to pick between.
+            modified=occurrence_of(naming),
         ).metadata
 
     def _kind(self, content: ContentRow) -> Kind:
@@ -161,6 +169,7 @@ class Stream:
                 transaction=caused.id,
                 value=self._value(event, applied, entry),
                 user=caused.user_id,
+                at=occurrence_of(caused),
             ),
         )
 

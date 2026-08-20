@@ -20,11 +20,13 @@ import type {
   Id,
   Metadata,
   Move,
+  Occurrence,
   Rename,
   Reparent,
   Submitted,
   Transaction,
 } from "./contract";
+import { mintedAt } from "./minted";
 import type { Entry } from "./outbox";
 
 export type View = ReadonlyMap<Id, Metadata>;
@@ -48,8 +50,31 @@ export type Effective = {
 };
 
 /**
+ * When a QUEUED transaction happened, as far as anyone can yet say.
+ *
+ * `accepted` is null, and that is the whole point of it being nullable: this
+ * client acted, nobody has agreed yet, and a UI that wants to mark pending
+ * work has the fact rather than having to consult the outbox for it. When the
+ * event for this transaction arrives the overlay disappears and the confirmed
+ * entry underneath carries a real `accepted` -- so the null resolves by the
+ * same cancellation that makes every other optimistic change stop flickering.
+ */
+const pending = (request: Submitted): Occurrence => ({
+  minted: mintedAt(request.transaction)?.toISOString() ?? null,
+  offset: request.offset ?? null,
+  accepted: null,
+});
+
+/**
  * What an op does, and what it does it to, in one place -- so a reader asking
  * "who set this" and a reader asking "what does it say" cannot disagree.
+ *
+ * Every one of them moves `modified`, `write` included -- it changes nothing
+ * else about an entry, which is why it is absent from the confirmed path, and
+ * it is the most ordinary reason a file's mtime moves. Only the mtime: a
+ * queued write's transaction is NOT laid over `content_version`, because that
+ * token is what invalidates the content cache, and the cache must not be told
+ * a write landed before it did.
  */
 type Overlay = {
   touches: readonly Property[];
@@ -100,6 +125,7 @@ const proposed = (request: Create): Metadata => ({
   parent_version: request.transaction,
   deleted_version: request.transaction,
   content_version: request.content ? request.transaction : null,
+  modified: pending(request),
 });
 
 const credit = (
@@ -128,7 +154,10 @@ export const of = (confirmed: Confirmed, queued: Entry[]): Effective => {
     const entry = view.get(request.id);
     const overlay = OVERLAYS[request.op];
     if (entry === undefined || overlay === undefined) continue;
-    view.set(request.id, overlay.apply(entry, request));
+    view.set(request.id, {
+      ...overlay.apply(entry, request),
+      modified: pending(request),
+    });
     credit(overlaid, request.id, overlay.touches, request.transaction);
   }
 

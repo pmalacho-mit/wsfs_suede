@@ -126,19 +126,9 @@
     "/wsfs/workspaces/{workspace_id}/blobs/{digest}": {
       "put": {
         "summary": "Store",
-        "description": "Under a workspace because that is the only question a host's\n`authorize` can answer. The bytes themselves are stored once for the\ndeployment and named by their hash -- two workspaces holding the same\nfile hold one copy -- but somebody who may reach no workspace at all\nmay not fill the deployment's disk either.",
+        "description": "Under a workspace because that is the only question a host's\n`authorize` can answer -- which is also why the id appears in the path\nand not in this signature: the host's dependency is what reads it. The\nbytes themselves are stored once for the deployment and named by their\nhash -- two workspaces holding the same file hold one copy -- but\nsomebody who may reach no workspace at all may not fill the\ndeployment's disk either.",
         "operationId": "store_wsfs_workspaces__workspace_id__blobs__digest__put",
         "parameters": [
-          {
-            "name": "workspace_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Workspace Id"
-            }
-          },
           {
             "name": "digest",
             "in": "path",
@@ -378,6 +368,19 @@
             "format": "uuid",
             "title": "Id"
           },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
           "op": {
             "type": "string",
             "const": "create",
@@ -450,6 +453,19 @@
             "type": "string",
             "format": "uuid",
             "title": "Id"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
           },
           "op": {
             "type": "string",
@@ -640,6 +656,9 @@
               }
             ],
             "title": "Content Version"
+          },
+          "modified": {
+            "$ref": "#/components/schemas/Occurrence"
           }
         },
         "type": "object",
@@ -649,7 +668,8 @@
           "name",
           "name_version",
           "parent_version",
-          "deleted_version"
+          "deleted_version",
+          "modified"
         ],
         "title": "Metadata",
         "description": "Pure namespace, plus the four tokens the next mutation must present.\n\nNo content descriptor ever appears here: `content_version` names the write\nto fetch, not what it holds."
@@ -665,6 +685,19 @@
             "type": "string",
             "format": "uuid",
             "title": "Id"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
           },
           "op": {
             "type": "string",
@@ -736,6 +769,53 @@
         "title": "Moved",
         "description": "Where an entry went, and what it is called now."
       },
+      "Occurrence": {
+        "properties": {
+          "minted": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minted"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
+          "accepted": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "accepted"
+        ],
+        "title": "Occurrence",
+        "description": "When one transaction happened, in both clocks that saw it.\n\nTwo clocks because they answer different questions and disagree for honest\nreasons. `minted` is the client's, and it is when the USER acted -- which,\nafter a week offline, is the only one that means anything to them. `accepted`\nis this server's, and it is when the change entered the workspace and became\nsomething other clients could see. An offline session makes the gap between\nthem days wide, and neither number is the other's approximation."
+      },
       "Rejection": {
         "properties": {
           "transaction": {
@@ -779,6 +859,19 @@
             "format": "uuid",
             "title": "Id"
           },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
           "op": {
             "type": "string",
             "const": "rename",
@@ -815,6 +908,19 @@
             "type": "string",
             "format": "uuid",
             "title": "Id"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
           },
           "op": {
             "type": "string",
@@ -938,13 +1044,17 @@
               }
             ],
             "title": "User"
+          },
+          "at": {
+            "$ref": "#/components/schemas/Occurrence"
           }
         },
         "type": "object",
         "required": [
           "type",
           "id",
-          "transaction"
+          "transaction",
+          "at"
         ],
         "title": "StreamEvent",
         "description": "DEPARTURE: a create's metadata rides in `value`, as every other event's\npayload does. The contract spreads it over the event, where its `type`\n(\"file\"/\"folder\") is shadowed by the event's own `type` (\"create\") and the\nclient can no longer tell a file from a folder.\n\n`transaction` does the job the old `version` field did as well: it is the\nid of the transaction this event announces, which IS the new token for the\nproperty it changed. On an event for property P, set the value and set P's\ntoken to `transaction`."
@@ -1027,6 +1137,19 @@
             "type": "string",
             "format": "uuid",
             "title": "Id"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
           },
           "op": {
             "type": "string",
