@@ -8,7 +8,7 @@
 import { digestOf, inMemory, type Store } from "./bytes";
 import * as changes from "./changes";
 import * as confirmed from "./confirmed";
-import { cache, type Content, type Held } from "./content";
+import { cache, type Content, type Payload } from "./content";
 import {
   UNSOUND,
   type Body,
@@ -64,10 +64,18 @@ export type Workspace = {
   index: () => paths.Index;
   watch: (changed: Changed) => () => void;
 
-  read: (path: paths.Path) => Promise<Held | undefined>;
-  holding: (path: paths.Path) => Held | undefined;
-  write: (path: paths.Path, content: string | Uint8Array, mime?: string) => Submitting;
-  create: (path: paths.Path, content: string | Uint8Array, mime?: string) => Creating;
+  read: (path: paths.Path) => Promise<Payload | undefined>;
+  holding: (path: paths.Path) => Payload | undefined;
+  write: (
+    path: paths.Path,
+    content: string | Uint8Array,
+    mime?: string,
+  ) => Submitting;
+  create: (
+    path: paths.Path,
+    content: string | Uint8Array,
+    mime?: string,
+  ) => Creating;
   folder: (path: paths.Path) => Creating;
   move: (from: paths.Path, to: paths.Path) => Submitting;
   remove: (path: paths.Path) => Submitting;
@@ -81,8 +89,10 @@ const TEXT = "text/plain";
 const isText = (content: string | Uint8Array): content is string =>
   typeof content === "string";
 
-const heldAs = (payload: string | Uint8Array, mime: string): Held =>
-  isText(payload) ? { kind: "text", text: payload } : { kind: "binary", bytes: payload, mime };
+const heldAs = (payload: string | Uint8Array, mime: string): Payload =>
+  isText(payload)
+    ? { kind: "text", text: payload }
+    : { kind: "binary", bytes: payload, mime };
 
 export const connect = (options: Options): Workspace => {
   const { workspace, transport } = options;
@@ -166,7 +176,10 @@ export const connect = (options: Options): Workspace => {
    * A write names bytes by hash, so the bytes have to be stored before the
    * write that names them -- and storing is idempotent, so a retry is free.
    */
-  const staged = async (payload: string | Uint8Array, mime: string): Promise<Body> => {
+  const staged = async (
+    payload: string | Uint8Array,
+    mime: string,
+  ): Promise<Body> => {
     if (isText(payload)) return { type: "text", content: payload };
     const hash = await digestOf(payload);
     await transport.store(workspace, hash, payload, mime);
@@ -178,7 +191,11 @@ export const connect = (options: Options): Workspace => {
    * the caller needs the first before the second has happened: `submit`
    * announces the change it makes before the request leaves.
    */
-  const written = (entry: Metadata, payload: string | Uint8Array, mime: string): Submitting => {
+  const written = (
+    entry: Metadata,
+    payload: string | Uint8Array,
+    mime: string,
+  ): Submitting => {
     const seen = entry.content_version;
     if (seen == null) throw new Error(`Not a file: ${entry.name}`);
     const transaction = mint();
@@ -232,7 +249,10 @@ export const connect = (options: Options): Workspace => {
   return {
     entries: () => shown.view,
     index: () => index,
-    watch: (changed) => (listeners.add(changed), () => listeners.delete(changed)),
+    watch: (changed) => (
+      listeners.add(changed),
+      () => listeners.delete(changed)
+    ),
 
     read: (path) => content.read(entryAt(path)),
     holding: (path) => content.holding(entryAt(path)),
@@ -302,7 +322,11 @@ export const connect = (options: Options): Workspace => {
     return holder === "" ? null : entryAt(holder).id;
   }
 
-  function created(path: paths.Path, payload: string | Uint8Array, mime: string): Creating {
+  function created(
+    path: paths.Path,
+    payload: string | Uint8Array,
+    mime: string,
+  ): Creating {
     const entry = mint();
     const transaction = mint();
     const parent = parentOf(path);

@@ -16,17 +16,17 @@
 import { asText } from "./bytes";
 import type { Id, Metadata, Version } from "./contract";
 
-export type Held =
+export type Payload =
   | { kind: "text"; text: string }
   | { kind: "binary"; bytes: Uint8Array; mime: string };
 
-export type Fetch = (entry: Id, version: Version) => Promise<Held>;
+export type Fetch = (entry: Id, version: Version) => Promise<Payload>;
 
 export type Content = {
   /** What the file holds now, from wherever can answer soonest. */
-  read: (entry: Metadata) => Promise<Held | undefined>;
+  read: (entry: Metadata) => Promise<Payload | undefined>;
   /** What is already in hand, with no network and no waiting. */
-  holding: (entry: Metadata) => Held | undefined;
+  holding: (entry: Metadata) => Payload | undefined;
   /**
    * Pull an entry's content into the cache before anybody asks for it, so the
    * kernel's synchronous filesystem calls can be answered out of state rather
@@ -43,16 +43,16 @@ export type Content = {
    * until it is confirmed, which is the one thing an offline client cannot
    * wait for.
    */
-  remember: (version: Version, content: Held) => void;
+  remember: (version: Version, content: Payload) => void;
   forget: (entry: Id) => void;
 };
 
 const keyed = (entry: Metadata) => entry.content_version ?? undefined;
 
 export const cache = (fetch: Fetch): Content => {
-  const held = new Map<Version, Held>();
+  const held = new Map<Version, Payload>();
   const byEntry = new Map<Id, Version>();
-  const arriving = new Map<Version, Promise<Held>>();
+  const arriving = new Map<Version, Promise<Payload>>();
 
   const cached = (version: Version | undefined) =>
     version === undefined ? undefined : held.get(version);
@@ -91,10 +91,11 @@ export const cache = (fetch: Fetch): Content => {
     prefetch: async (entry) => {
       if (holding(entry)) return;
       const version = keyed(entry);
-      if (version !== undefined) await fetched(entry, version).catch(() => undefined);
+      if (version !== undefined)
+        await fetched(entry, version).catch(() => undefined);
     },
   };
 };
 
-export const textOf = (content: Held) =>
+export const textOf = (content: Payload) =>
   content.kind === "text" ? content.text : asText(content.bytes);
