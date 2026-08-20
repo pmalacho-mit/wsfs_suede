@@ -7,6 +7,7 @@
  * -- so imports resolve against what the tree actually holds rather than
  * against whatever was there when the editor mounted.
  */
+import type { FileOverride } from ".";
 import { textOf } from "../content";
 import type { Path } from "../paths";
 import type { Workspace } from "../workspace";
@@ -40,16 +41,24 @@ const files = (workspace: Workspace): Path[] => {
   return index.paths().filter((path) => index.at(path)?.type === "file");
 };
 
-export const provider = (workspace: Workspace): FileProvider => ({
+export const provider = (
+  workspace: Workspace,
+  fileOverride?: FileOverride,
+): FileProvider => ({
   paths: () => files(workspace),
 
   read: async (path) => {
+    const override = fileOverride?.get(path);
+    if (override !== undefined) return override;
     const held = await workspace.read(path);
     if (held === undefined) throw new Error(`No such file: ${path}`);
     return textOf(held);
   },
 
-  write: async (path, text) => void (await workspace.write(path, text).settled),
+  write: async (path, text) => {
+    if (fileOverride?.put(path, text)) return;
+    void (await workspace.write(path, text).settled);
+  },
 
   /**
    * Only appearances and disappearances are announced. Content changes reach
