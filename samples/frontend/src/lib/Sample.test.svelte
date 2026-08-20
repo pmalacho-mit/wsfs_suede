@@ -49,6 +49,8 @@
     tree = $state<FileTreeModel>();
     /** The monaco editor, once one has mounted, for tests that type. */
     editor = $state<any>();
+    /** The snapshot taker, once the shell has one. */
+    take = $state<any>();
     opened = $state<string[]>([]);
   }
 
@@ -930,6 +932,93 @@
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
         <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a snapshot resolves what the user has not stored, in one pass"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("draft.py", "start").settled;
+    const { root, take } = await harness.definition("root", "take");
+    await until("the file is drawn", () => !!rowFor(root, "draft.py"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await clickRow(rowFor(root, "draft.py")!);
+    await until("the editor handed itself over", () => pocket.editor !== undefined);
+    pocket.editor!.focus();
+    await until(
+      "the editor opened on the file",
+      () => pocket.editor!.getModel()?.getValue() === "start",
+      () => JSON.stringify(pocket.editor!.getModel()?.getValue()),
+    );
+
+    // Every token, not just the content one: this is what makes a snapshot
+    // enough to rebuild the filesystem as it stood.
+    const before = take().entries.find((held: any) => held.path === "draft.py");
+    harness.expect(Object.keys(before.versions).sort()).toEqual([
+      "content",
+      "deleted",
+      "name",
+      "parent",
+    ]);
+    harness.expect(before.dirty).toBe(false);
+    harness.expect(before.stored).toBeUndefined();
+
+    const model = pocket.editor!.getModel()!;
+    const line = model.getLineCount();
+    model.applyEdits([
+      {
+        range: {
+          startLineNumber: line,
+          startColumn: model.getLineMaxColumn(line),
+          endLineNumber: line,
+          endColumn: model.getLineMaxColumn(line),
+        },
+        text: " more",
+      },
+    ]);
+
+    await until("it went dirty", () => take().entries.some((held: any) => held.dirty));
+
+    // One pass: it comes back already resolved, naming the transaction that
+    // carries what the user was looking at -- whose content version does not
+    // exist yet, which is exactly why the transaction has to be named.
+    const resolved = take({ resolveDirty: true }).entries.find(
+      (held: any) => held.path === "draft.py",
+    );
+    harness.expect(resolved.dirty).toBe(false);
+    harness.expect(typeof resolved.stored).toBe("string");
+    harness.expect(resolved.versions.content).not.toBe(resolved.stored);
+
+    // And it was a real submission, not a promise to make one.
+    await until(
+      "the other client has what was snapshotted",
+      () => texted(other.workspace.holding("draft.py")) === "start more",
+      () => JSON.stringify(other.workspace.holding("draft.py")),
+      15_000,
+    );
+    harness.expect(take().entries.some((held: any) => held.dirty)).toBe(false);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
+          onSnapshot={(take) => (p.take = take)}
+        />
       {/if}
     </div>
   {/snippet}

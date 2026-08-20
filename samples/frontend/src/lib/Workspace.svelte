@@ -19,17 +19,45 @@
     maxWaitMs: 2000,
   });
 
-  /**
-   * How long a room gets to say what it holds before this fills it.
-   *
-   * A room that answers says so in milliseconds. One that never connects --
-   * `solo()`, or a network that is not there -- never says anything, and
-   * waiting on it forever would leave the file looking empty.
-   */
-  const SEEDS_AFTER = 750;
-
   /** What the editor hands to `onEditor`, named once. */
   type CodeEditor = Parameters<NonNullable<Editor.Props["onEditor"]>>[0];
+
+  /**
+   * Something a person did to a file, named.
+   *
+   * The editor reports that its model changed and says nothing about why, so
+   * this is assembled from the parts that DO say: a paste announces itself,
+   * undo and redo are flagged on the change, and what is left is read off the
+   * shape of the change -- text arriving, text going, or one swapped for the
+   * other. Downstream this is worth more than "it changed": it is what a log
+   * of a session is made of, and it is what tells a person's work apart from
+   * an update arriving from the room.
+   */
+  export type UserAction =
+    | { did: "typed"; text: string }
+    | { did: "pasted"; text: string }
+    | { did: "deleted"; length: number }
+    | { did: "replaced"; text: string; length: number }
+    | { did: "undid" }
+    | { did: "redid" };
+
+  /** What a content change was, given what the editor already told us. */
+  const asAction = (
+    change: { isUndoing: boolean; isRedoing: boolean; changes: readonly { text: string; rangeLength: number }[] },
+    pasted: boolean,
+  ): UserAction | undefined => {
+    if (change.isUndoing) return { did: "undid" };
+    if (change.isRedoing) return { did: "redid" };
+
+    const text = change.changes.map((edit) => edit.text).join("");
+    const length = change.changes.reduce((total, edit) => total + edit.rangeLength, 0);
+
+    if (pasted) return { did: "pasted", text };
+    if (text.length > 0 && length > 0) return { did: "replaced", text, length };
+    if (text.length > 0) return { did: "typed", text };
+    if (length > 0) return { did: "deleted", length };
+    return undefined;
+  };
 
   export class OpenFile {
     readonly id: Id;
@@ -76,7 +104,16 @@
         content,
         liveblocks,
         editorProps,
-        () => this.workspace.write(this.path, this.sharedText!.source).settled,
+        // The transaction, not the promise: a snapshot has to be able to
+        // name the version it just asked for, and the answer comes far later.
+        () => {
+          const { transaction, settled } = this.workspace.write(
+            this.path,
+            this.sharedText!.source,
+          );
+          void settled;
+          return transaction;
+        },
       );
     }
 
@@ -89,7 +126,7 @@
      * something to notice.
      */
     store() {
-      this.sharedText?.store();
+      return this.sharedText?.store();
     }
 
     /** Whether there is anything to store -- see `SharedTextFile.dirty`. */
@@ -120,10 +157,11 @@
     focused: [editor: CodeEditor];
     blurred: [editor: CodeEditor];
     /**
-     * The person changed this text. Not somebody else in the room, and not
-     * the shared doc arriving -- see `#watch` for how the two are told apart.
+     * The person did something to this text. Not somebody else in the room,
+     * and not the shared doc arriving -- see `#watch` for how those are told
+     * apart from a person.
      */
-    typed: [editor: CodeEditor];
+    acted: [action: UserAction, editor: CodeEditor];
   }> {
     readonly id: Id;
     readonly file: Editor.Model;
@@ -144,7 +182,16 @@
      */
     dirty = $state(false);
 
-    readonly #persist: () => unknown;
+    /**
+     * Whether the room has said what it holds.
+     *
+     * Nothing may be written into this text before it has -- not the editor,
+     * not a script -- because until then there is no telling whether a write
+     * is filling an empty file or duplicating one.
+     */
+    ready = $state(false);
+
+    readonly #persist: () => string;
 
     constructor(
       id: Id,
@@ -152,7 +199,8 @@
       content: string,
       liveblocks: LiveblocksClient,
       props: Omit<Editor.Props, "file">,
-      persist: () => unknown,
+      /** Submits a version and hands back the transaction that will carry it. */
+      persist: () => string,
     ) {
       super();
       this.id = id;
@@ -181,23 +229,28 @@
     }
 
     /**
-     * Fills an empty room from the workspace, once.
+     * Fills an empty room from the workspace, once, and only once the room
+     * has SAID it is empty.
      *
-     * The room is the truth while anyone is in it, but the FIRST person to
-     * open a file arrives to an empty one, and an empty room stored over the
-     * file is the file gone. Seeded only once the room has had its chance to
-     * say it holds something -- and if it never answers, once that chance has
-     * passed.
+     * The first person to open a file arrives to a room with nothing in it,
+     * and a room with nothing in it stored over the file is the file gone.
+     * But filling one before it has answered is worse: Yjs merges, so the
+     * content the room was about to deliver arrives on top of the copy just
+     * inserted and the file says everything twice.
+     *
+     * There is no way to know what a room holds until it says, so this waits
+     * for it to say. A room that never answers leaves the file unopened,
+     * which is recoverable; a file saved with its contents doubled is not.
      */
     #fill(content: string) {
-      if (content.length === 0) return;
       const fill = () => {
-        if (this.#disposed || this.text.length > 0) return;
-        this.doc.transact(() => this.text.insert(0, content));
+        if (this.#disposed) return;
+        if (content.length > 0 && this.text.length === 0)
+          this.doc.transact(() => this.text.insert(0, content));
+        this.ready = true;
       };
       if (this.provider.synced) return fill();
       this.provider.once("synced", fill);
-      setTimeout(fill, SEEDS_AFTER);
     }
 
     /**
@@ -208,8 +261,9 @@
      */
     store() {
       if (typingDebouncer.has(this.id)) typingDebouncer.clear(this.id);
+      if (!this.ready) return undefined;
       this.dirty = false;
-      void this.#persist();
+      return this.#persist();
     }
 
     /**
@@ -220,38 +274,47 @@
      * what actually moved, so cursors between two edits stay where they are
      * and a merge has something to work with.
      */
-    replace(value: string) {
-      if (this.source === value) return;
+    replace(value: string): boolean {
+      if (this.source === value) return false;
       this.doc.transact(() => {
         for (const edit of editsFor(deltaBetween(this.source, value)))
           if ("insert" in edit) this.text.insert(edit.at, edit.insert);
           else this.text.delete(edit.at, edit.remove);
       });
+      return true;
     }
 
     /**
      * The editor's own events, and the one judgement call in here.
      *
-     * `onDidType` would be the obvious signal and is the wrong one: it says
-     * nothing about backspace, paste or undo, which are all the person. The
-     * model changing says all of them and also says every update arriving
-     * from the room. Focus is what separates the two -- a change while this
-     * editor has the caret is this person's -- and the failure it can still
-     * make is storing a version for somebody else's edit that landed while
-     * the caret was here, which writes the same text this client would have
-     * written anyway.
+     * The model changing is the only signal that catches everything a person
+     * can do -- typing, backspace, paste, undo -- and it also fires for every
+     * update arriving from the room. Focus is what separates the two: a
+     * change while this editor has the caret is this person's. The mistake it
+     * can still make is attributing somebody else's edit that landed while
+     * the caret was here, which stores the same text this client would have
+     * stored anyway.
      */
     #watch(editor: CodeEditor, theirs: { dispose: () => void } | undefined) {
+      // A paste says so just before the change it causes, and nothing else
+      // distinguishes pasted text from typed text after the fact.
+      let pasted = false;
+
       const attached = [
         editor.onDidFocusEditorText(() => this.fire("focused", editor)),
         editor.onDidBlurEditorText(() => this.fire("blurred", editor)),
-        editor.onDidChangeModelContent(() => {
-          if (editor.hasTextFocus()) this.fire("typed", editor);
+        editor.onDidPaste(() => (pasted = true)),
+        editor.onDidChangeModelContent((change) => {
+          const was = pasted;
+          pasted = false;
+          if (!editor.hasTextFocus()) return;
+          const action = asAction(change, was);
+          if (action !== undefined) this.fire("acted", action, editor);
         }),
         // Storing is a listener like any other, so that anything else wanting
-        // to know a person typed hooks in beside it rather than instead.
+        // to know what a person did hooks in beside it rather than instead.
         this.subscribe({
-          typed: () => {
+          acted: () => {
             this.dirty = true;
             typingDebouncer.enqueue(this.id, () => this.store());
           },
@@ -292,18 +355,41 @@
   /**
    * One entry, as anything about to describe this workspace needs it.
    *
-   * `version` is the content token: two snapshots naming the same token are
-   * looking at the same bytes, whoever wrote them. `dirty` says the opposite
-   * -- that what the user is looking at is not the version named here yet.
+   * All four tokens, not just the content one, because together they are the
+   * entry: what it is called, where it lives, whether it is gone, and what is
+   * in it. A snapshot naming all four can be rebuilt into the filesystem as
+   * it stood -- and it stays rebuildable even if the server later refuses one
+   * of those transactions, because what it records is what the user was
+   * looking at, which happened whether or not anybody agreed to it.
    */
   export type Held = {
     entry: Id;
     path: string;
-    version: string | null;
+    name: string;
+    versions: {
+      name: string;
+      parent: string;
+      deleted: string;
+      content: string | null;
+    };
     open: boolean;
     /** On screen right now. Two panels side by side are both on screen. */
     visible: boolean;
+    /**
+     * What the user is looking at is not any of the versions above yet.
+     *
+     * Never true in a snapshot taken with `resolveDirty`, which is the point
+     * of that option.
+     */
     dirty: boolean;
+    /**
+     * The transaction this snapshot submitted for it, if it submitted one.
+     *
+     * Its content version does not exist yet -- the token above is still the
+     * old one -- so this is what names the version the user was actually
+     * looking at.
+     */
+    stored?: string;
   };
 
   export type Snapshot = {
@@ -311,6 +397,20 @@
     entries: Held[];
     /** The subset the user can actually see, which is the useful default. */
     visible: Held[];
+  };
+
+  export type Taking = {
+    /**
+     * Submit every dirty editor first, in ONE pass, and record what was
+     * submitted.
+     *
+     * Without it a caller has to check `dirty`, store, and check again --
+     * and something typed in between leaves it looping, or worse, describing
+     * a state that was never on screen. One pass says: this is what the user
+     * had at the moment I asked. Anything typed after belongs to the next
+     * snapshot.
+     */
+    resolveDirty?: boolean;
   };
 
   /**
@@ -389,12 +489,16 @@
     workspace,
     liveblocks,
     onEditor,
+    onSnapshot,
   }: {
     workspace: Workspace;
     liveblocks: LiveblocksClient;
     /** Every editor as it mounts -- for type tracking later, and for a test
      *  that wants to drive one the way a person does. */
     onEditor?: NonModelEditorProps["onEditor"];
+    /** Handed the snapshot taker once there is one, for anything outside
+     *  this component that needs to describe what the user is looking at. */
+    onSnapshot?: (take: (options?: Taking) => Snapshot) => void;
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
@@ -435,7 +539,17 @@
      * is the one to read first -- an entry showing it has a version named
      * here that the user has already moved past, so store before sending.
      */
-    const snapshot = (): Snapshot => {
+    const snapshot = ({ resolveDirty = false }: Taking = {}): Snapshot => {
+      // One pass, before anything is read, so every entry below is described
+      // as of the same moment.
+      const stored = new Map<Id, string>();
+      if (resolveDirty)
+        for (const [entry, open] of openFiles) {
+          if (!open.dirty) continue;
+          const transaction = open.store();
+          if (transaction !== undefined) stored.set(entry, transaction);
+        }
+
       const index = workspace.index();
       // Copied up front: reading the set is what makes a live view of this
       // re-render, and reading it per entry would not happen at all in a
@@ -449,10 +563,17 @@
         entries.push({
           entry: entry.id,
           path,
-          version: entry.content_version ?? null,
+          name: entry.name,
+          versions: {
+            name: entry.name_version,
+            parent: entry.parent_version,
+            deleted: entry.deleted_version,
+            content: entry.content_version ?? null,
+          },
           open: open !== undefined,
           visible: showing.has(entry.id),
           dirty: open?.dirty === true,
+          ...(stored.has(entry.id) ? { stored: stored.get(entry.id) } : {}),
         });
       }
       return {
@@ -516,16 +637,22 @@
         const id = tree.mapping.of(path);
         if (!id) return false;
         const sharedText = openFiles.get(id)?.sharedText;
-        if (!sharedText) return false;
-        // A script writing a file is a moment of its own, so the version is
-        // stored at once rather than waiting for typing that is not coming.
-        sharedText.replace(value);
-        openFiles.get(id)?.store();
+        // Not ready means the room has not said what it holds, and writing
+        // into it now is how a file ends up saying everything twice. Refused,
+        // so the write goes to the workspace the ordinary way instead.
+        if (!sharedText?.ready) return false;
+        // Only if it actually said something new. The editor writes what it
+        // is showing back through here as it opens a file, and storing that
+        // would be a version identical to the one before it -- which is waste
+        // at best, and at worst a second write racing the first with the same
+        // token to present.
+        if (sharedText.replace(value)) openFiles.get(id)?.store();
         return true;
       },
     };
 
     Editor.provideFiles(provider(workspace, override), { searchRoot: "" });
+    onSnapshot?.(snapshot);
 
     const kernelPool = new WarmPool<Kernel>({
       create: () =>
