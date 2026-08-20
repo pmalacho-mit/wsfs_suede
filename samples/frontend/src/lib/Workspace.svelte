@@ -11,8 +11,41 @@
 
   export type NonModelEditorProps = Omit<Editor.Props, "file">;
 
-  /** How long a burst of typing settles before it becomes one write. */
+  /** How long a burst of typing settles before it becomes one version. */
   const SETTLES_IN = 400;
+
+  /**
+   * Stores a version when the person at this editor stops typing.
+   *
+   * Watching the shared doc instead would make every client in the room write
+   * every other client's keystrokes back to the workspace -- the same content,
+   * once per person, each one a new version. And it would put the write
+   * somewhere that cannot tell a person from an update arriving.
+   *
+   * So it hangs off the editor, which is where one person's actions are.
+   */
+  const versionsAsTyped = (
+    editor: Parameters<NonNullable<Editor.Props["onEditor"]>>[0],
+    file: OpenFile,
+  ) => {
+    let settling: ReturnType<typeof setTimeout> | undefined;
+    const typed = editor.onDidChangeModelContent(() => {
+      clearTimeout(settling);
+      settling = setTimeout(() => {
+        settling = undefined;
+        file.store();
+      }, SETTLES_IN);
+    });
+    return {
+      dispose: () => {
+        typed.dispose();
+        // Closing is the last chance to keep what was typed into it.
+        if (settling === undefined) return;
+        clearTimeout(settling);
+        file.store();
+      },
+    };
+  };
 
   /**
    * The one span in which `from` and `to` differ.
@@ -78,14 +111,34 @@
     }
 
     share() {
-      const { id, path, liveblocks, editorProps, workspace } = this;
-      this.sharedText ??= new SharedTextFile(
-        id,
-        path,
-        liveblocks,
-        editorProps,
-        () => workspace.write(this.path, this.sharedText!.source),
-      );
+      const { id, path, liveblocks, editorProps } = this;
+      this.sharedText ??= new SharedTextFile(id, path, liveblocks, {
+        ...editorProps,
+        onEditor: (editor) => {
+          const typing = versionsAsTyped(editor, this);
+          const theirs = editorProps.onEditor?.(editor);
+          return {
+            dispose: () => {
+              typing.dispose();
+              theirs?.dispose();
+            },
+          };
+        },
+      });
+    }
+
+    /**
+     * Writes what the editor is showing to the workspace, now.
+     *
+     * The moment to call this is a moment the USER made: they stopped typing,
+     * or they ran the code, or they closed the file. Anything that wants a
+     * version stored says so by calling this, rather than by arranging for
+     * something to notice.
+     */
+    store() {
+      const source = this.sharedText?.source;
+      if (source === undefined) return;
+      void this.workspace.write(this.path, source).settled;
     }
   }
 
@@ -106,22 +159,11 @@
     readonly provider: LiveblocksYjsProvider;
     readonly props: NonModelEditorProps;
 
-    /**
-     * The room keeps this text for whoever else is in it; the workspace is
-     * where it has to end up. Nothing else writes it back -- so without this,
-     * a file typed into and closed keeps its old content everywhere except
-     * Liveblocks.
-     */
-    readonly #persist: () => unknown;
-    #settling: ReturnType<typeof setTimeout> | undefined;
-    readonly #observe: () => void;
-
     constructor(
       id: Id,
       path: string,
       liveblocks: LiveblocksClient,
       props: Omit<Editor.Props, "file">,
-      persist: () => unknown,
     ) {
       this.doc = new Y.Doc();
       this.text = this.doc.getText("content");
@@ -134,10 +176,6 @@
         sourceSync: this.text,
       });
       this.props = props;
-      this.#persist = persist;
-      // Every keystroke and every arriving change, debounced into one write.
-      this.#observe = () => this.#settle();
-      this.text.observe(this.#observe);
     }
 
     /**
@@ -155,22 +193,6 @@
       });
     }
 
-    /** Writes now, rather than when the typing settles. */
-    flush() {
-      if (this.#settling === undefined) return;
-      clearTimeout(this.#settling);
-      this.#settling = undefined;
-      void this.#persist();
-    }
-
-    #settle() {
-      clearTimeout(this.#settling);
-      this.#settling = setTimeout(() => {
-        this.#settling = undefined;
-        void this.#persist();
-      }, SETTLES_IN);
-    }
-
     path(path: string) {
       this.file.name = nameOf(path);
       this.parent.path = holderOf(path);
@@ -185,9 +207,6 @@
     dispose() {
       if (this.#disposed) return;
       this.#disposed = true;
-      // Flushed first: closing a file is the last chance to keep what is in it.
-      this.flush();
-      this.text.unobserve(this.#observe);
       this.room.leave();
       this.provider.destroy();
       this.doc.destroy();
@@ -316,10 +335,10 @@
         if (!id) return false;
         const sharedText = openFiles.get(id)?.sharedText;
         if (!sharedText) return false;
-        // Applied as a difference, and left to settle into a write like any
-        // other change -- one place writes this file, and it is the same one
-        // whether the change came from a person typing or a script running.
+        // A script writing a file is a moment of its own, so the version is
+        // stored at once rather than waiting for typing that is not coming.
         sharedText.replace(value);
+        openFiles.get(id)?.store();
         return true;
       },
     };

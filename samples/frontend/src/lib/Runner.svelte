@@ -49,9 +49,9 @@
     {#if running}
       <button onclick={() => running?.interrupt()}>Stop</button>
     {/if}
-    <button onclick={() => (outputs = [])} disabled={outputs.length === 0}
-      >Clear</button
-    >
+    <button onclick={() => (outputs = [])} disabled={outputs.length === 0}>
+      Clear
+    </button>
     <span class="path">{shared.file.path}</span>
   </header>
   <output>
