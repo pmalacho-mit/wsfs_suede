@@ -18,7 +18,8 @@
 
   import FileTree, { Model as FileTreeModel } from "$lib/FileTree.svelte";
   import Shell from "$lib/Workspace.svelte";
-  import { Open } from "$lib/workspace.svelte";
+  import type { Client } from "$lib/testing.svelte";
+  import { solo } from "$lib/liveblocks";
   import {
     alongside,
     clickRow,
@@ -36,24 +37,29 @@
     selected,
     tabs,
     until,
-  } from "$lib/testing";
+  } from "$lib/testing.svelte";
+
+  /** One room's worth of collaboration, with nobody else in it. */
+  const collaboration = solo();
 
   class Pocket {
     root = $state<HTMLElement>();
-    workspace = $state<Open>();
+    workspace = $state<Client>();
     /** The tree's model, which is what a `FileTree` is given. */
     tree = $state<FileTreeModel>();
+    /** The monaco editor, once one has mounted, for tests that type. */
+    editor = $state<any>();
     opened = $state<string[]>([]);
   }
 
   /** Puts a workspace on the screen, with the model the tree renders from. */
-  const showing = (pocket: Pocket, workspace: Open) => {
+  const showing = (pocket: Pocket, workspace: Client) => {
     pocket.tree = new FileTreeModel(workspace.workspace);
     pocket.workspace = workspace;
   };
 
   /** Wait for a client to hold `path`, whoever's client it is. */
-  const holds = (client: Open, path: string) => () => client.paths.includes(path);
+  const holds = (client: Client, path: string) => () => client.paths.includes(path);
 
   const menuOn = async (row: HTMLElement) => {
     const { top, left } = row.getBoundingClientRect();
@@ -395,7 +401,7 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
       {/if}
     </div>
   {/snippet}
@@ -438,7 +444,7 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
       {/if}
     </div>
   {/snippet}
@@ -516,7 +522,7 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
       {/if}
     </div>
   {/snippet}
@@ -557,7 +563,7 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
       {/if}
     </div>
   {/snippet}
@@ -602,7 +608,7 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
       {/if}
     </div>
   {/snippet}
@@ -635,20 +641,22 @@
       () => region(root, "documents")!.textContent?.trim() ?? "",
     );
 
-    // Written into the buffer the editor is bound to -- which is where the
-    // client no longer looks, because it has no way to know one exists.
-    const buffer = await workspace.edit("draft.md");
-    harness.expect(buffer.text()).toBe("before");
-    (buffer.shared as { insert: (at: number, text: string) => void }).insert(6, " after");
+    // Typed into the editor itself, through its own model -- which is what
+    // the shared text is bound to, so this takes the whole path a keystroke
+    // does. Monaco's own textarea cannot be driven from here: it lives in a
+    // shadow root, so `document.activeElement` is the host and user-event
+    // types at that instead.
+    await until("the editor handed itself over", () => pocket.editor !== undefined);
+    const model = pocket.editor!.getModel()!;
+    const line = model.getLineCount();
+    const column = model.getLineMaxColumn(line);
+    model.applyEdits([
+      { range: { startLineNumber: line, startColumn: column, endLineNumber: line, endColumn: column }, text: " after" },
+    ]);
 
-    // A reader that asks the consumer gets the typing; one that asks the
-    // client alone still gets the last accepted write. Both are correct, and
-    // choosing between them is exactly what moved out of the client.
-    harness.expect(texted(workspace.buffers.holding("draft.md"))).toBe("before after");
-    harness.expect(texted(workspace.workspace.holding("draft.md"))).toBe("before");
-
-    // And the debounce turns it into a write the server keeps: when the
-    // buffer becomes everybody's truth is the consumer's decision too.
+    // Nothing writes the shared text back to the workspace except the file
+    // itself, on a debounce -- so this is the assertion that the editor is
+    // not a place work goes to be lost.
     await until(
       "the other client has the typing",
       () => texted(other.workspace.holding("draft.md")).includes("after"),
@@ -661,7 +669,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
+        />
       {/if}
     </div>
   {/snippet}
@@ -849,7 +861,7 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace} />
+        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
       {/if}
     </div>
   {/snippet}

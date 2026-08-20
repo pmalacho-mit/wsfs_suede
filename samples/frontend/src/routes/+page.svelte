@@ -1,24 +1,51 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
 
-  import Shell from "$lib/Workspace.svelte";
-  import { Open, project } from "$lib/workspace.svelte";
+  import Workspace from "$lib/Workspace.svelte";
+  import { solo } from "$lib/liveblocks";
+  import { connect, http, inMemory, type Workspace as Client } from "$wsfs";
+  import { createClient } from "@liveblocks/client";
 
   const USER = "ada@example.com";
+  const BACKEND = "/wsfs";
 
-  let open = $state<Open | undefined>(undefined);
+  /** The sample's stand-in for a session. A real host sends a cookie. */
+  const asUser = (email: string) => async () => ({ "X-User-Email": email });
+
+  /**
+   * Collaboration is opt-in: with a key, files are shared with whoever else
+   * has the workspace open; without one the editor still works and still
+   * saves, it is simply the only one in the room.
+   */
+  const key = import.meta.env.VITE_LIVEBLOCKS_KEY as string | undefined;
+  const liveblocks = key ? createClient({ publicApiKey: key }) : solo();
+
+  let workspace = $state<Client | undefined>(undefined);
   let failure = $state<string | undefined>(undefined);
+
+  const project = async (email: string) => {
+    const response = await fetch("/projects", {
+      method: "POST",
+      headers: { "X-User-Email": email },
+    });
+    if (!response.ok) throw new Error(`could not open a project: ${response.status}`);
+    return ((await response.json()) as { id: string }).id;
+  };
 
   const start = async () => {
     try {
-      open = new Open(await project(USER), USER);
+      workspace = connect({
+        workspace: await project(USER),
+        transport: http(BACKEND, asUser(USER)),
+        bytes: inMemory(),
+      });
     } catch (reason) {
       failure = reason instanceof Error ? reason.message : String(reason);
     }
   };
 
   void start();
-  onDestroy(() => open?.dispose());
+  onDestroy(() => workspace?.stop());
 </script>
 
 <!-- The shell fills whatever it is given, so the page is what says "all of
@@ -26,8 +53,8 @@
 <div class="page">
   {#if failure}
     <p class="failure">{failure}</p>
-  {:else if open}
-    <Shell workspace={open} />
+  {:else if workspace}
+    <Workspace {workspace} {liveblocks} />
   {:else}
     <p class="waiting">Opening a workspace…</p>
   {/if}

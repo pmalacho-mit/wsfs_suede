@@ -11,10 +11,46 @@
 
   export type NonModelEditorProps = Omit<Editor.Props, "file">;
 
+  /** How long a burst of typing settles before it becomes one write. */
+  const SETTLES_IN = 400;
+
+  /**
+   * The one span in which `from` and `to` differ.
+   *
+   * Everything before it and after it is already shared, so only the middle
+   * has to be said. This is what keeps `put` from deleting the file and
+   * writing it again: that would say the same thing and MEAN something else --
+   * every collaborator's cursor thrown to the top, an edit landing in the same
+   * moment discarded rather than merged, and a change the size of the file
+   * sent for a one-line difference.
+   *
+   * @returns where to start, how much to remove, and what to put there
+   */
+  const difference = (
+    from: string,
+    to: string,
+  ): [at: number, remove: number, insert: string] => {
+    const shortest = Math.min(from.length, to.length);
+
+    let start = 0;
+    while (start < shortest && from[start] === to[start]) start += 1;
+
+    // Bounded by what the prefix left, so the two never claim the same run.
+    let end = 0;
+    while (
+      end < shortest - start &&
+      from[from.length - 1 - end] === to[to.length - 1 - end]
+    )
+      end += 1;
+
+    return [start, from.length - start - end, to.slice(start, to.length - end)];
+  };
+
   export class OpenFile {
     readonly id: Id;
     readonly liveblocks: LiveblocksClient;
     readonly editorProps: NonModelEditorProps;
+    readonly workspace: Workspace;
 
     sharedText = $state<SharedTextFile>();
     path = $state("");
@@ -23,11 +59,13 @@
       { id, path }: FileTreeModel.Entry,
       liveblocks: LiveblocksClient,
       editorProps: NonModelEditorProps,
+      workspace: Workspace,
     ) {
       this.id = id;
       this.path = path;
       this.liveblocks = liveblocks;
       this.editorProps = editorProps;
+      this.workspace = workspace;
     }
 
     move(path: string) {
@@ -40,8 +78,14 @@
     }
 
     share() {
-      const { id, path, liveblocks, editorProps } = this;
-      this.sharedText ??= new SharedTextFile(id, path, liveblocks, editorProps);
+      const { id, path, liveblocks, editorProps, workspace } = this;
+      this.sharedText ??= new SharedTextFile(
+        id,
+        path,
+        liveblocks,
+        editorProps,
+        () => workspace.write(this.path, this.sharedText!.source),
+      );
     }
   }
 
@@ -62,11 +106,22 @@
     readonly provider: LiveblocksYjsProvider;
     readonly props: NonModelEditorProps;
 
+    /**
+     * The room keeps this text for whoever else is in it; the workspace is
+     * where it has to end up. Nothing else writes it back -- so without this,
+     * a file typed into and closed keeps its old content everywhere except
+     * Liveblocks.
+     */
+    readonly #persist: () => unknown;
+    #settling: ReturnType<typeof setTimeout> | undefined;
+    readonly #observe: () => void;
+
     constructor(
       id: Id,
       path: string,
       liveblocks: LiveblocksClient,
       props: Omit<Editor.Props, "file">,
+      persist: () => unknown,
     ) {
       this.doc = new Y.Doc();
       this.text = this.doc.getText("content");
@@ -79,6 +134,41 @@
         sourceSync: this.text,
       });
       this.props = props;
+      this.#persist = persist;
+      // Every keystroke and every arriving change, debounced into one write.
+      this.#observe = () => this.#settle();
+      this.text.observe(this.#observe);
+    }
+
+    /**
+     * Makes the shared text say `value`, changing as little as possible.
+     *
+     * What lands in the room is the difference, not the file -- see
+     * `difference` for why that distinction is the whole point.
+     */
+    replace(value: string) {
+      if (this.source === value) return;
+      const [at, remove, insert] = difference(this.source, value);
+      this.doc.transact(() => {
+        if (remove > 0) this.text.delete(at, remove);
+        if (insert.length > 0) this.text.insert(at, insert);
+      });
+    }
+
+    /** Writes now, rather than when the typing settles. */
+    flush() {
+      if (this.#settling === undefined) return;
+      clearTimeout(this.#settling);
+      this.#settling = undefined;
+      void this.#persist();
+    }
+
+    #settle() {
+      clearTimeout(this.#settling);
+      this.#settling = setTimeout(() => {
+        this.#settling = undefined;
+        void this.#persist();
+      }, SETTLES_IN);
     }
 
     path(path: string) {
@@ -90,7 +180,14 @@
       return this.text.toString();
     }
 
+    #disposed = false;
+
     dispose() {
+      if (this.#disposed) return;
+      this.#disposed = true;
+      // Flushed first: closing a file is the last chance to keep what is in it.
+      this.flush();
+      this.text.unobserve(this.#observe);
       this.room.leave();
       this.provider.destroy();
       this.doc.destroy();
@@ -128,7 +225,14 @@
   let {
     workspace,
     liveblocks,
-  }: { workspace: Workspace; liveblocks: LiveblocksClient } = $props();
+    onEditor,
+  }: {
+    workspace: Workspace;
+    liveblocks: LiveblocksClient;
+    /** Every editor as it mounts -- for type tracking later, and for a test
+     *  that wants to drive one the way a person does. */
+    onEditor?: NonModelEditorProps["onEditor"];
+  } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
 
@@ -212,10 +316,10 @@
         if (!id) return false;
         const sharedText = openFiles.get(id)?.sharedText;
         if (!sharedText) return false;
-        // TODO:
-        // must apply `value` as delta to the existing yjs source
-        // (not just delete and insert, since that ruins collaboration)
-        // then write new value to workspace.
+        // Applied as a difference, and left to settle into a write like any
+        // other change -- one place writes this file, and it is the same one
+        // whether the change came from a person typing or a script running.
+        sharedText.replace(value);
         return true;
       },
     };
@@ -230,19 +334,18 @@
         }),
     });
 
-    const editorProps: NonModelEditorProps = {
-      onEditor: (editor) => {
-        // useful later for type tracking
-        return {
-          dispose: () => {},
-        };
-      },
-    };
+    const editorProps: NonModelEditorProps = { onEditor };
 
     cleanup.add(
       () => openFiles.forEach((open) => open.dispose()),
       tabsAPI.onDidActivePanelChange(({ panel }) => tree.select(panel?.id)),
-      tabsAPI.onDidRemovePanel((panel) => tree.deselect(panel.id)),
+      tabsAPI.onDidRemovePanel((panel) => {
+        tree.deselect(panel.id);
+        // Closing is the last chance to keep what was typed, and letting the
+        // file go is what makes reopening it start clean rather than resume.
+        openFiles.get(panel.id)?.dispose();
+        openFiles.delete(panel.id);
+      }),
       tree.subscribe({
         open: async (entry) => {
           const panel = tab(entry);
@@ -250,14 +353,21 @@
           const { id, path } = entry;
           if (openInProgress.has(id)) return;
           openInProgress.add(id);
-          const title = nameOf(path);
-          const opened = new OpenFile(entry, liveblocks, editorProps);
-          openFiles.set(id, opened);
-          await _tabsAPI!.addComponentPanel(
-            "file",
-            { opened, kernelPool, workspace },
-            { id, title },
-          );
+          try {
+            const title = nameOf(path);
+            const opened = new OpenFile(entry, liveblocks, editorProps, workspace);
+            openFiles.set(id, opened);
+            await tabsAPI.addComponentPanel(
+              "file",
+              { opened, kernelPool, workspace },
+              { id, title },
+            );
+          } finally {
+            // However it went. Left set, a file that has been opened once can
+            // never be opened again -- and closing its panel is exactly when
+            // somebody tries.
+            openInProgress.delete(id);
+          }
         },
         renamed: ({ id, path }) => {
           openFiles.get(id)?.move(path);

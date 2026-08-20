@@ -56,7 +56,13 @@
   <Preview path={params.opened.path} held={binary} />
 {:else if params.opened.sharedText}
   <div class="text" class:runnable>
-    <Editor.Component file={params.opened.sharedText.file} />
+    <!-- `props` is everything the editor was configured with and the file is
+         the one thing that differs per panel. Spreading is what makes
+         `onEditor` reach anybody -- it was being carried this far and dropped. -->
+    <Editor.Component
+      {...params.opened.sharedText.props}
+      file={params.opened.sharedText.file}
+    />
     {#if runnable}
       <Runner
         kernelPool={params.kernelPool}

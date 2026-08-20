@@ -6,7 +6,50 @@
  * immediately is asserting on the optimistic view -- which is exactly the
  * thing worth distinguishing from the confirmed one.
  */
-import { Open, project } from "$lib/workspace.svelte";
+import { connect, http, inMemory, type Workspace } from "$wsfs";
+
+const BACKEND = "/wsfs";
+
+const asUser = (email: string) => async () => ({ "X-User-Email": email });
+
+/**
+ * A workspace, plus the path list the tests wait on.
+ *
+ * The app has no use for this -- it reads what it needs when it needs it --
+ * but a test that says "wait until the other client has this" needs the
+ * question to be cheap and reactive, and that is all this adds.
+ */
+export class Client {
+  readonly workspace: Workspace;
+  paths = $state<string[]>([]);
+  readonly #stop: () => void;
+
+  constructor(id: string, user: string) {
+    this.workspace = connect({
+      workspace: id,
+      transport: http(BACKEND, asUser(user)),
+      bytes: inMemory(),
+    });
+    this.#stop = this.workspace.watch(() => {
+      this.paths = [...this.workspace.index().paths()].sort();
+    });
+  }
+
+  dispose() {
+    this.#stop();
+    this.workspace.stop();
+  }
+}
+
+/** The host's own endpoint: provisioning is not wsfs's business. */
+export const project = async (email: string): Promise<string> => {
+  const response = await fetch("/projects", {
+    method: "POST",
+    headers: { "X-User-Email": email },
+  });
+  if (!response.ok) throw new Error(`could not open a project: ${response.status}`);
+  return ((await response.json()) as { id: string }).id;
+};
 
 export const until = async (
   what: string,
@@ -70,7 +113,7 @@ export const rowFor = (within: HTMLElement, path: string): HTMLElement | undefin
 export const drawn = (within: HTMLElement): string[] =>
   [...new Set(rows(within).map(pathOf))].filter(Boolean);
 
-const live = new Set<Open>();
+const live = new Set<Client>();
 
 /**
  * Hands back every connection the tests before this one opened.
@@ -89,7 +132,7 @@ const handBack = () => {
   live.clear();
 };
 
-const tracked = (client: Open) => (live.add(client), client);
+const tracked = (client: Client) => (live.add(client), client);
 
 /**
  * A second client in the same workspace -- another tab, or another person.
@@ -97,14 +140,12 @@ const tracked = (client: Open) => (live.add(client), client);
  * showing its own optimistic work proves nothing about what was stored.
  */
 export const alongside = (id: string, user = "grace@example.com") =>
-  // Not the editor's: the page keeps one filesystem, and it belongs to the
-  // client under test rather than to the one watching it.
-  tracked(new Open(id, user, { provides: false }));
+  tracked(new Client(id, user));
 
 export const opened = async (user = "ada@example.com") => {
   handBack();
   const id = await project(user);
-  return { id, workspace: tracked(new Open(id, user)) };
+  return { id, workspace: tracked(new Client(id, user)) };
 };
 
 /**
