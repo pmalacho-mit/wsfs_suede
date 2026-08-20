@@ -48,8 +48,27 @@ def when(stamp: str) -> datetime:
 
 
 def test_a_v7_says_when_it_was_minted():
-    at = datetime(2026, 8, 19, 17, 4, 5, 678000, tzinfo=UTC)
+    """Sub-millisecond precision is dropped, and dropped DOWNWARDS -- 48 bits
+    of milliseconds is what the format has room for."""
+    at = datetime(2026, 8, 19, 17, 4, 5, 678999, tzinfo=UTC)
     assert minted_at(mint(at)) == at.replace(microsecond=678000)
+
+
+@pytest.mark.parametrize(
+    "at",
+    [
+        datetime(2038, 9, 27, 22, 45, 23, 857000, tzinfo=UTC),
+        datetime(1978, 9, 8, 7, 20, 59, 715000, tzinfo=UTC),
+        datetime(2039, 5, 15, 5, 45, 9, 186000, tzinfo=UTC),
+    ],
+)
+def test_a_whole_millisecond_survives_being_minted(at: datetime):
+    """Instants whose seconds-as-a-float land just under the millisecond they
+    are. Computing the epoch offset in floating point and truncating loses the
+    last millisecond on roughly one instant in a hundred and sixty; integer
+    division does not, and these three are the ones that noticed.
+    """
+    assert minted_at(mint(at)) == at
 
 
 def test_a_v7_is_the_same_instant_whatever_zone_it_was_minted_in():

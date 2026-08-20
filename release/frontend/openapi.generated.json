@@ -810,6 +810,9 @@
           }
         },
         "type": "object",
+        "required": [
+          "accepted"
+        ],
         "title": "Occurrence",
         "description": "When one transaction happened, in both clocks that saw it.\n\nTwo clocks because they answer different questions and disagree for honest\nreasons. `minted` is the client's, and it is when the USER acted -- which,\nafter a week offline, is the only one that means anything to them. `accepted`\nis this server's, and it is when the change entered the workspace and became\nsomething other clients could see. An offline session makes the gap between\nthem days wide, and neither number is the other's approximation."
       },

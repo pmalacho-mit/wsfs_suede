@@ -62,6 +62,24 @@ describe("the instant inside a minted id", () => {
     const one = mint();
     expect(mintedAt(one)!.getTime()).toBe(mintedAt(one.toUpperCase())!.getTime());
   });
+
+  it("agrees with the server about what is not a v7 at all", () => {
+    // A 7 in the version nibble is only half of it: the VARIANT nibble has to
+    // read 8, 9, a or b, or the id is not an RFC 4122 UUID and the server's
+    // reader (which goes through `UUID.version`) answers unknown. Reading an
+    // instant out of this one here would put a `minted` on the optimistic
+    // entry that the confirmed entry behind it does not have.
+    expect(mintedAt("01924f8a-1b2c-7def-0123-456789abcdef")).toBeUndefined();
+    expect(mintedAt("01924f8a-1b2c-7def-cdef-456789abcdef")).toBeUndefined();
+    expect(mintedAt("01924f8a-1b2c-7def-89ab-456789abcdef")).toBeDefined();
+  });
+
+  it("says unknown rather than throwing on an id shaped like one", () => {
+    // This runs on the read path of every event, so the failure mode for a
+    // string that passes the nibble checks and is still not hex has to be
+    // silence -- the server rejects such an id before its own reader sees it.
+    expect(mintedAt("zzzzzzzz-zzzz-7zzz-8zzz-zzzzzzzzzzzz")).toBeUndefined();
+  });
 });
 
 describe("showing a time on the clock that saw it", () => {
@@ -161,6 +179,15 @@ describe("an occurrence, as a client reads it", () => {
 
   it("has nothing to show when the id said nothing about when", () => {
     expect(localised({ ...at, minted: null })).toBeUndefined();
+  });
+
+  it("has nothing to show for a `minted` that will not parse either", () => {
+    // Same standard as `mintedAt`: this is on the read path of every entry a
+    // UI renders, and `reading` would build NaN into every field and then
+    // throw producing `stamp`. Unreachable from this server, which is also
+    // true of the hex floor in `mintedAt`.
+    expect(localised({ ...at, minted: "the day before yesterday" })).toBeUndefined();
+    expect(() => localised({ ...at, minted: "2026-08-19T02:30:00Z" })).not.toThrow();
   });
 });
 

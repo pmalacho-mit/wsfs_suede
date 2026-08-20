@@ -305,10 +305,15 @@ class Occurrence(BaseModel):
     """The client's minutes east of UTC as it acted, so `minted` can be shown on
     the clock they were actually looking at. Null when they did not say."""
 
-    accepted: datetime | None = None
+    accepted: datetime | None
     """UTC, from this server's clock, at the moment the transaction was applied.
     The trustworthy half of the pair, and the one to reconcile against when a
     client's clock is plainly wrong.
+
+    Nullable but NOT defaulted, and the distinction is the whole of it: the
+    client's optimistic overlay needs to be able to say null, so the wire type
+    has to admit it -- but nothing on this side may reach that value by
+    forgetting to pass one, so there is no default to fall through to.
 
     Null in exactly one place, and never from the server: a client's own
     optimistic overlay, describing work it has queued and nobody has accepted

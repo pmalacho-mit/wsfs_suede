@@ -39,7 +39,21 @@ const UNSAYABLE = Date.UTC(10_000, 0, 1);
 /** A hex string of the whole 128 bits -- the dashes carry no information. */
 const bits = (id: string) => BigInt(`0x${id.replace(/-/g, "")}`);
 
-const isV7 = (id: string) => id[14] === V7;
+/**
+ * The variant nibble, at index 19, whose top two bits must be `10` for an id to
+ * be an RFC 4122 UUID at all -- so `8`, `9`, `a` or `b`.
+ */
+const RFC_4122 = new Set("89abAB");
+
+/**
+ * Both halves of the check, and the second half is not pedantry: the server
+ * reads `UUID.version`, which Python reports as null unless the VARIANT is RFC
+ * 4122 too. An id with a 7 in the version nibble and anything else in the
+ * variant one would otherwise be a v7 here and not one there -- the same
+ * disagreement between the optimistic entry and the confirmed one behind it
+ * that `UNSAYABLE` exists to prevent.
+ */
+const isV7 = (id: string) => id[14] === V7 && RFC_4122.has(id[19] ?? "");
 
 /**
  * The instant a UUIDv7 was minted, or undefined if it was not one.
@@ -51,18 +65,35 @@ const isV7 = (id: string) => id[14] === V7;
  */
 export const mintedAt = (id: Transaction): Date | undefined => {
   if (!isV7(id)) return undefined;
-  const milliseconds = Number(bits(id) >> MILLISECONDS_BEGIN_AT);
+  let milliseconds: number;
+  try {
+    milliseconds = Number(bits(id) >> MILLISECONDS_BEGIN_AT);
+  } catch {
+    // Shaped like a v7 in the two nibbles checked above and still not hex. The
+    // server rejects such a string before it reaches its own reader; this runs
+    // on the read path of every event and must not be the thing that throws.
+    return undefined;
+  }
   return milliseconds < UNSAYABLE ? new Date(milliseconds) : undefined;
 };
 
 /**
  * This client's minutes EAST of UTC, the sign the wire wants.
  *
- * The `|| 0` is not defensive padding: negating a zero in JavaScript produces
- * `-0`, so a client running in UTC would report a value that is `0` over JSON
- * and fails `Object.is(x, 0)` in every test and comparison this side of it.
+ * The negative-zero check is not defensive padding: negating a zero in
+ * JavaScript produces `-0`, so a client running in UTC would report a value
+ * that is `0` over JSON and fails `Object.is(x, 0)` in every test and
+ * comparison this side of it.
+ *
+ * Written as `Object.is` rather than the shorter `|| 0`, which catches the same
+ * case and one more: an Invalid Date makes `getTimezoneOffset()` NaN, and NaN
+ * is falsy, so `|| 0` would answer 0 -- a client claiming UTC because its clock
+ * was unreadable. Wrong in a way nothing downstream could notice.
  */
-export const offset = (at: Date = new Date()): number => -at.getTimezoneOffset() || 0;
+export const offset = (at: Date = new Date()): number => {
+  const minutes = -at.getTimezoneOffset();
+  return Object.is(minutes, -0) ? 0 : minutes;
+};
 
 /** `+02:00`, `-07:00`, `Z` -- how an offset is written down. */
 export const written = (minutes: number): string => {
@@ -128,9 +159,18 @@ export const reading = (instant: Date, minutes?: number | null): Reading => {
 /**
  * When a transaction happened on the client that made it, on that client's
  * clock -- which is the one to show a user their own history on.
+ *
+ * This is the boundary where wire data becomes a call to `reading`, so it is
+ * where an unparseable one stops. `reading` itself stays strict: a Reading
+ * built from an instant that is not one would carry NaN in every field and a
+ * `stamp` that throws on the way out, and silence is only the right answer
+ * for something that arrived from somewhere else.
  */
-export const localised = (at: Occurrence): Reading | undefined =>
-  at.minted == null ? undefined : reading(new Date(at.minted), at.offset);
+export const localised = (at: Occurrence): Reading | undefined => {
+  if (at.minted == null) return undefined;
+  const instant = new Date(at.minted);
+  return Number.isNaN(instant.getTime()) ? undefined : reading(instant, at.offset);
+};
 
 /**
  * When the server accepted it. Always in the READER's zone: a server clock has

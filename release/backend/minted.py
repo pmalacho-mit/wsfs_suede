@@ -73,7 +73,7 @@ def mint(at: datetime | None = None) -> UUID:
     does: a transaction's place in a workspace is its position, and the choke
     point hands those out.
     """
-    milliseconds = int(((at or datetime.now(UTC)) - EPOCH).total_seconds() * 1000)
+    milliseconds = ((at or datetime.now(UTC)) - EPOCH) // timedelta(milliseconds=1)
     return UUID(
         int=(milliseconds << MILLISECONDS_BEGIN_AT)
         | (VERSION << (MILLISECONDS_BEGIN_AT - 4))

@@ -318,7 +318,7 @@ export interface components {
             /** Offset */
             offset?: number | null;
             /** Accepted */
-            accepted?: string | null;
+            accepted: string | null;
         };
         /** Rejection */
         Rejection: {
