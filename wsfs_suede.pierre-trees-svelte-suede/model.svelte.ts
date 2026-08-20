@@ -6,6 +6,7 @@ import {
   type FileTreeIcons,
   type FileTreeItemHandle,
   type FileTreeMoveOptions,
+  type FileTreeMutationEvent,
   type FileTreeRemoveOptions,
   type FileTreeRenderProps,
   type FileTreeResetOptions,
@@ -14,11 +15,76 @@ import {
   type FileTreeVisibleRow,
   type GitStatusEntry,
 } from "@pierre/trees";
-import { Emitter, announceMutation, type Handlers, type Unsubscribe } from "./events";
+import {
+  Emitter,
+  announceMutation,
+  type Events,
+  type Handlers,
+  type Unsubscribe,
+} from "./events";
+import { draftPath } from "./naming";
 import { announcing, type Options } from "./options";
 import { Snapshot } from "./snapshot.svelte";
 
 export type Path = string;
+
+/**
+ * A new entry, between existing and being named.
+ *
+ * The tree can hold a row nothing outside it knows about, and that is the
+ * whole point: a consumer that mirrors the tree somewhere real should hear
+ * about a new file ONCE, under the name the user chose -- not about
+ * `untitled`, and then about a rename it has to chase.
+ */
+type Draft = {
+  path: Path;
+  /** Why it will never become an entry, once that is known. */
+  refused?: string;
+  /** Escape, rather than a name that could not be used: nothing to report. */
+  abandoned?: boolean;
+};
+
+/**
+ * The input the tree draws over the row it is renaming, wherever it is.
+ *
+ * The tree renders into a shadow root -- often the container's OWN, since the
+ * container is usually the custom element itself -- so the search has to start
+ * there rather than with the light-DOM children, of which there are none.
+ */
+const renameInputIn = (root: ParentNode): HTMLInputElement | null => {
+  const own = (root as Element).shadowRoot;
+  const inside = own === null || own === undefined ? null : renameInputIn(own);
+  if (inside) return inside;
+
+  const here = root.querySelector<HTMLInputElement>("[data-item-rename-input]");
+  if (here) return here;
+
+  for (const element of root.querySelectorAll("*")) {
+    const nested = element.shadowRoot && renameInputIn(element.shadowRoot);
+    if (nested) return nested;
+  }
+  return null;
+};
+
+/**
+ * Empties that input, through the same event typing into it would raise.
+ *
+ * A draft is to be typed into, not corrected, and the tree seeds the input
+ * with the row's name -- which for a draft is a placeholder the user never
+ * chose. The input belongs to the tree's own renderer and arrives after the
+ * rename starts, so this waits for it: on microtasks first, which all run
+ * before the browser paints, so the placeholder is never actually seen.
+ */
+const blank = (root: ParentNode, soon = 12, later = 5): void => {
+  const input = renameInputIn(root);
+  if (input === null) {
+    if (soon > 0) queueMicrotask(() => blank(root, soon - 1, later));
+    else if (later > 0) requestAnimationFrame(() => blank(root, 0, later - 1));
+    return;
+  }
+  input.value = "";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+};
 
 class Focus {
   readonly #tree: FileTree;
@@ -221,8 +287,12 @@ export class Model {
   readonly #snapshot = new Snapshot();
   readonly #teardown: Unsubscribe[] = [];
 
+  #draft: Draft | undefined;
+  #held: (() => void) | undefined;
+  #container: HTMLElement | undefined;
+
   constructor(options: Options) {
-    this.tree = new FileTree(announcing(options, this.#events));
+    this.tree = new FileTree(announcing(options, { emit: this.#outward }));
     this.focus = new Focus(this.tree, this.#snapshot);
     this.selection = new Selection(this.tree, this.#snapshot);
     this.search = new Search(this.tree, this.#snapshot);
@@ -231,11 +301,31 @@ export class Model {
 
     this.#teardown.push(this.tree.subscribe(() => this.#absorbChange()));
     this.#teardown.push(
-      this.tree.onMutation("*", (event) =>
-        announceMutation(this.#events, event),
-      ),
+      this.tree.onMutation("*", (event) => this.#announce(event)),
     );
     this.#snapshot.refresh(this.tree);
+  }
+
+  /** Whether a new entry is waiting to be named. */
+  get drafting(): boolean {
+    return this.#draft !== undefined;
+  }
+
+  /**
+   * Adds an entry with no name yet, inside `within`, and puts the cursor in
+   * it.
+   *
+   * What is announced is only ever the outcome: `added`, once, carrying the
+   * name the user typed -- or `rename refused`, carrying why the name could
+   * not be used, with the row already gone. Escape says neither, because
+   * nothing happened.
+   */
+  draft(within: Path, kind: "file" | "folder"): void {
+    const path = draftPath((at) => this.item(at) !== null, within, kind);
+    this.#draft = { path };
+    this.tree.add(path);
+    this.tree.startRenaming(path, { removeIfCanceled: true });
+    if (this.#container) blank(this.#container);
   }
 
   subscribe(handlers: Handlers): Unsubscribe {
@@ -268,8 +358,15 @@ export class Model {
     pathsOrOptions: readonly Path[] | FileTreeResetPreparedOptions,
     options?: FileTreeResetOptions,
   ): void {
-    if (Array.isArray(pathsOrOptions)) this.tree.resetPaths(pathsOrOptions, options);
-    else this.tree.resetPaths(pathsOrOptions as FileTreeResetPreparedOptions);
+    const apply = () => {
+      if (Array.isArray(pathsOrOptions)) this.tree.resetPaths(pathsOrOptions, options);
+      else this.tree.resetPaths(pathsOrOptions as FileTreeResetPreparedOptions);
+    };
+    // A reset rebuilds the tree around a path set a draft is not in, and the
+    // rename in flight goes with it. Whatever arrives mid-draft waits for the
+    // draft to end -- only the newest matters, because each is a whole shape.
+    if (this.#draft !== undefined) this.#held = apply;
+    else apply();
   }
 
   rename(path?: Path, options?: { removeIfCanceled?: boolean }): boolean {
@@ -285,8 +382,20 @@ export class Model {
   }
 
   mount(container: HTMLElement): Unsubscribe {
+    this.#container = container;
     this.tree.render(renderTarget(container));
-    return () => this.tree.unmount();
+    // Escape and a name the tree will not take both end a draft by removing
+    // the row, and the removal alone cannot tell them apart. Only one of them
+    // is worth reporting, so the key that caused it is what says which.
+    const escaped = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && this.#draft) this.#draft.abandoned = true;
+    };
+    container.addEventListener("keydown", escaped, true);
+    return () => {
+      container.removeEventListener("keydown", escaped, true);
+      this.#container = undefined;
+      this.tree.unmount();
+    };
   }
 
   hydrate(container: HTMLElement): Unsubscribe {
@@ -297,6 +406,67 @@ export class Model {
   dispose(): void {
     for (const stop of this.#teardown.splice(0)) stop();
     this.tree.cleanUp();
+  }
+
+  /**
+   * Everything the tree announces about ITSELF passes here first.
+   *
+   * A draft's rename is not a move of anything a subscriber has heard of, so
+   * it is swallowed; the entry it becomes is announced with the mutation
+   * instead. A name the tree will not take is announced as it stands, and
+   * takes the row down with it.
+   */
+  #outward = <Name extends keyof Events>(
+    name: Name,
+    ...args: Events[Name]
+  ): void => {
+    const draft = this.#draft;
+    if (draft !== undefined) {
+      if (name === "renamed") return;
+      if (name === "rename refused") {
+        draft.refused = args[0] as string;
+        // The tree leaves the refused row where it is, still called by its
+        // placeholder. Nothing should be left holding that.
+        queueMicrotask(() => this.remove(draft.path, { recursive: true }));
+      }
+    }
+    this.#events.emit(name, ...args);
+  };
+
+  /**
+   * The tree's own mutations, with a draft's translated: it appears as
+   * nothing, and it lands as an `added` under the name it ended up with.
+   */
+  #announce(event: FileTreeMutationEvent): void {
+    const draft = this.#draft;
+    if (draft === undefined) return announceMutation(this.#events, event);
+
+    if (event.operation === "add" && event.path === draft.path) return;
+
+    if (event.operation === "move" && event.from === draft.path) {
+      this.#draft = undefined;
+      const { operation: _operation, from: _from, to, ...rest } = event;
+      this.#events.emit("added", { ...rest, operation: "add", path: to });
+      return this.#resume();
+    }
+
+    if (event.operation === "remove" && event.path === draft.path) {
+      this.#draft = undefined;
+      // A blank name is refused by the tree before it reaches the rule that
+      // would say so, so this is where that reason comes from.
+      if (draft.abandoned !== true && draft.refused === undefined)
+        this.#events.emit("rename refused", "Name cannot be empty.");
+      return this.#resume();
+    }
+
+    announceMutation(this.#events, event);
+  }
+
+  /** Applies whatever shape arrived while the draft was being named. */
+  #resume(): void {
+    const held = this.#held;
+    this.#held = undefined;
+    held?.();
   }
 
   #absorbChange(): void {

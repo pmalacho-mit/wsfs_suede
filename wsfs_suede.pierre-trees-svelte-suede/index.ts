@@ -124,7 +124,11 @@ export namespace ContextMenu {
   export type Style = MenuVariables;
 }
 
-/** The mutations the standard menu actions are made of. */
+/**
+ * The mutations the standard menu actions are made of. `add` opens a DRAFT --
+ * a row with no name that nothing outside the tree hears about until it has
+ * one; see `Tree.Model.draft`.
+ */
 export const entries = entryMutations;
 
 export const input = {

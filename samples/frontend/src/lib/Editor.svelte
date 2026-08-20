@@ -11,6 +11,7 @@
   import { Editor } from "wsfs_suede.python-monaco-suede";
   import type { MonacoBinding } from "y-monaco";
 
+  import type { Buffer } from "$lib/documents";
   import { holderOf, nameOf } from "$lib/paths";
   import type { Open } from "$lib/workspace.svelte";
 
@@ -22,7 +23,7 @@
 
   $effect(() => {
     let current = true;
-    void workspace.edit(path).then((document) => {
+    void workspace.edit(path).then((document: Buffer) => {
       if (!current) return;
       file = new Editor.Model({
         name: nameOf(path),

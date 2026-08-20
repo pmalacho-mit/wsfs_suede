@@ -15,11 +15,19 @@ export default {
       $lib: "src/lib",
       // A prefix of its own: `$lib/...` is resolved by SvelteKit against
       // src/lib before any alias here is consulted.
-      "$wsfs": new URL("../../release/frontend/index.ts", import.meta.url).pathname,
-      "wsfs_suede.pierre-trees-svelte-suede": suede("wsfs_suede.pierre-trees-svelte-suede"),
-      "wsfs_suede.dockview-svelte-suede": suede("wsfs_suede.dockview-svelte-suede"),
+      $wsfs: new URL("../../release/frontend/index.ts", import.meta.url)
+        .pathname,
+      "wsfs_suede.pierre-trees-svelte-suede": suede(
+        "wsfs_suede.pierre-trees-svelte-suede",
+      ),
+      "wsfs_suede.dockview-svelte-suede": suede(
+        "wsfs_suede.dockview-svelte-suede",
+      ),
       "wsfs_suede.python-monaco-suede": suede("wsfs_suede.python-monaco-suede"),
-      "wsfs_suede.python-web-kernel-suede": suede("wsfs_suede.python-web-kernel-suede"),
+      "wsfs_suede.with-events-suede": suede("wsfs_suede.with-events-suede"),
+      "wsfs_suede.python-web-kernel-suede": suede(
+        "wsfs_suede.python-web-kernel-suede",
+      ),
       "sweater-vest-suede": suede("sweater-vest-suede"),
     },
   },

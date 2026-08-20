@@ -22,7 +22,7 @@ const at = (name: string, over: Partial<Metadata> = {}): Metadata => {
 };
 
 const viewOf = (...entries: Metadata[]) =>
-  effective.of(confirmed.snapshot(entries), []);
+  effective.of(confirmed.snapshot(entries), []).view;
 
 describe("paths over an id-addressed tree", () => {
   it("builds a path by walking to the root", () => {

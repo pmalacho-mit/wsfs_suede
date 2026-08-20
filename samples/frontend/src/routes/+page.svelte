@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
 
-  import Shell from "$lib/Shell.svelte";
+  import Shell from "$lib/Workspace.svelte";
   import { Open, project } from "$lib/workspace.svelte";
 
   const USER = "ada@example.com";
@@ -21,15 +21,26 @@
   onDestroy(() => open?.dispose());
 </script>
 
-{#if failure}
-  <p class="failure">{failure}</p>
-{:else if open}
-  <Shell workspace={open} />
-{:else}
-  <p class="waiting">Opening a workspace…</p>
-{/if}
+<!-- The shell fills whatever it is given, so the page is what says "all of
+     it" -- a test gives it a card-sized box instead. -->
+<div class="page">
+  {#if failure}
+    <p class="failure">{failure}</p>
+  {:else if open}
+    <Shell workspace={open} />
+  {:else}
+    <p class="waiting">Opening a workspace…</p>
+  {/if}
+</div>
 
 <style>
+  .page {
+    height: 100dvh;
+    width: 100%;
+  }
+  :global(body) {
+    margin: 0;
+  }
   .failure,
   .waiting {
     font: 0.9rem/1.5 ui-sans-serif, system-ui, sans-serif;

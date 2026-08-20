@@ -36,7 +36,7 @@ describeLive("a workspace against a live backend", () => {
   });
 
   it("creates a file and reads its content back", async () => {
-    await workspace.create("main.py", "print('hi')");
+    await workspace.create("main.py", "print('hi')").settled;
     await settled(workspace, () => workspace.index().at("main.py") !== undefined);
 
     expect(await workspace.read("main.py")).toEqual({
@@ -46,19 +46,19 @@ describeLive("a workspace against a live backend", () => {
   });
 
   it("puts a file where a path says, not where an id says", async () => {
-    await workspace.folder("src");
+    await workspace.folder("src").settled;
     await settled(workspace, () => workspace.index().at("src") !== undefined);
-    await workspace.create("src/nested.py", "nested");
+    await workspace.create("src/nested.py", "nested").settled;
     await settled(workspace, () => workspace.index().at("src/nested.py") !== undefined);
 
     expect(workspace.index().paths()).toContain("src/nested.py");
   });
 
   it("moves an entry's path and name in one go", async () => {
-    await workspace.create("before.py", "x");
+    await workspace.create("before.py", "x").settled;
     await settled(workspace, () => workspace.index().at("before.py") !== undefined);
 
-    await workspace.move("before.py", "src/after.py");
+    await workspace.move("before.py", "src/after.py").settled;
     await settled(workspace, () => workspace.index().at("src/after.py") !== undefined);
 
     expect(workspace.index().at("before.py")).toBeUndefined();
@@ -66,7 +66,7 @@ describeLive("a workspace against a live backend", () => {
 
   it("carries binary content through the blob store", async () => {
     const payload = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    await workspace.create("logo.png", payload, "image/png");
+    await workspace.create("logo.png", payload, "image/png").settled;
     await settled(workspace, () => workspace.index().at("logo.png") !== undefined);
 
     const held = await workspace.read("logo.png");
@@ -75,10 +75,10 @@ describeLive("a workspace against a live backend", () => {
   });
 
   it("takes a path away when its entry is removed", async () => {
-    await workspace.create("doomed.py", "x");
+    await workspace.create("doomed.py", "x").settled;
     await settled(workspace, () => workspace.index().at("doomed.py") !== undefined);
 
-    await workspace.remove("doomed.py");
+    await workspace.remove("doomed.py").settled;
     await settled(workspace, () => workspace.index().at("doomed.py") === undefined);
 
     expect(workspace.index().paths()).not.toContain("doomed.py");
@@ -95,7 +95,7 @@ describeLive("a workspace against a live backend", () => {
     await settled(mine, () => true);
     await settled(theirs, () => true);
 
-    await theirs.create("shared.py", "theirs");
+    await theirs.create("shared.py", "theirs").settled;
     await settled(mine, () => mine.index().at("shared.py") !== undefined);
 
     expect(await mine.read("shared.py")).toEqual({ kind: "text", text: "theirs" });

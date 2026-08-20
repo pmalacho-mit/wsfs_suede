@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { provider } from "../../release/frontend/adapters/files";
 import { filesystem } from "../../release/frontend/adapters/kernel";
-import { mirror } from "../../release/frontend/adapters/tree";
 import type { Metadata } from "../../release/frontend/contract";
 import { mint } from "../../release/frontend/identity";
 import * as paths from "../../release/frontend/paths";
@@ -28,11 +27,18 @@ const entry = (name: string, over: Partial<Metadata> = {}): Metadata => {
 const standing = (entries: Metadata[]) => {
   const view = new Map(entries.map((e) => [e.id, e]));
   const listeners = new Set<() => void>();
+  /** A mutator hands its transaction back at once, and its answer later. */
+  const submitting = () => ({
+    transaction: mint(),
+    settled: Promise.resolve({ rejected: false } as const),
+  });
+  const creating = () => ({ entry: mint(), ...submitting() });
   const calls = {
-    move: vi.fn(async () => {}),
-    remove: vi.fn(async () => {}),
-    write: vi.fn(async () => {}),
-    folder: vi.fn(async () => mint()),
+    move: vi.fn(submitting),
+    remove: vi.fn(submitting),
+    write: vi.fn(submitting),
+    create: vi.fn(creating),
+    folder: vi.fn(creating),
   };
   const workspace = {
     entries: () => view,
@@ -102,33 +108,5 @@ describe("the kernel's filesystem", () => {
     const { workspace, calls } = standing([entry("a.py")]);
     await filesystem(workspace).move({ from: "a.py", to: "b.py" });
     expect(calls.move).toHaveBeenCalledWith("a.py", "b.py");
-  });
-});
-
-describe("the tree mirror", () => {
-  it("shows the workspace's paths and follows its changes", () => {
-    const { workspace, view, announce } = standing([entry("a.py")]);
-    const reset = vi.fn();
-    mirror(workspace, { reset, subscribe: () => () => {} });
-
-    expect(reset).toHaveBeenLastCalledWith(["a.py"]);
-    const added = entry("b.py");
-    view.set(added.id, added);
-    announce();
-    expect(reset).toHaveBeenLastCalledWith(expect.arrayContaining(["a.py", "b.py"]));
-  });
-
-  it("turns a gesture in the tree into one transaction", () => {
-    const src = entry("src", { type: "folder" });
-    const { workspace, calls } = standing([src, entry("a.py", { parent: src.id })]);
-    let moved: ((e: { from: string; to: string }) => void) | undefined;
-    mirror(workspace, {
-      reset: () => {},
-      subscribe: (handlers) => ((moved = handlers.moved), () => {}),
-    });
-
-    moved!({ from: "src/a.py", to: "src/b.py" });
-
-    expect(calls.move).toHaveBeenCalledWith("src/a.py", "src/b.py");
   });
 });

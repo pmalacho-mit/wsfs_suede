@@ -5,6 +5,13 @@ import type {
 } from "@pierre/trees";
 import type { Emitter } from "./events";
 
+/**
+ * Where these announcements go. Narrower than `Emitter` on purpose: the model
+ * puts itself in the middle of this, so a draft's events can be held back
+ * before anything subscribed ever sees them.
+ */
+export type Announce = Pick<Emitter, "emit">;
+
 export type Options = FileTreeOptions;
 
 const relay =
@@ -27,7 +34,7 @@ const configWhenEnabled = <Config extends object>(
 
 const announcingRenames = (
   renaming: Options["renaming"],
-  emitter: Emitter,
+  emitter: Announce,
 ): FileTreeRenamingConfig | undefined => {
   const config = configWhenEnabled(renaming);
   if (config === undefined) return undefined;
@@ -46,7 +53,7 @@ const announcingRenames = (
 
 const announcingDrops = (
   dragAndDrop: Options["dragAndDrop"],
-  emitter: Emitter,
+  emitter: Announce,
 ): FileTreeDragAndDropConfig | undefined => {
   const config = configWhenEnabled(dragAndDrop);
   if (config === undefined) return undefined;
@@ -63,7 +70,7 @@ const announcingDrops = (
   };
 };
 
-export const announcing = (options: Options, emitter: Emitter): Options => ({
+export const announcing = (options: Options, emitter: Announce): Options => ({
   ...options,
   onSelectionChange: relay(
     (paths) => emitter.emit("selection changed", paths),

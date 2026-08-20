@@ -78,7 +78,7 @@ describeLive("cost", () => {
     const count = 50;
     await timed(`create x${count}`, count, async () => {
       for (let n = 0; n < count; n += 1) {
-        await workspace.create(`file-${n}.py`, `# file ${n}\n`);
+        await workspace.create(`file-${n}.py`, `# file ${n}\n`).settled;
       }
       await settled(workspace, () => workspace.index().paths().length >= count);
     });
@@ -106,7 +106,7 @@ describeLive("cost", () => {
     let at = "";
     for (let level = 0; level < depth; level += 1) {
       at = at === "" ? `level-${level}` : `${at}/level-${level}`;
-      await workspace.folder(at);
+      await workspace.folder(at).settled;
       // Each level is the next one's parent, and a parent has to be CONFIRMED
       // before a child can name it -- otherwise this measures the sync loop
       // catching up rather than the server judging a placement.
@@ -125,7 +125,7 @@ describeLive("cost", () => {
     const count = 25;
     await timed(`create x${count} at depth ${DEPTH}`, count, async () => {
       for (let n = 0; n < count; n += 1) {
-        await workspace.create(`${deepest}/file-${n}.py`, `# ${n}\n`);
+        await workspace.create(`${deepest}/file-${n}.py`, `# ${n}\n`).settled;
       }
       await settled(workspace, () => workspace.index().under(deepest).length >= count);
     });
@@ -138,12 +138,12 @@ describeLive("cost", () => {
     const deepest = await nested(workspace, DEPTH);
 
     const count = 15;
-    for (let n = 0; n < count; n += 1) await workspace.create(`mover-${n}.py`, "x");
+    for (let n = 0; n < count; n += 1) await workspace.create(`mover-${n}.py`, "x").settled;
     await settled(workspace, () => workspace.index().paths().length >= DEPTH + count);
 
     await timed(`move x${count} to depth ${DEPTH}`, count, async () => {
       for (let n = 0; n < count; n += 1) {
-        await workspace.move(`mover-${n}.py`, `${deepest}/mover-${n}.py`);
+        await workspace.move(`mover-${n}.py`, `${deepest}/mover-${n}.py`).settled;
       }
       await settled(workspace, () => workspace.index().under(deepest).length >= count);
     });
@@ -194,7 +194,7 @@ describeLive("cost", () => {
 
     const count = 100;
     for (let n = 0; n < count; n += 1) {
-      await workspace.create(`wide-${n}.py`, "x");
+      await workspace.create(`wide-${n}.py`, "x").settled;
     }
     await settled(workspace, () => workspace.index().paths().length >= count);
 

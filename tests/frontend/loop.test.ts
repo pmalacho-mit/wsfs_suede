@@ -62,6 +62,48 @@ describe("the sync loop", () => {
     expect(reconcile).toHaveBeenCalledTimes(1);
   });
 
+  it("gives the stream's connection back when it is stopped", async () => {
+    let aborted = false;
+    const loop = run(
+      {
+        reconcile: async () => "token",
+        // A stream nothing ever ends: the case where only `stop` can reclaim
+        // the socket. A page that opens and closes workspaces holds one per
+        // closed workspace otherwise, and a browser lends an origin six.
+        follow: (_token, _alive, until) =>
+          new Promise<void>((ended) =>
+            until.addEventListener("abort", () => ((aborted = true), ended())),
+          ),
+      },
+      { watchdogMs: 10_000, minBackoffMs: 0, maxBackoffMs: 0 },
+    );
+
+    await settled();
+    loop.stop();
+    await settled();
+
+    expect(aborted).toBe(true);
+  });
+
+  it("gives the connection back when the watchdog gives up on it", async () => {
+    let aborted = false;
+    const loop = run(
+      {
+        reconcile: async () => "token",
+        follow: (_token, _alive, until) =>
+          new Promise<void>(() => until.addEventListener("abort", () => (aborted = true))),
+      },
+      { watchdogMs: 5, minBackoffMs: 0, maxBackoffMs: 0 },
+    );
+
+    await new Promise((done) => setTimeout(done, 40));
+    loop.stop();
+
+    // The watchdog decides the stream is not there; nothing else is going to
+    // close a fetch the server is perfectly happy to hold open.
+    expect(aborted).toBe(true);
+  });
+
   it("reports a failure instead of stopping over it", async () => {
     const failed = vi.fn();
     let attempts = 0;

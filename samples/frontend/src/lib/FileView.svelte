@@ -21,21 +21,34 @@
   const path = $derived(params.path);
 
   let held = $state<Held | undefined>(undefined);
-  let missing = $state(false);
 
   const runnable = $derived(path.endsWith(".py"));
 
+  /**
+   * Whether the workspace holds this path at all, which is a different
+   * question from whether its content can be read yet. A panel is opened the
+   * moment a file is created, and reading a path the workspace does not have
+   * throws -- so presence is what gates the read, and what "no such file"
+   * actually means.
+   */
+  const present = $derived(workspace.paths.includes(path));
+
+  // Re-read while there is nothing in hand: content arrives on its own event,
+  // after the entry does, and one attempt would land between the two.
   $effect(() => {
+    if (held !== undefined) return;
+    void workspace.revision;
+    if (!present) return;
     let current = true;
     void workspace.workspace
       .read(path)
-      .then((content) => current && ((held = content), (missing = content === undefined)))
-      .catch(() => current && (missing = true));
+      .then((content) => current && content && (held = content))
+      .catch(() => undefined);
     return () => (current = false);
   });
 </script>
 
-{#if missing}
+{#if !present}
   <p class="note">No such file: {path}</p>
 {:else if !held}
   <p class="note">Opening {path}…</p>

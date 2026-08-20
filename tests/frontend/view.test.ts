@@ -93,7 +93,7 @@ describe("the effective view", () => {
       name_version: file.name_version,
     });
 
-    const view = effective.of(confirmed.snapshot([file]), items.entries());
+    const { view } = effective.of(confirmed.snapshot([file]), items.entries());
 
     expect(view.get(file.id)!.name).toBe("renamed.py");
   });
@@ -111,7 +111,7 @@ describe("the effective view", () => {
       content: { type: "text", content: "" },
     });
 
-    const view = effective.of(confirmed.empty(), items.entries());
+    const { view } = effective.of(confirmed.empty(), items.entries());
 
     expect(view.get(id)).toMatchObject({ name: "new.py", type: "file" });
   });
@@ -129,8 +129,8 @@ describe("the effective view", () => {
     items.capture(request);
     const map = confirmed.snapshot([file]);
 
-    expect(effective.of(map, items.entries()).get(file.id)!.name).toBe("renamed.py");
+    expect(effective.of(map, items.entries()).view.get(file.id)!.name).toBe("renamed.py");
     items.evict([request.transaction]);
-    expect(effective.of(map, items.entries()).get(file.id)!.name).toBe("a.py");
+    expect(effective.of(map, items.entries()).view.get(file.id)!.name).toBe("a.py");
   });
 });

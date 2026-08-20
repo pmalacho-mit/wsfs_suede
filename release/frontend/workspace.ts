@@ -6,11 +6,18 @@
  * three therefore cannot disagree about what a file contains.
  */
 import { digestOf, inMemory, type Store } from "./bytes";
+import * as changes from "./changes";
 import * as confirmed from "./confirmed";
 import { cache, type Content, type Held } from "./content";
-import { UNSOUND, type Body, type Id, type Metadata, type Submitted } from "./contract";
-import { MappedDebouncer } from "./debounce";
-import * as documents from "./documents";
+import {
+  UNSOUND,
+  type Body,
+  type Id,
+  type Metadata,
+  type Response,
+  type Submitted,
+  type Transaction,
+} from "./contract";
 import * as effective from "./effective";
 import { mint } from "./identity";
 import * as loop from "./loop";
@@ -21,14 +28,36 @@ import type { Transport } from "./transport";
 export type Options = {
   workspace: Id;
   transport: Transport;
-  /** How an open text file is joined. Absent means nothing is ever open. */
-  open?: documents.Open;
   bytes?: Store;
   timing?: loop.Timing;
-  flushing?: { idleMs: number; maxWaitMs: number };
 };
 
-export type Changed = () => void;
+/**
+ * A listener is handed what changed. Consumers that only need to know THAT
+ * something did can keep ignoring the argument.
+ */
+export type Changed = changes.Watching;
+
+/**
+ * A submitted transaction: its id, available before anything is announced,
+ * and the server's answer, available much later.
+ *
+ * The id has to come back synchronously. Queueing the request recomputes the
+ * view and announces the change it makes, and that happens before the request
+ * is even sent -- so a caller that only learned its transaction id when the
+ * promise resolved would learn it after being told about its own work.
+ *
+ * `settled` does not reject on a refusal: a refused transaction is taken back
+ * by the same recomputation that showed it, and the reason is in the response
+ * for a caller that wants to say something about it.
+ */
+export type Submitting = {
+  transaction: Transaction;
+  settled: Promise<Response>;
+};
+
+/** A create also names the entry it is bringing into existence. */
+export type Creating = Submitting & { entry: Id };
 
 export type Workspace = {
   entries: () => effective.View;
@@ -37,14 +66,11 @@ export type Workspace = {
 
   read: (path: paths.Path) => Promise<Held | undefined>;
   holding: (path: paths.Path) => Held | undefined;
-  write: (path: paths.Path, content: string | Uint8Array, mime?: string) => Promise<void>;
-  create: (path: paths.Path, content: string | Uint8Array, mime?: string) => Promise<Id>;
-  folder: (path: paths.Path) => Promise<Id>;
-  move: (from: paths.Path, to: paths.Path) => Promise<void>;
-  remove: (path: paths.Path) => Promise<void>;
-
-  edit: (path: paths.Path) => Promise<documents.Document>;
-  close: (path: paths.Path) => Promise<void>;
+  write: (path: paths.Path, content: string | Uint8Array, mime?: string) => Submitting;
+  create: (path: paths.Path, content: string | Uint8Array, mime?: string) => Creating;
+  folder: (path: paths.Path) => Creating;
+  move: (from: paths.Path, to: paths.Path) => Submitting;
+  remove: (path: paths.Path) => Submitting;
 
   stop: () => void;
   nudge: () => void;
@@ -55,26 +81,36 @@ const TEXT = "text/plain";
 const isText = (content: string | Uint8Array): content is string =>
   typeof content === "string";
 
+const heldAs = (payload: string | Uint8Array, mime: string): Held =>
+  isText(payload) ? { kind: "text", text: payload } : { kind: "binary", bytes: payload, mime };
+
 export const connect = (options: Options): Workspace => {
   const { workspace, transport } = options;
   const bytes = options.bytes ?? inMemory();
   const queue = outbox.queue(bytes);
-  const docs = documents.registry(options.open ?? notOpenable);
   const listeners = new Set<Changed>();
-  const flushes = new MappedDebouncer<Id>(options.flushing ?? {});
 
   let map = confirmed.empty();
-  let view = effective.of(map, []);
-  let index = paths.index(view);
+  let shown = effective.of(map, []);
+  let index = paths.index(shown.view);
 
-  const content: Content = cache(docs, (entry, version) =>
+  const content: Content = cache((entry, version) =>
     transport.content(workspace, entry, version),
   );
 
+  /**
+   * The one door state leaves by. What is announced is the difference between
+   * the view that was showing and the one now showing -- so a recomputation
+   * that changes nothing a consumer can see announces nothing, whatever
+   * prompted it.
+   */
   const recomputed = () => {
-    view = effective.of(map, queue.entries());
-    index = paths.index(view);
-    listeners.forEach((changed) => changed());
+    const before = shown;
+    shown = effective.of(map, queue.entries());
+    index = paths.index(shown.view);
+    const what = changes.between(before, shown);
+    if (what.length === 0) return;
+    listeners.forEach((changed) => changed(what));
   };
 
   /**
@@ -87,7 +123,6 @@ export const connect = (options: Options): Workspace => {
 
   const applied = (event: import("./contract").StreamEvent) => {
     map = confirmed.applied(map, event);
-    if (event.type === "delete") void docs.evict(event.id);
     if (event.type === "write") content.forget(event.id);
     bytes.forget(queue.evict([event.transaction]));
     recomputed();
@@ -108,9 +143,15 @@ export const connect = (options: Options): Workspace => {
    * created. A rejection is the one answer no event will ever follow, so that
    * is the one this evicts itself.
    */
-  const submit = async (request: Submitted, payload?: string | Uint8Array) => {
+  const submit = async (
+    request: Submitted,
+    payload?: string | Uint8Array,
+    mime = TEXT,
+  ): Promise<Response> => {
     const digest = payload === undefined ? undefined : await bytes.put(payload);
     queue.capture(request, digest);
+    if (payload !== undefined)
+      content.remember(request.transaction, heldAs(payload, mime));
     recomputed();
     const response = await transport.submit(workspace, request);
     if (response.rejected) {
@@ -132,18 +173,28 @@ export const connect = (options: Options): Workspace => {
     return { type: "binary", hash, size: payload.byteLength, mime };
   };
 
-  const written = async (entry: Metadata, payload: string | Uint8Array, mime: string) => {
-    if (entry.content_version == null) throw new Error(`Not a file: ${entry.name}`);
-    await submit(
-      {
-        op: "write",
-        transaction: mint(),
-        id: entry.id,
-        content_version: entry.content_version,
-        content: await staged(payload, mime),
-      },
-      payload,
-    );
+  /**
+   * Every mutation is minted, then sent. The two halves are separate because
+   * the caller needs the first before the second has happened: `submit`
+   * announces the change it makes before the request leaves.
+   */
+  const written = (entry: Metadata, payload: string | Uint8Array, mime: string): Submitting => {
+    const seen = entry.content_version;
+    if (seen == null) throw new Error(`Not a file: ${entry.name}`);
+    const transaction = mint();
+    const settled = (async () =>
+      submit(
+        {
+          op: "write",
+          transaction,
+          id: entry.id,
+          content_version: seen,
+          content: await staged(payload, mime),
+        },
+        payload,
+        mime,
+      ))();
+    return { transaction, settled };
   };
 
   const sync = loop.run(
@@ -164,69 +215,73 @@ export const connect = (options: Options): Workspace => {
         snapshot.entries.forEach(readied);
         return snapshot.token;
       },
-      follow: (token, alive) =>
+      follow: (token, alive, until) =>
         new Promise<void>((ended) => {
+          const done = () => (subscription.close(), ended());
           const subscription = transport.follow(workspace, token, {
             alive,
             event: applied,
-            failed: () => (subscription.close(), ended()),
+            failed: done,
           });
+          until.addEventListener("abort", done, { once: true });
         }),
     },
     options.timing,
   );
 
   return {
-    entries: () => view,
+    entries: () => shown.view,
     index: () => index,
     watch: (changed) => (listeners.add(changed), () => listeners.delete(changed)),
 
     read: (path) => content.read(entryAt(path)),
     holding: (path) => content.holding(entryAt(path)),
 
-    write: async (path, payload, mime = TEXT) => {
+    write: (path, payload, mime = TEXT) => {
       const entry = index.at(path);
-      if (entry === undefined) {
-        await created(path, payload, mime);
-        return;
-      }
-      await written(entry, payload, mime);
+      return entry === undefined
+        ? created(path, payload, mime)
+        : written(entry, payload, mime);
     },
 
     create: (path, payload, mime = TEXT) => created(path, payload, mime),
 
-    folder: async (path) => {
-      const id = mint();
-      await submit({
+    folder: (path) => {
+      const entry = mint();
+      const transaction = mint();
+      const settled = submit({
         op: "create",
-        transaction: mint(),
-        id,
+        transaction,
+        id: entry,
         type: "folder",
         name: paths.base(path),
         parent: parentOf(path),
         content: null,
       });
-      return id;
+      return { entry, transaction, settled };
     },
 
-    move: async (from, to) => {
+    move: (from, to) => {
       const entry = entryAt(from);
-      await submit({
+      const transaction = mint();
+      const settled = submit({
         op: "move",
-        transaction: mint(),
+        transaction,
         id: entry.id,
         name: paths.base(to),
         name_version: entry.name_version,
         parent: parentOf(to),
         parent_version: entry.parent_version,
       });
+      return { transaction, settled };
     },
 
-    remove: async (path) => {
+    remove: (path) => {
       const entry = entryAt(path);
-      await submit({
+      const transaction = mint();
+      const settled = submit({
         op: "delete",
-        transaction: mint(),
+        transaction,
         id: entry.id,
         seen: {
           name_version: entry.name_version,
@@ -235,22 +290,10 @@ export const connect = (options: Options): Workspace => {
           content_version: entry.content_version ?? null,
         },
       });
+      return { transaction, settled };
     },
 
-    edit: async (path) => {
-      const entry = entryAt(path);
-      const document = await docs.attach(entry.id);
-      document.watch(() => flushes.enqueue(entry.id, () => void flushed(entry.id)));
-      return document;
-    },
-
-    close: async (path) => {
-      const entry = entryAt(path);
-      flushes.flush(entry.id);
-      await docs.detach(entry.id);
-    },
-
-    stop: () => (flushes.dispose({ flush: true }), sync.stop()),
+    stop: sync.stop,
     nudge: sync.nudge,
   };
 
@@ -259,36 +302,24 @@ export const connect = (options: Options): Workspace => {
     return holder === "" ? null : entryAt(holder).id;
   }
 
-  async function created(path: paths.Path, payload: string | Uint8Array, mime: string) {
-    const id = mint();
-    await submit(
-      {
-        op: "create",
-        transaction: mint(),
-        id,
-        type: "file",
-        name: paths.base(path),
-        parent: parentOf(path),
-        content: await staged(payload, mime),
-      },
-      payload,
-    );
-    return id;
+  function created(path: paths.Path, payload: string | Uint8Array, mime: string): Creating {
+    const entry = mint();
+    const transaction = mint();
+    const parent = parentOf(path);
+    const settled = (async () =>
+      submit(
+        {
+          op: "create",
+          transaction,
+          id: entry,
+          type: "file",
+          name: paths.base(path),
+          parent,
+          content: await staged(payload, mime),
+        },
+        payload,
+        mime,
+      ))();
+    return { entry, transaction, settled };
   }
-
-  /**
-   * An open file's truth is its document, so what reaches the server is
-   * whatever the document says when the debounce fires -- not whatever the
-   * keystroke that triggered it happened to produce.
-   */
-  async function flushed(entry: Id) {
-    const document = docs.held(entry);
-    const current = view.get(entry);
-    if (document === undefined || current === undefined) return;
-    await written(current, document.text(), TEXT);
-  }
-};
-
-const notOpenable: documents.Open = () => {
-  throw new Error("This workspace was connected without a way to open documents");
 };

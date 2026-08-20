@@ -1,0 +1,810 @@
+<script lang="ts">
+  /**
+   * The whole browser suite, in ONE component, on purpose.
+   *
+   * The report driver opens a tab per test component and runs them all at
+   * once, and only one tab is ever focused; a `config` Sweater's `serial` is
+   * one container's queue, and two containers run alongside each other. Both
+   * roads lead to two tests typing at the same moment, and a rename input
+   * that loses focus mid-word fails somewhere else entirely. So: one file,
+   * one category, and every test in it named after its own subject.
+   *
+   * The one other rule of sharing a page: no two tests may name the same
+   * file. The editor registers a workspace's paths in a filesystem that is
+   * global to the page, and a repeated name collides there rather than in
+   * the backend, where the workspaces are genuinely separate.
+   */
+  import { Sweater } from "sweater-vest-suede";
+
+  import FileTree, { Model as FileTreeModel } from "$lib/FileTree.svelte";
+  import Shell from "$lib/Workspace.svelte";
+  import { Open } from "$lib/workspace.svelte";
+  import {
+    alongside,
+    clickRow,
+    drawn,
+    everythingIn,
+    focused,
+    menuOnEmptySpace,
+    opened,
+    quiet,
+    region,
+    regions,
+    renaming,
+    rowFor,
+    tabs,
+    until,
+  } from "$lib/testing";
+
+  class Pocket {
+    root = $state<HTMLElement>();
+    workspace = $state<Open>();
+    /** The tree's model, which is what a `FileTree` is given. */
+    tree = $state<FileTreeModel>();
+    opened = $state<string[]>([]);
+  }
+
+  /** Puts a workspace on the screen, with the model the tree renders from. */
+  const showing = (pocket: Pocket, workspace: Open) => {
+    pocket.tree = new FileTreeModel(workspace.workspace);
+    pocket.workspace = workspace;
+  };
+
+  /** Wait for a client to hold `path`, whoever's client it is. */
+  const holds = (client: Open, path: string) => () => client.paths.includes(path);
+
+  const menuOn = async (row: HTMLElement) => {
+    const { top, left } = row.getBoundingClientRect();
+    row.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        clientX: left + 4,
+        clientY: top + 4,
+      }),
+    );
+    await new Promise(requestAnimationFrame);
+  };
+
+  const WANTED = ["explorer", "documents", "assistant"] as const;
+
+  const laidOut = (root: HTMLElement) => () =>
+    WANTED.every((name) => !!region(root, name));
+
+  /**
+   * A report card gives each test a slice of one screen, and nine tests make
+   * that slice shorter than the shell it is showing. The capture is taken of
+   * a clone, so telling the clone how tall it is renders the whole thing.
+   */
+  const tall = { height: 500, style: { height: "500px" } };
+
+  /** Where a region sits, so an assertion can talk about left and right. */
+  const box = (root: HTMLElement, name: string) =>
+    region(root, name)!.getBoundingClientRect();
+
+  /** The text of a held file, or nothing at all -- binaries have none. */
+  const texted = (held: { kind: string; text?: string } | undefined) =>
+    held?.kind === "text" ? (held.text ?? "") : "";
+
+  const action = (label: string): HTMLButtonElement => {
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent?.trim() === label,
+    );
+    if (!button) throw new Error(`no "${label}" in the menu`);
+    return button;
+  };
+</script>
+
+<Sweater config category="Sample app" orientation="vertical" mode="serial" />
+
+<Sweater
+  name="runs on a trustworthy origin"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    // Stated once, so the failure has a name. The client hashes queued
+    // payloads with `crypto.subtle`, which browsers withhold from insecure
+    // origins -- reached at the devcontainer's ADDRESS, every test below
+    // fails on a missing namespace instead. `--forward 5173` is what puts
+    // this page on the browser's own localhost, where it is trusted.
+    harness.expect(window.isSecureContext).toBe(true);
+    harness.expect(typeof crypto.subtle?.digest).toBe("function");
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <p class="note">Origin: {typeof window === "undefined" ? "?" : window.origin}</p>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="draws what the workspace holds"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    await workspace.workspace.create("notes.md", "hello").settled;
+    await workspace.workspace.folder("src").settled;
+
+    const { root } = await harness.definition("root");
+    await until(
+      "both entries drawn",
+      () => !!rowFor(root, "notes.md") && !!rowFor(root, "src"),
+      () => drawn(root).join(" | "),
+    );
+
+    harness.expect(rowFor(root, "notes.md")).toBeTruthy();
+    // The regression the trailing separator fixes: an EMPTY folder has no
+    // children to give it away, so only its type can say it is one.
+    harness.expect(rowFor(root, "src")).toBeTruthy();
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the menu adds a file, and the server keeps it"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("anchor.md", "").settled;
+    const { root } = await harness.definition("root");
+    await until("the anchor is drawn", () => !!rowFor(root, "anchor.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await menuOn(rowFor(root, "anchor.md")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("New file"));
+      await userEvent.keyboard("greeting.py{Enter}");
+    });
+
+    // The other client is the one that matters: it only ever sees what the
+    // backend actually stored and streamed back.
+    await until("the other client sees it", holds(other, "greeting.py"), () =>
+      other.paths.join(" | "),
+    );
+    harness.expect(other.paths).toContain("greeting.py");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the menu renames a file, and the rename is a move"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("before.md", "x").settled;
+    const { root } = await harness.definition("root");
+    await until("the file is drawn", () => !!rowFor(root, "before.md"), () =>
+      drawn(root).join(" | "),
+    );
+    await until("the other client has it", holds(other, "before.md"), () =>
+      other.paths.join(" | "),
+    );
+
+    await menuOn(rowFor(root, "before.md")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Rename"));
+      await userEvent.keyboard("{Control>}a{/Control}after.md{Enter}");
+    });
+
+    await until("the rename reached the server", holds(other, "after.md"), () =>
+      other.paths.join(" | "),
+    );
+    harness.expect(other.paths).not.toContain("before.md");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the menu deletes a file everywhere"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("doomed.md", "x").settled;
+    const { root } = await harness.definition("root");
+    await until("the file is drawn", () => !!rowFor(root, "doomed.md"), () =>
+      drawn(root).join(" | "),
+    );
+    await until("the other client has it", holds(other, "doomed.md"), () =>
+      other.paths.join(" | "),
+    );
+
+    await menuOn(rowFor(root, "doomed.md")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Delete"));
+    });
+
+    await until(
+      "the delete reached the server",
+      () => !other.paths.includes("doomed.md"),
+      () => other.paths.join(" | "),
+    );
+    harness.expect(other.paths).not.toContain("doomed.md");
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the empty space below the entries adds a file at the root"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    // One entry, so there is plenty of empty tree below it to click on.
+    await workspace.workspace.create("ledger.md", "").settled;
+    const { root } = await harness.definition("root");
+    await until("the first entry is drawn", () => !!rowFor(root, "ledger.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await menuOnEmptySpace(region(root, "tree")!);
+    // Captured with the menu open: the two actions an entry cannot offer.
+    void harness.capture("png", tall);
+    harness.expect(action("Add file")).toBeTruthy();
+    harness.expect(action("Add folder")).toBeTruthy();
+
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Add file"));
+      await userEvent.keyboard("root-note.md{Enter}");
+    });
+
+    await until("the other client sees it", holds(other, "root-note.md"), () =>
+      other.paths.join(" | "),
+    );
+    // At the ROOT, not beside or inside anything.
+    harness.expect(other.paths).toContain("root-note.md");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the same menu adds a folder at the root"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("beacon.md", "").settled;
+    const { root } = await harness.definition("root");
+    await until("the first entry is drawn", () => !!rowFor(root, "beacon.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await menuOnEmptySpace(region(root, "tree")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Add folder"));
+      await userEvent.keyboard("library{Enter}");
+    });
+
+    await until("the other client sees it", holds(other, "library"), () =>
+      other.paths.join(" | "),
+    );
+    // And as a FOLDER: an empty one has no children to give it away, so only
+    // the entry's own type can say which it is.
+    harness.expect(other.workspace.index().at("library")?.type).toBe("folder");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the shell lays the workspace out as three regions, left to right"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    await workspace.workspace.create("main.py", "print('hi')").settled;
+    await workspace.workspace.folder("shelf").settled;
+
+    const { root } = await harness.definition("root");
+    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
+    await until("the tree drew the workspace", () => !!rowFor(root, "main.py"), () =>
+      drawn(root).join(" | "),
+    );
+
+    const explorer = box(root, "explorer");
+    const documents = box(root, "documents");
+    const assistant = box(root, "assistant");
+
+    // A pixel of slack: the grid draws a sash between the regions.
+    harness.expect(explorer.right).toBeLessThanOrEqual(documents.left + 1);
+    harness.expect(documents.right).toBeLessThanOrEqual(assistant.left + 1);
+
+    // The tree reaches the bottom edge of the explorer, which is what makes
+    // the space under the last entry a place worth right-clicking.
+    const tree = box(root, "tree");
+    harness.expect(Math.abs(tree.bottom - explorer.bottom)).toBeLessThan(2);
+
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the shell docks a selected file in the middle region"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    await workspace.workspace.create("essay.md", "hello").settled;
+
+    const { root } = await harness.definition("root");
+    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
+    await until("the file is drawn", () => !!rowFor(root, "essay.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await clickRow(rowFor(root, "essay.md")!);
+
+    const named = () => tabs(root).find((tab) => tab.textContent?.includes("essay.md"));
+    await until("a tab for the file", () => !!named(), () =>
+      tabs(root).map((tab) => tab.textContent).join(" | "),
+    );
+
+    // In the MIDDLE region: the tree hands the path to the dock, and the dock
+    // is the only region that takes panels.
+    const documents = box(root, "documents");
+    const tab = named()!.getBoundingClientRect();
+    harness.expect(tab.left).toBeGreaterThanOrEqual(documents.left - 1);
+    harness.expect(tab.right).toBeLessThanOrEqual(documents.right + 1);
+
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the shell creates a file the way a person does, and says nothing in the console"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    const console = quiet();
+    harness.onAbort(console.stop);
+
+    const { root } = await harness.definition("root");
+    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
+
+    // Right-click the empty explorer -> Add file.
+    await menuOnEmptySpace(region(root, "tree")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Add file"));
+    });
+
+    // The row is there, being named, and the box is EMPTY -- the user types a
+    // name rather than correcting one nobody chose. Promptly, too: a
+    // placeholder that shows for a moment is a placeholder that was seen.
+    await until(
+      "an empty rename box",
+      () => renaming(root)?.value === "",
+      () => `value ${JSON.stringify(renaming(root)?.value)}`,
+      1000,
+    );
+    void harness.capture("png", tall);
+
+    // Nothing has been created yet: a draft is the tree's alone, and the
+    // workspace has not been asked for anything.
+    harness.expect(workspace.paths).toEqual([]);
+
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.keyboard("sketch.py{Enter}");
+    });
+
+    await until("the file exists", () => workspace.paths.includes("sketch.py"), () =>
+      workspace.paths.join(" | "),
+    );
+
+    // And it opened, in the middle region, with its empty content: a real
+    // editor, not a panel still explaining itself.
+    await until(
+      "a tab for the file",
+      () => tabs(root).some((tab) => tab.textContent?.includes("sketch.py")),
+      () => tabs(root).map((tab) => tab.textContent).join(" | "),
+    );
+    await until(
+      "the editor mounted",
+      () =>
+        everythingIn(region(root, "documents")!).some((element) =>
+          element.classList.contains("monaco-editor"),
+        ),
+      () => region(root, "documents")!.textContent?.trim() ?? "",
+    );
+
+    const middle = region(root, "documents")!.textContent ?? "";
+    harness.expect(middle).not.toContain("No such file");
+    harness.expect(middle).not.toContain("Opening sketch.py");
+    harness.expect(middle).not.toContain("Loading sketch.py");
+
+    void harness.capture("png", tall);
+    harness.expect(console.ours().join(" | ")).toBe("");
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a blank name creates nothing, and says why"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    const console = quiet();
+    harness.onAbort(console.stop);
+
+    await workspace.workspace.create("kept.md", "").settled;
+    const { root } = await harness.definition("root");
+    await until("the first entry is drawn", () => !!rowFor(root, "kept.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await menuOnEmptySpace(region(root, "tree")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Add file"));
+      await userEvent.keyboard("{Enter}");
+    });
+
+    await until("the draft is gone", () => renaming(root) === undefined, () => "still naming");
+    harness.expect(drawn(root)).toEqual(["kept.md"]);
+    harness.expect(other.paths).toEqual(["kept.md"]);
+    harness.expect(console.complaints().join(" ")).toContain("Name cannot be empty");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a name a sibling already has creates nothing, and says why"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    const console = quiet();
+    harness.onAbort(console.stop);
+
+    await workspace.workspace.create("taken.md", "first").settled;
+    const { root } = await harness.definition("root");
+    await until("the first entry is drawn", () => !!rowFor(root, "taken.md"), () =>
+      drawn(root).join(" | "),
+    );
+    await until("the other client has it", holds(other, "taken.md"), () =>
+      other.paths.join(" | "),
+    );
+
+    await menuOnEmptySpace(region(root, "tree")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Add file"));
+      await userEvent.keyboard("taken.md{Enter}");
+    });
+
+    await until("the draft is gone", () => renaming(root) === undefined, () => "still naming");
+    // One entry, still, and the one that was already there keeps its content.
+    harness.expect(drawn(root)).toEqual(["taken.md"]);
+    harness.expect(other.paths).toEqual(["taken.md"]);
+    harness.expect(console.complaints().join(" ")).toContain("already exists");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="an open buffer is what a reader gets, and what reaches the server"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("draft.md", "before").settled;
+    const { root } = await harness.definition("root");
+    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
+    await until("the file is drawn", () => !!rowFor(root, "draft.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    await clickRow(rowFor(root, "draft.md")!);
+    await until(
+      "the editor mounted",
+      () =>
+        everythingIn(region(root, "documents")!).some((element) =>
+          element.classList.contains("monaco-editor"),
+        ),
+      () => region(root, "documents")!.textContent?.trim() ?? "",
+    );
+
+    // Written into the buffer the editor is bound to -- which is where the
+    // client no longer looks, because it has no way to know one exists.
+    const buffer = await workspace.edit("draft.md");
+    harness.expect(buffer.text()).toBe("before");
+    (buffer.shared as { insert: (at: number, text: string) => void }).insert(6, " after");
+
+    // A reader that asks the consumer gets the typing; one that asks the
+    // client alone still gets the last accepted write. Both are correct, and
+    // choosing between them is exactly what moved out of the client.
+    harness.expect(texted(workspace.buffers.holding("draft.md"))).toBe("before after");
+    harness.expect(texted(workspace.workspace.holding("draft.md"))).toBe("before");
+
+    // And the debounce turns it into a write the server keeps: when the
+    // buffer becomes everybody's truth is the consumer's decision too.
+    await until(
+      "the other client has the typing",
+      () => texted(other.workspace.holding("draft.md")).includes("after"),
+      () => JSON.stringify(other.workspace.holding("draft.md")),
+      15_000,
+    );
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell workspace={p.workspace} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="somebody else renaming a folder carries its contents, and costs the tree nothing"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("keep.md", "").settled;
+    await workspace.workspace.folder("box").settled;
+    await workspace.workspace.create("box/inner.md", "").settled;
+
+    const { root } = await harness.definition("root");
+    await until(
+      "the workspace is drawn",
+      () => !!rowFor(root, "keep.md") && !!rowFor(root, "box"),
+      () => drawn(root).join(" | "),
+    );
+    await until("the other client has it", holds(other, "box/inner.md"), () =>
+      other.paths.join(" | "),
+    );
+
+    // Two things for the tree to lose: an expanded folder, and a focused row.
+    await clickRow(rowFor(root, "box")!);
+    await until("the folder is open", () => !!rowFor(root, "box/inner.md"), () =>
+      drawn(root).join(" | "),
+    );
+    await clickRow(rowFor(root, "keep.md")!);
+    await until("a focused row", () => focused(root) === "keep.md", () =>
+      String(focused(root)),
+    );
+
+    // Somebody else moves the folder. ONE change reaches this client -- the
+    // folder's own name -- and the entry under it is carried by the tree,
+    // because the tree is holding ids rather than re-deriving paths.
+    await other.workspace.move("box", "crate").settled;
+
+    await until("the folder followed", () => !!rowFor(root, "crate"), () =>
+      drawn(root).join(" | "),
+    );
+    // Still DRAWN, which means the folder is still open: a reset would have
+    // closed it, and closing it is how the old tree lost the user's place.
+    await until("what was inside it followed too", () => !!rowFor(root, "crate/inner.md"), () =>
+      drawn(root).join(" | "),
+    );
+    harness.expect(rowFor(root, "box")).toBeUndefined();
+    harness.expect(focused(root)).toBe("keep.md");
+    void harness.capture("png", tall);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="what the tree announces is already true of the workspace"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { workspace } = await opened();
+    showing(pocket, workspace);
+    harness.onAbort(() => workspace.dispose());
+
+    await workspace.workspace.create("told.md", "x").settled;
+    const { root, tree } = await harness.definition("root", "tree");
+    await until("the file is drawn", () => !!rowFor(root, "told.md"), () =>
+      drawn(root).join(" | "),
+    );
+
+    // What the workspace said about the announced path, AT the moment it was
+    // announced. A gesture has to square the tree's own bookkeeping before
+    // the workspace is told, so without holding the news back these would
+    // both be the other way round.
+    const asked: string[] = [];
+    const known = (path: string) =>
+      workspace.workspace.index().at(path) === undefined ? "unknown" : "known";
+    harness.onAbort(
+      tree.subscribe({
+        renamed: ({ path }) => asked.push(`renamed ${known(path)}`),
+        removed: ({ path }) => asked.push(`removed ${known(path)}`),
+      }),
+    );
+
+    await menuOn(rowFor(root, "told.md")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Rename"));
+      await userEvent.keyboard("{Control>}a{/Control}heard.md{Enter}");
+    });
+    await until("the rename was announced", () => asked.length > 0, () =>
+      asked.join(" | "),
+    );
+
+    await menuOn(rowFor(root, "heard.md")!);
+    await harness.withUserFocus(async (userEvent) => {
+      await userEvent.click(action("Delete"));
+    });
+    await until("the delete was announced", () => asked.length > 1, () =>
+      asked.join(" | "),
+    );
+
+    // Told where it IS, and told it is gone -- both already true, so a
+    // listener that reads at the path it was handed gets an answer.
+    harness.expect(asked).toEqual(["renamed known", "removed unknown"]);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="panel" bind:this={p.root}>
+      {#if p.tree}
+        <FileTree model={p.tree} />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<style>
+  .note {
+    margin: 0;
+    padding: 0.5rem;
+    font: 12px ui-monospace, monospace;
+  }
+
+  /* The shell fills what it is given; a report card is not a viewport. */
+  .stage {
+    height: 460px;
+    border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .panel {
+    height: 320px;
+    overflow: auto;
+    border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+    border-radius: 6px;
+  }
+</style>

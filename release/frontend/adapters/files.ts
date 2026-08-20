@@ -30,8 +30,18 @@ const changesBetween = (before: Set<Path>, after: Set<Path>): Change[] => [
 const added = (path: Path): Change => ({ path, kind: "added" });
 const removed = (path: Path): Change => ({ path, kind: "removed" });
 
+/**
+ * Files only. A folder is implied by what lives in it, and an editor's
+ * filesystem refuses to hold a directory that was registered as a file --
+ * which is what `notes/` becomes the moment anything is created inside it.
+ */
+const files = (workspace: Workspace): Path[] => {
+  const index = workspace.index();
+  return index.paths().filter((path) => index.at(path)?.type === "file");
+};
+
 export const provider = (workspace: Workspace): FileProvider => ({
-  paths: () => workspace.index().paths(),
+  paths: () => files(workspace),
 
   read: async (path) => {
     const held = await workspace.read(path);
@@ -39,7 +49,7 @@ export const provider = (workspace: Workspace): FileProvider => ({
     return textOf(held);
   },
 
-  write: (path, text) => workspace.write(path, text),
+  write: async (path, text) => void (await workspace.write(path, text).settled),
 
   /**
    * Only appearances and disappearances are announced. Content changes reach
@@ -47,9 +57,9 @@ export const provider = (workspace: Workspace): FileProvider => ({
    * too would ask it to reload a buffer somebody is typing into.
    */
   watch: (listen) => {
-    let known = new Set(workspace.index().paths());
+    let known = new Set(files(workspace));
     return workspace.watch(() => {
-      const now = new Set(workspace.index().paths());
+      const now = new Set(files(workspace));
       changesBetween(known, now).forEach(listen);
       known = now;
     });

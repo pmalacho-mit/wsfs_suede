@@ -1,9 +1,19 @@
 import { sveltekit } from "@sveltejs/kit/vite";
-import { defineConfig } from "vite";
+import { defineConfig, type UserConfig } from "vite";
+import { applyConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
 
 const BACKEND = process.env.WSFS_BACKEND ?? "http://localhost:8099";
 
-export default defineConfig({
+/** This checkout: the siblings are imported from source, and so is the editor's. */
+const CHECKOUT = new URL("../../", import.meta.url).pathname;
+
+/**
+ * The editor brings its own build requirements -- a language server worker to
+ * copy, `PYTHON_MONACO_BASE` to define, and this checkout to allow serving
+ * from. Without them monaco mounts and then fails on its first worker, which
+ * looks like a file that will not open.
+ */
+const config = defineConfig({
   plugins: [sveltekit()],
   server: {
     // Reachable from outside this container, because the browser that runs
@@ -11,6 +21,10 @@ export default defineConfig({
     // port on that browser's localhost by pointing it at THIS machine's
     // address, which the default localhost-only bind does not answer.
     host: true,
+    // The editor's own assets live in the checkout's node_modules, several
+    // directories above this app. Without this they are served as Forbidden,
+    // which monaco reports as a theme it could not load.
+    fs: { allow: [CHECKOUT] },
     // The sample talks to the sample backend from the same origin, so nothing
     // here needs CORS and the browser sends the session cookie it would send
     // in a real deployment.
@@ -22,3 +36,22 @@ export default defineConfig({
   worker: { format: "es" },
   optimizeDeps: { exclude: ["pyodide"] },
 });
+
+/**
+ * Cast because the helper is typed against the copy of vite ITS package
+ * resolves, and this app resolves its own -- two installs, structurally the
+ * same and nominally different.
+ */
+const configured = applyConfig(
+  config as Parameters<typeof applyConfig>[0],
+) as UserConfig;
+
+/**
+ * The helper still reaches for esbuild's pre-bundler, which vite 8 replaced
+ * with rolldown -- and the plugin it registers there throws "Not implemented"
+ * before a single dependency is scanned. Everything else it does is what the
+ * editor actually needs, so only this comes back off.
+ */
+delete configured.optimizeDeps?.esbuildOptions;
+
+export default configured;

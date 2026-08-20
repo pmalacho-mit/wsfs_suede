@@ -27,8 +27,12 @@ export const DEFAULTS: Timing = {
 export type Cycle = {
   /** Runs Initialize, applies its answer, and returns the stream token. */
   reconcile: () => Promise<string>;
-  /** Resolves when the stream fails; rejects nothing. */
-  follow: (token: string, alive: () => void) => Promise<void>;
+  /**
+   * Resolves when the stream fails; rejects nothing. Stops reading when
+   * `until` aborts, which is how the loop gets the connection back rather
+   * than leaving it open for a server that has no reason to close it.
+   */
+  follow: (token: string, alive: () => void, until: AbortSignal) => Promise<void>;
   failed?: (reason: unknown) => void;
 };
 
@@ -59,6 +63,7 @@ export const run = (cycle: Cycle, timing: Timing = DEFAULTS): Loop => {
   let stopped = false;
   let backoff = timing.minBackoffMs;
   let wake: (() => void) | undefined;
+  let reading: AbortController | undefined;
 
   const rest = async () => {
     const waited = new Promise<void>((resume) => (wake = resume));
@@ -69,12 +74,22 @@ export const run = (cycle: Cycle, timing: Timing = DEFAULTS): Loop => {
 
   const once = async () => {
     const token = await cycle.reconcile();
+    if (stopped) return; // stopped mid-reconcile: do not open a stream nobody wants
     const guard = watchdog(timing.watchdogMs);
+    reading = new AbortController();
     backoff = timing.minBackoffMs; // a stream that reconciled is established
     try {
-      await Promise.race([cycle.follow(token, guard.reset), guard.expired]);
+      await Promise.race([
+        cycle.follow(token, guard.reset, reading.signal),
+        guard.expired,
+      ]);
     } finally {
       guard.stop();
+      // Whichever side of the race won, this stream is over. A watchdog that
+      // fires on a proxy holding the connection open is the case that matters:
+      // nothing else would ever hand the socket back.
+      reading.abort();
+      reading = undefined;
     }
   };
 
@@ -92,6 +107,7 @@ export const run = (cycle: Cycle, timing: Timing = DEFAULTS): Loop => {
   return {
     stop: () => {
       stopped = true;
+      reading?.abort();
       wake?.();
     },
     /** Re-enter now: what a tab becoming visible, or coming online, means. */

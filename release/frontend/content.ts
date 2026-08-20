@@ -1,17 +1,20 @@
 /**
  * Reading a file, in the order the answers are trustworthy.
  *
- *   1. an open document -- the CRDT is the truth while somebody is editing
- *   2. the cache, keyed by the content token the last event announced
- *   3. the server
+ *   1. the cache, keyed by the content token the last event announced
+ *   2. the server
  *
- * Step 2 is keyed by TOKEN rather than by id, which is what makes it correct
- * without an invalidation step: a `write` event advances the token, so the
- * cache line for the old one simply stops being asked for.
+ * The cache is keyed by TOKEN rather than by id, which is what makes it
+ * correct without an invalidation step: a `write` event advances the token, so
+ * the cache line for the old one simply stops being asked for.
+ *
+ * WHO ELSE to trust is not decided here. An editor holding a buffer somebody
+ * is typing into knows something this does not, and it is the consumer that
+ * knows it has one -- so preferring it is the consumer's rule to write, over
+ * the top of this.
  */
 import { asText } from "./bytes";
 import type { Id, Metadata, Version } from "./contract";
-import type { Registry } from "./documents";
 
 export type Held =
   | { kind: "text"; text: string }
@@ -30,20 +33,26 @@ export type Content = {
    * than out of a request it would have to block on.
    */
   prefetch: (entry: Metadata) => Promise<void>;
+  /**
+   * What a write this client just queued put there, under the token it will
+   * be recorded against.
+   *
+   * The token is the transaction id, which the client minted and the server
+   * records unchanged -- so this line is right before the server has heard of
+   * it and stays right afterwards. Without it a file cannot be read back
+   * until it is confirmed, which is the one thing an offline client cannot
+   * wait for.
+   */
+  remember: (version: Version, content: Held) => void;
   forget: (entry: Id) => void;
 };
 
 const keyed = (entry: Metadata) => entry.content_version ?? undefined;
 
-export const cache = (documents: Registry, fetch: Fetch): Content => {
+export const cache = (fetch: Fetch): Content => {
   const held = new Map<Version, Held>();
   const byEntry = new Map<Id, Version>();
   const arriving = new Map<Version, Promise<Held>>();
-
-  const edited = (entry: Metadata): Held | undefined => {
-    const document = documents.held(entry.id);
-    return document === undefined ? undefined : { kind: "text", text: document.text() };
-  };
 
   const cached = (version: Version | undefined) =>
     version === undefined ? undefined : held.get(version);
@@ -61,10 +70,13 @@ export const cache = (documents: Registry, fetch: Fetch): Content => {
     return request;
   };
 
-  const holding = (entry: Metadata) => edited(entry) ?? cached(keyed(entry));
+  const holding = (entry: Metadata) => cached(keyed(entry));
 
   return {
     holding,
+    remember: (version, content) => {
+      held.set(version, content);
+    },
     forget: (entry) => {
       const version = byEntry.get(entry);
       if (version !== undefined) held.delete(version);
