@@ -70,3 +70,32 @@
     </div>
   {/if}
 </file-tree-container>
+
+<style>
+  /*
+   * The model marks the host while a drop on it would land at the root -- the
+   * empty space below the last row, and the header. The tree declares its
+   * palette on `:host`, which IS this element, so the ring can be the colour
+   * the focus ring already is without anyone wiring a theme through.
+   *
+   * The tint is an image rather than a background colour because the tree
+   * paints the host's background itself: this lies over that, instead of
+   * taking it away for as long as the drag lasts.
+   */
+  file-tree-container[data-root-drop-target] {
+    --root-drop-ring: var(
+      --trees-root-drop-ring-color,
+      var(--trees-focus-ring-color, var(--trees-accent, #009fff))
+    );
+    --root-drop-tint: var(
+      --trees-root-drop-bg,
+      color-mix(in oklch, var(--root-drop-ring) 8%, transparent)
+    );
+    box-shadow: inset 0 0 0 var(--trees-focus-ring-width, 1px)
+      var(--root-drop-ring);
+    background-image: linear-gradient(
+      var(--root-drop-tint),
+      var(--root-drop-tint)
+    );
+  }
+</style>

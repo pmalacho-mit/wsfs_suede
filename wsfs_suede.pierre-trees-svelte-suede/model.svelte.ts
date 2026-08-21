@@ -2,6 +2,7 @@ import {
   FILE_TREE_TAG_NAME,
   FileTree,
   type FileTreeBatchOperation,
+  type FileTreeDragAndDropConfig,
   type FileTreeGitStatusPatch,
   type FileTreeIcons,
   type FileTreeItemHandle,
@@ -22,8 +23,9 @@ import {
   type Handlers,
   type Unsubscribe,
 } from "./events";
+import { rootDropsIn, type Subject } from "./dropping";
 import { draftPath } from "./naming";
-import { announcing, type Options } from "./options";
+import { announcing, dropsOnRoot, type Options } from "./options";
 import { Snapshot } from "./snapshot.svelte";
 
 export type Path = string;
@@ -286,13 +288,24 @@ export class Model {
   readonly #events = new Emitter();
   readonly #snapshot = new Snapshot();
   readonly #teardown: Unsubscribe[] = [];
+  readonly #dragAndDrop: FileTreeDragAndDropConfig | undefined;
+  readonly #dropOnRoot: boolean;
+
+  #draft: Draft | undefined;
+  #held: (() => void) | undefined;
+  #container: HTMLElement | undefined;
 
   #draft: Draft | undefined;
   #held: (() => void) | undefined;
   #container: HTMLElement | undefined;
 
   constructor(options: Options) {
-    this.tree = new FileTree(announcing(options, { emit: this.#outward }));
+    const prepared = announcing(options, { emit: this.#outward });
+    // Kept as the tree took it, callbacks and all, so a drop this wrapper
+    // completes itself is announced exactly like one the tree completes.
+    this.#dragAndDrop = prepared.dragAndDrop;
+    this.#dropOnRoot = dropsOnRoot(options);
+    this.tree = new FileTree(prepared);
     this.focus = new Focus(this.tree, this.#snapshot);
     this.selection = new Selection(this.tree, this.#snapshot);
     this.search = new Search(this.tree, this.#snapshot);
@@ -384,6 +397,7 @@ export class Model {
   mount(container: HTMLElement): Unsubscribe {
     this.#container = container;
     this.tree.render(renderTarget(container));
+    const stopRootDrops = this.#rootDrops(container);
     // Escape and a name the tree will not take both end a draft by removing
     // the row, and the removal alone cannot tell them apart. Only one of them
     // is worth reporting, so the key that caused it is what says which.
@@ -392,6 +406,7 @@ export class Model {
     };
     container.addEventListener("keydown", escaped, true);
     return () => {
+      stopRootDrops?.();
       container.removeEventListener("keydown", escaped, true);
       this.#container = undefined;
       this.tree.unmount();
@@ -400,13 +415,38 @@ export class Model {
 
   hydrate(container: HTMLElement): Unsubscribe {
     this.tree.hydrate({ fileTreeContainer: container });
-    return () => this.tree.unmount();
+    const stopRootDrops = this.#rootDrops(container);
+    return () => {
+      stopRootDrops?.();
+      this.tree.unmount();
+    };
   }
 
   dispose(): void {
     for (const stop of this.#teardown.splice(0)) stop();
     this.tree.cleanUp();
   }
+
+  /**
+   * Where the tree's own empty space starts meaning the root, for as long as
+   * the tree is on the page.
+   */
+  #rootDrops(container: HTMLElement): Unsubscribe | undefined {
+    if (!this.#dropOnRoot || this.#dragAndDrop === undefined) return undefined;
+    return rootDropsIn(container, this.#dragAndDrop, this.#subject);
+  }
+
+  /** The tree as a drop on the root sees it -- what it carries, and where it lands. */
+  readonly #subject: Subject = {
+    // The tree settles the selection on the row being dragged before this is
+    // read, so the selection IS what the drag carries.
+    dragging: () => this.tree.getSelectedPaths(),
+    // A bare name matches an entry of either kind, which is what a collision
+    // is: `lib/` cannot land where a file called `lib` already is.
+    taken: (name) => this.item(name) !== null,
+    move: (from, to) => this.move(from, to),
+    batch: (operations) => this.batch(operations),
+  };
 
   /**
    * Everything the tree announces about ITSELF passes here first.
