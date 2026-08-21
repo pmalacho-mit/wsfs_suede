@@ -1,6 +1,7 @@
 import { sveltekit } from "@sveltejs/kit/vite";
 import { defineConfig, type UserConfig } from "vite";
-import { applyConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
+import { applyConfig as applyMonacoConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
+import { applyConfig as applyKernelConfig } from "../../wsfs_suede.python-web-kernel-suede/config/vite.js";
 
 const BACKEND = process.env.WSFS_BACKEND ?? "http://localhost:8099";
 
@@ -45,8 +46,8 @@ const config = defineConfig({
  * resolves, and this app resolves its own -- two installs, structurally the
  * same and nominally different.
  */
-const configured = applyConfig(
-  config as Parameters<typeof applyConfig>[0],
+const configured = applyKernelConfig(
+  applyMonacoConfig(config as Parameters<typeof applyMonacoConfig>[0]),
 ) as UserConfig;
 
 export default configured;

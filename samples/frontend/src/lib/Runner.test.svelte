@@ -15,12 +15,27 @@
     readonly pool = new WarmPool<Kernel>({
       create: () =>
         new Kernel({
-          fs: fs.empty("/home/pyodide"),
+          fs: fs.readWrite({
+            root: "/home/pyodide",
+            get: (path) => {
+              console.log({ get: path });
+            },
+            listDirectory: (path) => {
+              console.log({ listDirectory: path });
+            },
+            put: (path) => {
+              console.log({ put: path });
+            },
+          }),
           input: async (prompt) => window.prompt(prompt) ?? "",
         }),
     });
   }}
-  <Sweater body={async () => {}}>
+  <Sweater
+    body={async ({ set }) => {
+      set(new Pocket());
+    }}
+  >
     {#snippet vest(pocket: InstanceType<typeof Pocket>)}
       <Runner shared={pocket} kernelPool={pocket.pool} />
     {/snippet}
