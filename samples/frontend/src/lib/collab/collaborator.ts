@@ -32,6 +32,7 @@ import {
   become,
   type Replacement,
   type Room,
+  type Settle,
   type Stored,
 } from "./room.svelte";
 
@@ -64,6 +65,17 @@ export const clientAs = (email: string): LiveblocksClient =>
  * `room.svelte.ts`. A document owned by the provider would be destroyed with
  * it, which is precisely the thing a network lapse must not do.
  */
+/**
+ * Asking the host to make an entry's room exist and say what the file says.
+ *
+ * Idempotent, and the only way a room is ever filled. The browsers used to
+ * elect one of themselves to do it, which is a race no client can settle.
+ */
+export const settling: Settle = async (entry) => {
+  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}`, { method: "POST" });
+  if (!answer.ok) throw new Error(`settling ${entry}: ${answer.status}`);
+};
+
 export const enteringWith = (liveblocks: LiveblocksClient) =>
   ((entry, doc) => {
     const entered = liveblocks.enterRoom(entry);
@@ -100,12 +112,12 @@ export class Collaborator {
       bytes: inMemory(),
     });
     this.liveblocks = clientAs(this.email);
-    this.rooms = new Rooms(this.workspace, enteringWith(this.liveblocks));
+    this.rooms = new Rooms(this.workspace, enteringWith(this.liveblocks), settling);
   }
 
-  /** Every verdict every room here settled on, in the order they arrived. */
-  get verdicts(): rooms.Verdict[] {
-    return [...this.rooms.held.values()].flatMap((room) => room.verdicts);
+  /** The version a room's text descends from, as the server stamped it. */
+  base(entry: string): string | null {
+    return this.rooms.get(entry)?.base ?? null;
   }
 
   path(entry: string): string | undefined {
@@ -131,9 +143,8 @@ export class Collaborator {
     return path;
   }
 
-  async open(entry: string): Promise<rooms.Verdict> {
-    const room = await this.rooms.open(entry);
-    return room.verdicts[room.verdicts.length - 1] ?? { kind: "current" };
+  async open(entry: string): Promise<void> {
+    await this.rooms.open(entry);
   }
 
   text(entry: string): string {

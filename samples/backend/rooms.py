@@ -17,6 +17,7 @@ from pycrdt import Doc, Map, Text
 
 CONTENT = "content"
 STANDING = "standing"
+PRODUCED = "produced"
 BASE = "base"
 
 
@@ -26,6 +27,7 @@ class Standing:
 
     text: str
     base: str | None
+    produced: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -56,12 +58,17 @@ class Seed:
 
 
 @dataclass(frozen=True)
+class Rebase:
+    version: str
+
+
+@dataclass(frozen=True)
 class Carry:
     since: str
     version: str
 
 
-Plan = Union[Settled, Seed, Carry]
+Plan = Union[Settled, Seed, Rebase, Carry]
 
 
 # -- what a room owes ------------------------------------------------------------------
@@ -80,11 +87,31 @@ def standing_where_the_file_stands(room: Standing, file: Held) -> bool:
     return room.base == file.version
 
 
+def made_it_itself(room: Standing, file: Held) -> bool:
+    """The room is where this write came from.
+
+    Carrying such a write in would insert text the room already holds, and a
+    CRDT merges two inserts rather than noticing they say the same thing.
+    """
+    return file.version in room.produced
+
+
+def already_says_it(room: Standing, file: Held) -> bool:
+    """The same conclusion for a write whose bookkeeping has not arrived yet.
+
+    The two travel by different routes -- the write through the server, the
+    room's note of it through the document -- and nothing orders them.
+    """
+    return room.text == file.text
+
+
 def plan(room: Standing, file: Held) -> Plan:
     if unseeded(room):
         return Seed(text=file.text, version=file.version)
     if standing_where_the_file_stands(room, file):
         return Settled()
+    if made_it_itself(room, file) or already_says_it(room, file):
+        return Rebase(version=file.version)
     assert room.base is not None
     return Carry(since=room.base, version=file.version)
 
@@ -96,6 +123,7 @@ def _opened(update: bytes) -> Doc:
     doc = Doc()
     doc[CONTENT] = Text()
     doc[STANDING] = Map()
+    doc[PRODUCED] = Map()
     if update:
         doc.apply_update(update)
     return doc
@@ -103,7 +131,11 @@ def _opened(update: bytes) -> Doc:
 
 def standing_of(update: bytes) -> Standing:
     doc = _opened(update)
-    return Standing(text=str(doc[CONTENT]), base=doc[STANDING].get(BASE))
+    return Standing(
+        text=str(doc[CONTENT]),
+        base=doc[STANDING].get(BASE),
+        produced=frozenset(doc[PRODUCED].keys()),
+    )
 
 
 def seeded(text: str, version: str) -> bytes:
@@ -111,6 +143,14 @@ def seeded(text: str, version: str) -> bytes:
     doc[CONTENT] += text
     doc[STANDING][BASE] = version
     return doc.get_update()
+
+
+def rebased(live: bytes, version: str) -> bytes:
+    """The room already says it; only the version it stands at has moved."""
+    doc = _opened(live)
+    was = doc.get_state()
+    doc[STANDING][BASE] = version
+    return doc.get_update(was)
 
 
 def carried(live: bytes, change: Change, version: str) -> bytes:

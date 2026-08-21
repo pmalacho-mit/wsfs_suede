@@ -6,11 +6,13 @@ from wsfs_suede.samples.backend.rooms import (
     Carry,
     Change,
     Held,
+    Rebase,
     Seed,
     Settled,
     Standing,
     carried,
     plan,
+    rebased,
     seeded,
     standing_of,
 )
@@ -28,10 +30,11 @@ def reading(update: bytes) -> tuple[str, str | None]:
     return str(doc["content"]), doc["standing"].get("base")
 
 
-def a_room(text: str = "", base: str | None = None) -> bytes:
+def a_room(text: str = "", base: str | None = None, produced: list[str] = []) -> bytes:
     doc = Doc()
     doc["content"] = Text(text)
     doc["standing"] = Map({"base": base} if base is not None else {})
+    doc["produced"] = Map({one: True for one in produced})
     return doc.get_update()
 
 
@@ -54,6 +57,24 @@ def test_a_room_standing_where_the_file_stands_owes_nothing():
     assert plan(Standing(text="hello\n", base=WROTE), Held("hello\n", WROTE)) == Settled()
 
 
+def test_a_write_the_room_made_itself_only_moves_the_version():
+    # The doubling bug, relocated. Carrying text a room already holds inserts
+    # it a second time, and a CRDT has no way to notice the two say the same
+    # thing. The room says which writes are its own.
+    assert plan(
+        Standing(text="hello\nmine\n", base=BORN, produced=frozenset({WROTE})),
+        Held("hello\nmine\n", WROTE),
+    ) == Rebase(version=WROTE)
+
+
+def test_a_room_that_already_says_what_the_file_says_only_moves_the_version():
+    # The second guard, for a write whose bookkeeping has not arrived yet.
+    assert plan(
+        Standing(text="hello\nmine\n", base=BORN),
+        Held("hello\nmine\n", WROTE),
+    ) == Rebase(version=WROTE)
+
+
 def test_a_room_left_behind_carries_the_gap():
     assert plan(Standing(text="hello\n", base=BORN), Held("hello\nmore\n", WROTE)) == Carry(
         since=BORN, version=WROTE
@@ -71,6 +92,10 @@ def test_unstored_work_in_the_room_does_not_make_it_behind():
 
 def test_a_room_reads_back_as_what_was_put_in_it():
     assert standing_of(a_room("hello\n", BORN)) == Standing(text="hello\n", base=BORN)
+
+
+def test_a_room_reports_the_writes_it_made_itself():
+    assert standing_of(a_room("hello\n", BORN, produced=[WROTE])).produced == frozenset({WROTE})
 
 
 def test_a_room_that_has_never_been_written_has_no_base():
@@ -96,6 +121,17 @@ def test_seeding_twice_does_not_say_it_twice():
     doc.apply_update(once)
     doc.apply_update(once)
     assert str(doc["content"]) == "hello\n"
+
+
+def test_moving_the_version_leaves_the_text_alone():
+    live = a_room("hello\nmine\n", BORN)
+    doc = Doc()
+    doc["content"] = Text()
+    doc["standing"] = Map()
+    doc.apply_update(live)
+    doc.apply_update(rebased(live, WROTE))
+    assert str(doc["content"]) == "hello\nmine\n"
+    assert doc["standing"]["base"] == WROTE
 
 
 # -- carrying an outside write ---------------------------------------------------------

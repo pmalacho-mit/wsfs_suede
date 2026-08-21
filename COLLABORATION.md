@@ -282,7 +282,7 @@ Short now, and named.
   check` reports 0 errors across 1821 files, so it is either fixed or outside
   the check's scope; still worth one look.
 
-## Five findings
+## Six findings
 
 None of the first three would have shown up in one browser. The fourth would
 not have shown up in one *session*. The fifth would not have shown up without
@@ -387,6 +387,30 @@ opposite ends: *has this document been round the room yet?* Neither can ask it,
 so both guess. This is now the second place where correctness rests on a
 duration, which makes replacing it with a real acknowledgement the most
 valuable change left in the protocol rather than merely the tidiest.
+
+**6. Moving a rule's execution does not move the rule.** The fourth session's,
+and the shortest to state.
+
+Finding 3 says a verdict is a hypothesis and the content is the authority. When
+the server took over carrying text into rooms, that lesson did not travel with
+the work: the keeper read the room to DECIDE what it owed, and read it again to
+BUILD the update it sent. A room that caught up in between was handed what it
+already held, and a CRDT cannot notice two inserts say the same thing.
+
+The first full browser run after the change doubled whole changes for whichever
+member arrived second -- `"written before grace ever looked\n"` twice, and a
+lapse scenario reading `"shared start\nada was alone\ngrace was alone\nada was
+alone\ngrace was alone\n"`.
+
+The fix is finding 3's own: ask again, against the read being acted on, where
+the answer cannot go stale. Reproduced deterministically by letting a fake
+answer a read and only then change the room, so the deciding read and the
+building read see different states.
+
+Worth remembering when the remaining steps move more work to the server: every
+guard that exists on the client is a candidate to be needed again on the other
+side, and the reasons are written down where the old code was, not where the
+new code is going.
 
 ## Known problems
 

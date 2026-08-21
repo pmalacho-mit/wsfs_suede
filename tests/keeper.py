@@ -19,6 +19,7 @@ class FakeLiveblocks:
         self.created: list[str] = []
         self.sent: list[str] = []
         self.reads = 0
+        self.between: object | None = None
         self.answering = asyncio.Event()
         self.answering.set()
 
@@ -27,15 +28,26 @@ class FakeLiveblocks:
         self.documents.setdefault(room, b"")
 
     async def document(self, room: str) -> bytes:
+        """Answers, and only then lets `between` change the room.
+
+        So the read that DECIDES sees the room as it was, and the read the
+        update is built on sees it after -- which is the window the keeper has
+        to close.
+        """
         await self.answering.wait()
         self.reads += 1
-        return self.documents.get(room, b"")
+        said = self.documents.get(room, b"")
+        if self.between is not None:
+            catching_up, self.between = self.between, None
+            await catching_up()
+        return said
 
     async def send(self, room: str, update: bytes) -> None:
         self.sent.append(room)
         doc = Doc()
         doc["content"] = Text()
         doc["standing"] = Map()
+        doc["produced"] = Map()
         if self.documents.get(room):
             doc.apply_update(self.documents[room])
         doc.apply_update(update)
@@ -173,3 +185,55 @@ async def test_a_file_that_is_not_text_is_left_without_a_room_to_fill():
     await keeper.ensure("entry")
 
     assert liveblocks.sent == []
+
+
+async def test_a_write_the_room_made_itself_is_not_carried_back_into_it():
+    liveblocks = FakeLiveblocks()
+    files = FakeFiles(Held("hello\n", BORN))
+    keeper = keeping(liveblocks, files)
+    await keeper.ensure("entry")
+
+    typed = Doc()
+    typed["content"] = Text()
+    typed["produced"] = Map()
+    typed.apply_update(liveblocks.documents["entry"])
+    typed["content"] += "mine\n"
+    typed["produced"][WROTE] = True
+    await liveblocks.send("entry", typed.get_update())
+
+    files.held = Held("hello\nmine\n", WROTE)
+    files.history = {BORN: "hello\n"}
+    await keeper.ensure("entry")
+
+    assert liveblocks.text("entry") == "hello\nmine\n"
+    assert liveblocks.base("entry") == WROTE
+
+
+async def test_a_change_that_arrives_while_the_keeper_decides_is_not_carried_twice():
+    """The decision and the update are built from two different reads.
+
+    A room that catches up in between already holds what the carry was going
+    to insert, and inserting it again is the doubling this whole design exists
+    to prevent -- so what the room says is checked once more, against the read
+    the update is actually built on.
+    """
+    liveblocks = FakeLiveblocks()
+    files = FakeFiles(Held("hello\n", BORN))
+    keeper = keeping(liveblocks, files)
+    await keeper.ensure("entry")
+
+    files.held = Held("hello\nfrom a script\n", WROTE)
+    files.history = {BORN: "hello\n"}
+
+    async def the_room_catches_up_first():
+        caught = Doc()
+        caught["content"] = Text()
+        caught.apply_update(liveblocks.documents["entry"])
+        caught["content"] += "from a script\n"
+        await liveblocks.send("entry", caught.get_update())
+
+    liveblocks.between = the_room_catches_up_first
+    await keeper.ensure("entry")
+
+    assert liveblocks.text("entry") == "hello\nfrom a script\n"
+    assert liveblocks.base("entry") == WROTE

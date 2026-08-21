@@ -95,80 +95,60 @@ a no-op. Triggering a re-adjudication mid-stream means aborting the current
 read so the loop re-enters, or adding a lighter ask that does not tear the
 stream down.
 
-## Step 1 — Stop diffing client work
+## Steps 1 and 2 — Stop diffing client work; the server owns rooms — DONE
 
-The highest-value change in the plan, available now, and independent of drafts,
-persistence and the server work.
+They had to land together: deleting the client's repair leaves nothing to carry
+an outside write until the server does it.
 
-**Now.** When a client hears that an entry it has open moved to a version its
-room did not produce, it fetches that entry's text at two versions, diffs them,
-and types the difference into its own document. Each client does this
-independently. Typing text into a Yjs document creates new characters, so when
-the original author's edits arrive over the room channel carrying their own
-identity, both copies survive.
+**What went.** The client no longer reads its file at two versions, diffs them
+and types the difference into its own document. With that went the seeding
+election, the claim slot, one of the two 600ms timers, the verdict log, and
+`emitting` / `refused` / `carried` / `opening` from `rooms.ts`. `speaking`
+stays, because findings 4 and 5 are not about transport.
 
-**Wanted.** Clients stop reacting to content changes for entries they have open.
-Content authored in a document reaches other documents only as Yjs updates.
+**What the client still reads a version for**, and the only reason: nothing in
+a token says whether it names text or bytes, so reading is the first moment
+anybody can know the file stopped being text. That is where `replaced` comes
+from and it is all that read does now.
 
-**Delete.** The verdict/repair path in `room.svelte.ts` — hearing a stream event
-for an open entry, confirming a verdict against the file, and mending by diff.
-With it goes `#settling` and the seeding timer's correctness role, and most of
-`rooms.ts` (`emitting`, `refused`, `carried`, `opening`). `speaking` stays.
+**What arrived.** `POST /rooms/{entry}` — idempotent, and the only way a room
+is ever filled. `Rooms.open` settles before it attaches, so by the time a
+provider syncs, an empty document means an empty file rather than one that has
+not arrived yet.
 
-**Confirm.**
-- Scenario 3 (*notices when somebody writes around the room*) still passes —
-  after step 2 it is the server carrying it, so run these two together if step 1
-  lands first behind a flag.
-- **Scenario 6 passes with the 600ms timers removed.** This is the real proof:
-  it is the test that caught the doubling, and it must go green because the
-  transport changed, not because a wait got longer.
-- A new scenario: both browsers hold a file open, a third party writes text to
-  it, and each browser asserts the new text appears **exactly once** and that it
-  recorded no repair of its own.
-- Run each scenario 5 times. This class of bug is intermittent by nature.
+### The bug this turned up, which is the interesting part
 
----
+The first full run after the change doubled whole changes for the second party
+to arrive:
 
-## Step 2 — The server owns rooms and `base`
+```
+scenario 2:  "written before grace ever looked\n"  twice
+scenario 7:  "shared start\n" once, then both lines twice
+```
 
-**Now.** No room is ever created server-side. Clients elect a seeder among
-themselves with a 600ms convergence wait, and clients write `base` into the
-shared document. The backend talks to Liveblocks only to mint a token, by hand,
-with `httpx`.
+The keeper read the room to DECIDE, and read it again to BUILD the update. A
+room that caught up in between already held what the carry was about to insert,
+and a CRDT cannot notice that two inserts say the same thing.
 
-**Wanted.**
+It is finding 3 again — *a verdict is a hypothesis, and the content is the
+authority* — arriving on the server the moment the server took the job over.
+Moving work does not move that lesson with it, and the fix is the same shape:
+the question is asked once more against the read the update is actually built
+on, where the answer cannot go stale.
 
-- A `room` table: one row per entry, recording that its Liveblocks room has been
-  created. One `create_room(idempotent=True)` per entry, ever — the table is a
-  cache of *creation*, never of content.
-- `ensure_room(entry)` — idempotent, under a per-entry advisory lock:
-  create if absent; if the room's document is empty, seed it with the file's
-  text and `base`; if the room's recorded base is behind the entry's current
-  version, carry the gap in. Called on file creation (the fast path — the user
-  made the file, the server has the content) and on cold open.
-- On every accepted write, the server sets `base` in the room. For a write that
-  came from a room member it sets **only** `base` — the text is already there,
-  and writing it again is the doubling bug.
-- Adopt the Python SDK for both this and the existing token mint.
+Reproduced deterministically first, by letting a fake answer a read and only
+then change the room, so the deciding read and the building read see different
+states. That test fails without the guard and passes with it.
 
-**Build with.** `pycrdt` 0.14.3 for constructing updates; verified installing
-cleanly on ARM64 / Python 3.12 with a prebuilt wheel, and verified producing
-updates that JS `yjs` reads correctly with the shared-type names the client
-already uses. The Liveblocks Python SDK has `create_room`,
-`get_yjs_document_as_binary_update` and `send_yjs_binary_update`.
+**Confirm.** All nine browser scenarios pass in both browsers. Unit 114,
+backend 224, svelte-check 0 errors.
 
-**Delete.** The client-side seeding election, the claim slot, and the
-`CONVERGING` wait.
+### Not done, and deliberately
 
-**Confirm.**
-- Open a file whose room has never existed → content appears with no client
-  having seeded it.
-- Delete the room through the Liveblocks API and reopen → self-heals.
-- **Two browsers open a never-before-opened file at the same instant** → the
-  content appears exactly once. This is the old concurrent-seeding double, and
-  after this step it should be structurally impossible rather than raced.
-- Change a file on the server while nobody has it open, then open it → the
-  room reflects the change.
+`#settling` is still a 600ms wait, and still the last guess in the system. The
+transport change does not remove finding 5: a room just back still holds text
+the others have not been given, and storing it still makes the server tell them
+about a write whose content is in flight. That is step 4.
 
 ---
 

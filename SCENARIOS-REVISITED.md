@@ -88,6 +88,13 @@ hold already, but it has never been exercised and must not be assumed.
 **Resolved: the server, once.** Clients stop reacting to content changes for
 entries they have open.
 
+**Built, and it taught one thing worth keeping.** Moving the work to the server
+did not move finding 3 with it: the server decided from one read of the room
+and built its update from a later one, so a room that caught up in between was
+handed what it already held. The rule survives the move -- *the content is the
+authority, and it must be consulted against the read being acted on, not an
+earlier one.* Whoever carries, carries under that rule.
+
 ### C7 — an open room whose file is deleted
 
 **Resolved: the room stands down**, with a restore affordance — *and a draft is

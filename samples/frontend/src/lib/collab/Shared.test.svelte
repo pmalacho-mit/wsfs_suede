@@ -200,7 +200,13 @@
       pocket.note = "saw it on opening";
     }
     pocket.text = client.text(entry);
-    harness.expect(pocket.text.split("written before grace").length - 1).toBe(1);
+    const said = pocket.text.split("written before grace").length - 1;
+    if (said !== 1)
+      throw new Error(
+        `said ${said} times -- [${browser()} ${me()}] ` +
+          `base=${client.base(entry)} token=${client.token(entry)} ` +
+          `text=${JSON.stringify(pocket.text)}`,
+      );
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -225,14 +231,21 @@
       await announce(step(id, "around", "open"));
 
       await awaiting(step(id, "around", "written"));
-      await until(
-        "the room to be told it fell behind",
-        () => client.verdicts.some((verdict) => verdict.kind === "repair"),
-      );
       await until("the outside write to reach the room", () =>
         client.text(entry).includes("written by a script"),
       );
-      pocket.note = "repaired";
+      /**
+       * Stamped by the server, which is what says the room was brought up to
+       * date by the one writer allowed to do it rather than by this client
+       * reading the file and typing the difference in.
+       */
+      await until(
+        "the room to be stamped with the version it was carried to",
+        () => client.base(entry) === client.token(entry),
+        30_000,
+        () => `base=${client.base(entry)} token=${client.token(entry)}`,
+      );
+      pocket.note = "carried in by the server";
     } else {
       /** Grace does NOT open it -- she writes the way a script would. */
       await awaiting(step(id, "around", "open"));
@@ -278,12 +291,13 @@
         : "landed";
 
     await until(
-      "the stream to settle",
-      () => client.verdicts.length > 0,
+      "the two to agree on the file",
+      () => client.base(entry) === client.token(entry),
       15_000,
     ).catch(() => undefined);
 
-    harness.expect(client.verdicts.some((verdict) => verdict.kind === "repair")).toBe(false);
+    /** Converged, and each of them said it once. */
+    harness.expect(client.text(entry).split("shared").length - 1).toBe(1);
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -405,20 +419,15 @@
 
     /**
      * Thrown rather than asserted, so the failure carries the two things that
-     * distinguish the shapes this can fail in: whether the line is actually
-     * doubled, and whether a repair was so much as contemplated. `expected 2
-     * to be 1` on its own does not say which member repaired, or against
-     * what.
+     * carry the text at the moment it fails. `expected 2 to be 1` on its own
+     * does not say what the file ended up saying, or which member said it.
      */
     const said = pocket.text.split("ada while away").length - 1;
-    const repairs = client.verdicts.filter((verdict) => verdict.kind === "repair");
     const detail =
       `[${browser()} ${me()}] said=${said} ` +
-      `repairs=${JSON.stringify(repairs)} ` +
-      `verdicts=${JSON.stringify(client.verdicts.map((v) => v.kind))} ` +
+      `base=${client.base(entry)} token=${client.token(entry)} ` +
       `text=${JSON.stringify(pocket.text)}`;
     if (said !== 1) throw new Error(`the line is not there exactly once -- ${detail}`);
-    if (repairs.length > 0) throw new Error(`a repair was reached for -- ${detail}`);
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -478,13 +487,18 @@
       await awaiting(step(id, "bothlapse", "stored"));
       await until(
         "the stream to carry it",
-        () => client.verdicts.length > 0,
+        () => client.base(entry) === client.token(entry),
         15_000,
       ).catch(() => undefined);
     }
-    harness.expect(client.verdicts.some((verdict) => verdict.kind === "repair")).toBe(
-      false,
-    );
+    const still = (needle: string) => client.text(entry).split(needle).length - 1;
+    const detail =
+      `[${browser()} ${me()}] ada=${still("ada was alone")} ` +
+      `grace=${still("grace was alone")} ` +
+      `base=${client.base(entry)} token=${client.token(entry)} ` +
+      `text=${JSON.stringify(client.text(entry))}`;
+    if (still("ada was alone") !== 1 || still("grace was alone") !== 1)
+      throw new Error(`somebody was said twice -- ${detail}`);
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -523,7 +537,7 @@
         30_000,
         () =>
           `token=${client.token(entry)} speaks=${client.speaks(entry)} ` +
-          `verdicts=${JSON.stringify(client.verdicts)}`,
+          `base=${client.base(entry)}`,
       );
       pocket.note = `stood down: ${client.replacement(entry)?.mime}`;
 

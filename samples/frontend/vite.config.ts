@@ -34,6 +34,8 @@ const config = defineConfig({
       /** Minting room tokens, and where two browsers under test meet. */
       "/liveblocks": { target: BACKEND, changeOrigin: true },
       "/rendezvous": { target: BACKEND, changeOrigin: true },
+      /** Asking the host to fill a shared room from the file. */
+      "/rooms": { target: BACKEND, changeOrigin: true },
     },
   },
   worker: { format: "es" },

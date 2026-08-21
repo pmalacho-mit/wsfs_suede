@@ -14,10 +14,12 @@ from .rooms import (
     Change,
     Held,
     Plan,
+    Rebase,
     Seed,
     Settled,
     carried,
     plan,
+    rebased,
     seeded,
     standing_of,
 )
@@ -75,13 +77,20 @@ class Keeper:
         if isinstance(wanted, Seed):
             await self._liveblocks.send(entry, seeded(wanted.text, wanted.version))
             return
+        if isinstance(wanted, Rebase):
+            await self._rebase(entry, wanted)
+            return
         await self._carry(entry, wanted)
+
+    async def _rebase(self, entry: str, wanted: Rebase) -> None:
+        live = await self._liveblocks.document(entry)
+        await self._liveblocks.send(entry, rebased(live, wanted.version))
 
     async def _carry(self, entry: str, wanted: Carry) -> None:
         """Built on the room as it stands NOW, re-read rather than remembered.
 
         A Yjs update computed against a stale document is dropped without a
-        word, so the read that decided this is not the read that may build it.
+        word, so the read that decided this cannot be the read it is built on.
         """
         now = await self._files.now(entry)
         if now is None:
@@ -91,4 +100,17 @@ class Keeper:
             after=now.text,
         )
         live = await self._liveblocks.document(entry)
-        await self._liveblocks.send(entry, carried(live, change, wanted.version))
+        await self._liveblocks.send(entry, self._closing(live, change, wanted))
+
+    def _closing(self, live: bytes, change: Change, wanted: Carry) -> bytes:
+        """What to send, decided against the read it is built on.
+
+        The decision was taken on an EARLIER read, and a room that caught up in
+        between already holds what this was going to insert. Inserting it again
+        is the doubling the whole design exists to prevent, and a CRDT cannot
+        notice that two inserts say the same thing -- so the question is asked
+        once more, here, where the answer cannot go stale.
+        """
+        if standing_of(live).text == change.after:
+            return rebased(live, wanted.version)
+        return carried(live, change, wanted.version)
