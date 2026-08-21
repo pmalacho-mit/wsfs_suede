@@ -587,7 +587,30 @@
         "the stream to carry the store",
         () => client.token(entry) === stored.transaction,
         30_000,
-        () => `token=${client.token(entry)} wanted=${stored.transaction}`,
+        () =>
+          `token=${client.token(entry)} wanted=${stored.transaction} ` +
+          /**
+           * The one question that splits the two explanations. If the
+           * transaction is still unsettled, its confirming event never
+           * evicted it from the outbox -- a delivery problem. If it has
+           * settled and the token still has not moved, the event arrived and
+           * the view did not follow it -- a different bug entirely.
+           */
+          `unsettled=${JSON.stringify(client.workspace.unsettled([stored.transaction]))} ` +
+          /**
+           * `unsettled` reads the CONFIRMED map; `token` reads the EFFECTIVE
+           * view. When the first says the transaction landed and the second
+           * does not show it, the two disagree -- and the only way to tell
+           * "it landed on another entry" from "this entry's view is stale" is
+           * to look at every entry at once.
+           */
+          `entries=${JSON.stringify(
+            [...client.workspace.entries().entries()].map(([id, held]) => ({
+              id: id.slice(0, 8),
+              content: held.content_version?.slice(0, 8) ?? null,
+              name: held.name,
+            })),
+          )}`,
       );
       const taken = [client.snapshot(entry)];
 

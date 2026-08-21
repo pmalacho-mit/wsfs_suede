@@ -233,8 +233,8 @@ one at a time*. Both browsers must pass for a row to be green.
 | 5 | merges an unnoticed lapse without doubling what was typed during it | **pass** |
 | 6 | holds a store while the room is not reaching anybody | **pass** — 0/4 before finding 5 was fixed, 6/7 after |
 | 7 | both lapse at once, both type, and both come back | **pass** |
-| 8 | a write that is not text takes the file away from the room | **intermittent — 4/6** |
-| 9 | rebuilds what a client was looking at after the file has moved on | **intermittent — 3/6** |
+| 8 | a write that is not text takes the file away from the room | **pass** |
+| 9 | rebuilds what a client was looking at after the file has moved on | **pass** |
 
 **The four original scenarios pass against the extracted protocol.** That was
 the first question the second session left open, and the answer is that
@@ -249,8 +249,9 @@ and *is* refused the store; she comes back and the store lands; `ada while away`
 appears exactly once and no repair is recorded. It also found finding 5 on the
 way — see below.
 
-**Scenarios 8 and 9 fail intermittently, and they fail the same way.** See
-*The stream sometimes does not carry a write* under *Known problems*.
+**All nine pass, in both browsers.** Scenarios 8 and 9 were intermittent (4/6
+and 3/6) until the fourth session found what they had in common; see *The view
+could be rewound by its own queued create* below. Each has since run 10 of 10.
 
 ### Everything else
 
@@ -389,26 +390,28 @@ valuable change left in the protocol rather than merely the tidiest.
 
 ## Known problems
 
-**The stream sometimes does not carry a write.** The one thing to look at next,
-because it is the only problem here that is about data rather than timing, and
-because two scenarios fail on it.
+**The view could be rewound by its own queued create — FIXED.** This was
+recorded here as *"the stream sometimes does not carry a write"*, which was a
+guess from the symptom and was wrong. No event was ever lost.
 
-- Scenario 9 fails when the storing client's **own** write never becomes its
-  entry's `content_version`. The write was accepted — `rejected` is `false` —
-  and thirty seconds later the index is still at the previous transaction.
-  Captured: `token=01a02361-dad9-755a-… wanted=01a02361-e423-71aa-…`, and the
-  tokens are UUIDv7, so `dad9` is genuinely the *earlier* one.
-- Scenario 8 fails when **another client's** write never reaches the room at
-  all: Grace's PNG lands, Ada's room is never told, and `replaced` stays
-  undefined.
+A queued create leaves the outbox when the STREAM carries it, not when the
+response acknowledges it -- deliberate, so an entry is never in neither place.
+That leaves a window in which the server has confirmed the create AND writes
+after it while the create is still queued locally. `effective.of` laid that
+queued create back over the entry with `proposed()`, which sets ALL FOUR of an
+entry's versions to the create's own transaction. Right for an entry that
+exists nowhere else; a rewind for one the server has moved on. Only the stream
+drains the outbox, so it stayed rewound rather than righting itself.
 
-Both are the same sentence — *a write the server accepted did not arrive as a
-stream event* — seen from the two possible ends. `content_version` only ever
-advances in `confirmed.ts` on a `write` event, so a dropped event is
-indistinguishable from a write that never happened, and nothing retries. This
-is in the release client and the backend, **not** in `room.svelte.ts`: the room
-protocol behaves correctly on the information it is given. Rates over the third
-session: scenario 8 failed 2 of 6 paired runs, scenario 9 failed 3 of 6.
+`proposed`'s docstring already said *"a queued create has no confirmed entry to
+lay over"*. That was a precondition and nothing checked it. It does now, and
+`tests/frontend/view.test.ts` holds a deterministic reproduction.
+
+**Two intermittent failures with unrelated symptoms turned out to be one bug.**
+Scenario 9 was a token that would not advance; scenario 8 was a room never told
+its file had turned binary -- because it asked for its entry's version, got the
+create's, and computed the wrong gap. Worth remembering as the normal shape of
+this rather than a coincidence.
 
 **The sample shell has three failures.** `--component Sample --browser chromium`
 is 15 passed, 3 failed:

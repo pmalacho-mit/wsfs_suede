@@ -19,29 +19,81 @@ This is the work.
 
 ---
 
-## Step 0 — The dropped stream event
+## Step 0 — The "dropped stream event" — FOUND AND FIXED
 
-**Independent of everything else, and still first**, because it is the only bug
-in the current tree where a user loses something today.
+**It was never a dropped event.** Naming it that was a guess from the symptom,
+and the guess was wrong.
 
-**Now.** A write is accepted over HTTP — the response says not-rejected — and
-its confirming stream event sometimes never arrives. The entry's
-`content_version` never advances. Nothing retries and nothing notices, because a
-dropped event is indistinguishable from a write that never happened. Observed
-from both ends: the storing client's own write (scenario 9) and another
-client's write (scenario 8).
+**What was actually happening.** A queued create leaves the outbox when the
+STREAM carries it, not when the response acknowledges it — a deliberate choice,
+so an entry is never in neither the outbox nor the confirmed map. That leaves a
+real window in which the server has confirmed the create *and* writes after it,
+while the create is still sitting in the local outbox.
 
-**Wanted.** Either the event always arrives, or a client can detect the gap and
-ask for it.
+`effective.of` laid that queued create back over the entry with `proposed()`,
+which sets **all four** of an entry's versions to the create's own transaction.
+For an entry that exists nowhere else that is exactly right. For one the server
+has moved on, it is a rewind: `content_version` snaps back to the create and
+every write since is hidden. And because only the stream drains the outbox, it
+stayed hidden rather than correcting a moment later.
 
-**Confirm.** Scenarios 8 and 9 in the browser suite pass 10 runs out of 10.
-They currently pass 4/6 and 3/6.
+`proposed`'s own docstring said it: *"a queued create has no confirmed entry to
+lay over"*. That was a precondition, and nothing checked it.
 
-> Do not skip this on the grounds that the redesign changes the write path. The
-> redesign makes the stream *less* load-bearing but does not remove it, and an
-> unreliable feed under a new protocol is harder to debug, not easier.
+**How it was found.** Not by reading. The backend was cleared first — 40 direct
+stream writes and 60 through the Vite proxy, zero missed events — which ruled
+out delivery and the proxy. Then the failing assertion was made to report
+`unsettled`, which reads the CONFIRMED map, alongside `token`, which reads the
+EFFECTIVE view. Catching one failure with both showed `unsettled=[]` — the
+transaction *had* landed and *had* left the outbox — while the view still
+reported the older version. Two readings of the same state disagreeing is a
+much smaller search than "somewhere an event went missing".
 
----
+**The fix.** `effective.of` contributes a queued create only when the confirmed
+map has no entry for it. One condition, in `release/frontend/effective.ts`.
+
+**Confirmed.** A unit test in `tests/frontend/view.test.ts` reproduces it
+deterministically — it fails before the change and passes after, so the
+intermittent browser flake is now a one-line regression test. Unit suite 114
+passing, up from 113.
+
+In the browser, across twenty paired runs:
+
+| scenario | before | after |
+|---|---|---|
+| 9 — *rebuilds what a client was looking at* | 3 of 6 | **10 of 10** |
+| 8 — *a write that is not text takes the file away* | 4 of 6 | **10 of 10** |
+
+The full nine-scenario suite then passed in both browsers — **the first time
+the collaboration suite has been entirely green.**
+
+**One condition cleared both**, which is the part worth remembering. They
+looked like different bugs — one a token that would not advance, the other a
+room never told its file had turned binary — and both were the same rewound
+view. Scenario 8's room asked for its entry's version, got the create's, and
+computed the wrong gap. Two intermittent failures with unrelated symptoms and a
+single cause is the normal shape of this, not the exception.
+
+### What this does not close
+
+The outbox still has no way to ask *"did this transaction ever land?"* independent
+of asking the server to land it. That distinction is worth keeping:
+
+- **resend** — dangerous on its own; a write that already landed could mint a
+  second version.
+- **ask** — idempotent and safe.
+
+`Initialize` already *is* the safe ask: it takes the outbox and returns which
+transactions applied and which were rejected, and every reconnect runs it. So
+the missing piece is only a trigger — an entry that has sat in the outbox for
+longer than some threshold should cause a re-adjudication.
+
+**A trap to note for whoever builds it:** `Loop.nudge()` does not do this today.
+It resets the backoff and wakes the loop out of its rest, but while a stream is
+established the loop is inside `once()` and `wake` is undefined, so `nudge()` is
+a no-op. Triggering a re-adjudication mid-stream means aborting the current
+read so the loop re-enters, or adding a lighter ask that does not tear the
+stream down.
 
 ## Step 1 — Stop diffing client work
 

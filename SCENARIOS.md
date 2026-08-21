@@ -320,3 +320,10 @@ The three gaps that are about **losing or duplicating work**, in priority
 order: F2 (independent repairs can double content), B4/E2 (no local
 persistence, so a crash loses work), D3 (shared work nobody stored).
 Everything else is a matter of polish or of surprise rather than of damage.
+
+**Update, fourth session.** The intermittency that made several of these hard
+to read was a single bug, and it was in neither the stream nor the room: a
+queued create was being laid back over its own entry, rewinding every version
+to the create and hiding writes since. Fixed, with a deterministic test. All
+nine browser scenarios now pass. The three gaps above are unchanged — they are
+about the design, not about that bug.
