@@ -273,6 +273,57 @@
         }
       }
     },
+    "/wsfs/workspaces/{workspace_id}/reconstruction": {
+      "post": {
+        "summary": "Reconstruction",
+        "description": "What a client was looking at, from the transactions it wrote down.\n\nA POST because the question is a list, and a long one -- a snapshot of\na whole workspace names four tokens per entry. Nothing is mutated.\n\nThe work is `reconstruct.reconstructed`, which anything inside this\nprocess can call directly. An assistant assembling the files a user\ncould see when they asked a question wants the same answer this\nreturns, and should not have to make an HTTP request to itself for it.",
+        "operationId": "reconstruction_wsfs_workspaces__workspace_id__reconstruction_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconstructionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconstructionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/wsfs/workspaces/{workspace_id}/stream": {
       "get": {
         "summary": "Events",
@@ -816,6 +867,120 @@
         "title": "Occurrence",
         "description": "When one transaction happened, in both clocks that saw it.\n\nTwo clocks because they answer different questions and disagree for honest\nreasons. `minted` is the client's, and it is when the USER acted -- which,\nafter a week offline, is the only one that means anything to them. `accepted`\nis this server's, and it is when the change entered the workspace and became\nsomething other clients could see. An offline session makes the gap between\nthem days wide, and neither number is the other's approximation."
       },
+      "Reconstructed": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "deleted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/TextBody"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BinaryBody"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "binary": "#/components/schemas/BinaryBody",
+                    "text": "#/components/schemas/TextBody"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "unresolved": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unresolved",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "Reconstructed",
+        "description": "What those transactions said -- whichever way each of them went.\n\nNothing here says whether a transaction was accepted. That is deliberate:\nthe question this answers is what the USER WAS SEEING, and a client shows\nits own queued work before the server has ruled on it. A transaction later\nrefused still described the screen at the moment it was taken."
+      },
+      "ReconstructionRequest": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/Versions"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "ReconstructionRequest"
+      },
+      "ReconstructionResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/Reconstructed"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "ReconstructionResponse"
+      },
       "Rejection": {
         "properties": {
           "transaction": {
@@ -1125,6 +1290,69 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "Versions": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name Version"
+          },
+          "parent_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Version"
+          },
+          "deleted_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted Version"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "Versions",
+        "description": "One entry, at the transactions a client was looking at.\n\nEvery field but `id` is optional so that a caller can ask about as little\nas it knows. A client replicating a whole filesystem sends all four; one\nasking only what a file held sends `content_version` alone."
       },
       "Write": {
         "properties": {

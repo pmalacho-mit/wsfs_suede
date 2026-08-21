@@ -210,8 +210,13 @@ async def test_a_refused_create_keeps_all_four_and_its_content(
     assert session.exec(select(MODELS.refused_name)).one().name == "orphan.py"
     assert session.exec(select(MODELS.refused_deletion)).one().deleted is False
     assert session.exec(select(MODELS.refused_parent)).all()
-    kept = session.exec(select(MODELS.refused_text)).one()
-    assert str(kept.transaction) == transaction
+
+    # Stored is not the same as retrievable, and for a long time this only
+    # checked the first: there is no entry row for a create that was refused,
+    # so the content read used to 404 on the way past.
+    assert (await api.content(entry, transaction)).json()["content"] == (
+        "print('never landed')"
+    )
 
 
 async def test_a_write_refused_because_the_entry_was_deleted_is_still_kept(
@@ -236,26 +241,70 @@ async def test_a_write_refused_because_the_entry_was_deleted_is_still_kept(
 # -- the two kept apart ------------------------------------------------------------
 
 
-async def test_a_transaction_naming_no_entry_is_kept_on_its_own(
+async def test_a_transaction_naming_no_entry_is_counted_on_its_own(
     api: Api, session: Session
 ):
+    """Its own table so it can be COUNTED on its own -- a workspace collecting
+    these is saying something is wrong. Being able to count it is not a reason
+    to throw the payload away."""
     refused(await api.rename(new_id(), new_id(), "nowhere.py"))
 
-    kept = session.exec(select(MODELS.unknown_entry)).one()
-    assert kept.reason == "no such entry"
-    assert kept.op == "rename"
-    assert not session.exec(select(MODELS.refused_name)).all()
+    counted = session.exec(select(MODELS.unknown_entry)).one()
+    assert counted.reason == "no such entry"
+    assert counted.op == "rename"
+    assert session.exec(select(MODELS.refused_name)).one().name == "nowhere.py"
 
 
-async def test_a_reused_transaction_id_is_kept_on_its_own(api: Api, session: Session):
+async def test_a_write_to_an_entry_whose_create_was_refused_keeps_its_text(api: Api):
+    """The reason the payload matters here.
+
+    A create refused in an earlier submission leaves an entry the server has
+    never heard of -- and the writes the user goes on making to that file all
+    arrive as `no such entry`. Their text is the only copy anybody has.
+    """
+    entry, create = new_id(), api.transaction()
+    refused(
+        await api.create(
+            entry, name="a.py", parent=new_id(),
+            content={"type": "text", "content": ""}, transaction=create,
+        )
+    )
+    written = api.transaction()
+    refused(await api.write(entry, create, "TYPED AFTER THE CREATE FAILED",
+                            transaction=written))
+
+    assert (await api.content(entry, written)).json()["content"] == (
+        "TYPED AFTER THE CREATE FAILED"
+    )
+
+
+async def test_a_reused_transaction_id_is_counted_on_its_own(api: Api, session: Session):
     entry = await created(api, "a.py")
-    spent = await name_version(api, entry)
+    spent = api.transaction()
+    acknowledged(await api.rename(entry, await name_version(api, entry), "b.py",
+                                  transaction=spent))
 
     refused(await api.write(entry, await content_version(api, entry), "x", transaction=spent))
 
-    kept = session.exec(select(MODELS.taken_id)).one()
-    assert kept.reason == "that id is already in use"
-    assert not session.exec(select(MODELS.refused_text)).all()
+    counted = session.exec(select(MODELS.taken_id)).one()
+    assert counted.reason == "that id is already in use"
+    assert (await api.content(entry, spent)).json()["content"] == "x"
+
+
+async def test_a_token_spent_twice_answers_with_the_one_that_landed(api: Api):
+    """A create writes all four properties at its own transaction, so that
+    token names accepted content already. A refusal reusing it does not get to
+    speak over what the filesystem actually holds."""
+    entry, born = new_id(), api.transaction()
+    acknowledged(
+        await api.create(entry, name="a.py", content={"type": "text", "content": "born"},
+                         transaction=born)
+    )
+
+    refused(await api.write(entry, await content_version(api, entry), "reused",
+                            transaction=born))
+
+    assert (await api.content(entry, born)).json()["content"] == "born"
 
 
 # -- what it costs to keep ---------------------------------------------------------

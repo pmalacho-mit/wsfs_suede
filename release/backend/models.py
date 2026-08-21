@@ -233,6 +233,15 @@ class RefusedRow(WithID, WithTime, IsAbstractClass):
 
     transaction: ID = Field(index=True, nullable=False)
     user_id: ID
+    workspace_id: ID
+    """Which workspace this was asked of.
+
+    Carried here rather than reached through the entry, because the refusal
+    that most needs recording is a CREATE -- and a create that was refused
+    left no entry to reach anything through. Without this column a reader
+    could not tell whose refusal it was holding, so the only safe answer would
+    be to refuse to serve it, which is the whole feature gone.
+    """
     entry_id: ID = Field(index=True, nullable=False)
     op: str = Field(nullable=False)
     reason: str = Field(index=True, nullable=False)
@@ -542,6 +551,7 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         """
 
         user_id: ID = ForeignKeyField(users)
+        workspace_id: ID = ForeignKeyField(workspaces)
 
     class RefusedName(Refused, RefusedNameRow, named("refused_names"), table=True):
         pass

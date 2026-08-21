@@ -93,6 +93,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/reconstruction": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconstruction
+         * @description What a client was looking at, from the transactions it wrote down.
+         *
+         *     A POST because the question is a list, and a long one -- a snapshot of
+         *     a whole workspace names four tokens per entry. Nothing is mutated.
+         *
+         *     The work is `reconstruct.reconstructed`, which anything inside this
+         *     process can call directly. An assistant assembling the files a user
+         *     could see when they asked a question wants the same answer this
+         *     returns, and should not have to make an HTTP request to itself for it.
+         */
+        post: operations["reconstruction_wsfs_workspaces__workspace_id__reconstruction_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wsfs/workspaces/{workspace_id}/stream": {
         parameters: {
             query?: never;
@@ -320,6 +348,45 @@ export interface components {
             /** Accepted */
             accepted: string | null;
         };
+        /**
+         * Reconstructed
+         * @description What those transactions said -- whichever way each of them went.
+         *
+         *     Nothing here says whether a transaction was accepted. That is deliberate:
+         *     the question this answers is what the USER WAS SEEING, and a client shows
+         *     its own queued work before the server has ruled on it. A transaction later
+         *     refused still described the screen at the moment it was taken.
+         */
+        Reconstructed: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name?: string | null;
+            /** Parent */
+            parent?: string | null;
+            /** Deleted */
+            deleted?: boolean | null;
+            /** Content */
+            content?: (components["schemas"]["TextBody"] | components["schemas"]["BinaryBody"]) | null;
+            /**
+             * Unresolved
+             * @default []
+             */
+            unresolved: string[];
+        };
+        /** ReconstructionRequest */
+        ReconstructionRequest: {
+            /** Entries */
+            entries: components["schemas"]["Versions"][];
+        };
+        /** ReconstructionResponse */
+        ReconstructionResponse: {
+            /** Entries */
+            entries: components["schemas"]["Reconstructed"][];
+        };
         /** Rejection */
         Rejection: {
             /**
@@ -470,6 +537,29 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * Versions
+         * @description One entry, at the transactions a client was looking at.
+         *
+         *     Every field but `id` is optional so that a caller can ask about as little
+         *     as it knows. A client replicating a whole filesystem sends all four; one
+         *     asking only what a file held sends `content_version` alone.
+         */
+        Versions: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name Version */
+            name_version?: string | null;
+            /** Parent Version */
+            parent_version?: string | null;
+            /** Deleted Version */
+            deleted_version?: string | null;
+            /** Content Version */
+            content_version?: string | null;
         };
         /** Write */
         Write: {
@@ -663,6 +753,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reconstruction_wsfs_workspaces__workspace_id__reconstruction_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReconstructionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReconstructionResponse"];
                 };
             };
             /** @description Validation Error */

@@ -14,7 +14,7 @@ import { connect, inMemory, type Workspace } from "../../release/frontend";
 import { accepted, localised, offset } from "../../release/frontend/minted";
 import { describeLive, project, reachable, transport } from "./backend";
 
-const settled = (workspace: Workspace, holds: () => boolean, within = 5_000) =>
+const settledWhen = (workspace: Workspace, holds: () => boolean, within = 5_000) =>
   new Promise<void>((done, fail) => {
     const deadline = setTimeout(() => fail(new Error("never settled")), within);
     const finish = () => (clearTimeout(deadline), stop(), done());
@@ -34,12 +34,12 @@ describeLive("a workspace against a live backend", () => {
       transport: transport(),
       bytes: inMemory(),
     });
-    await settled(workspace, () => true);
+    await settledWhen(workspace, () => true);
   });
 
   it("creates a file and reads its content back", async () => {
     await workspace.create("main.py", "print('hi')").settled;
-    await settled(workspace, () => workspace.index().at("main.py") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("main.py") !== undefined);
 
     expect(await workspace.read("main.py")).toEqual({
       kind: "text",
@@ -49,19 +49,19 @@ describeLive("a workspace against a live backend", () => {
 
   it("puts a file where a path says, not where an id says", async () => {
     await workspace.folder("src").settled;
-    await settled(workspace, () => workspace.index().at("src") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("src") !== undefined);
     await workspace.create("src/nested.py", "nested").settled;
-    await settled(workspace, () => workspace.index().at("src/nested.py") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("src/nested.py") !== undefined);
 
     expect(workspace.index().paths()).toContain("src/nested.py");
   });
 
   it("moves an entry's path and name in one go", async () => {
     await workspace.create("before.py", "x").settled;
-    await settled(workspace, () => workspace.index().at("before.py") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("before.py") !== undefined);
 
     await workspace.move("before.py", "src/after.py").settled;
-    await settled(workspace, () => workspace.index().at("src/after.py") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("src/after.py") !== undefined);
 
     expect(workspace.index().at("before.py")).toBeUndefined();
   });
@@ -69,7 +69,7 @@ describeLive("a workspace against a live backend", () => {
   it("carries binary content through the blob store", async () => {
     const payload = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
     await workspace.create("logo.png", payload, "image/png").settled;
-    await settled(workspace, () => workspace.index().at("logo.png") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("logo.png") !== undefined);
 
     const held = await workspace.read("logo.png");
     expect(held).toMatchObject({ kind: "binary" });
@@ -78,10 +78,10 @@ describeLive("a workspace against a live backend", () => {
 
   it("takes a path away when its entry is removed", async () => {
     await workspace.create("doomed.py", "x").settled;
-    await settled(workspace, () => workspace.index().at("doomed.py") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("doomed.py") !== undefined);
 
     await workspace.remove("doomed.py").settled;
-    await settled(workspace, () => workspace.index().at("doomed.py") === undefined);
+    await settledWhen(workspace, () => workspace.index().at("doomed.py") === undefined);
 
     expect(workspace.index().paths()).not.toContain("doomed.py");
   });
@@ -92,7 +92,7 @@ describeLive("a workspace against a live backend", () => {
     // from the same id, and the offset is the single thing that travelled.
     const before = Date.now();
     await workspace.create("timed.py", "x").settled;
-    await settled(workspace, () => {
+    await settledWhen(workspace, () => {
       const entry = workspace.index().at("timed.py");
       return entry !== undefined && entry.modified.accepted !== null;
     });
@@ -115,10 +115,10 @@ describeLive("a workspace against a live backend", () => {
     // rather than where the connection happened to be.
     const id = await project();
     const moved = connect({ workspace: id, transport: transport(), bytes: inMemory() });
-    await settled(moved, () => true);
+    await settledWhen(moved, () => true);
 
     await moved.create("packed.py", "x");
-    await settled(moved, () => moved.index().at("packed.py") !== undefined);
+    await settledWhen(moved, () => moved.index().at("packed.py") !== undefined);
 
     const entry = moved.index().at("packed.py")!;
     expect(entry.modified.offset).toBe(offset());
@@ -133,11 +133,11 @@ describeLive("a workspace against a live backend", () => {
       transport: transport("grace@example.com"),
       bytes: inMemory(),
     });
-    await settled(mine, () => true);
-    await settled(theirs, () => true);
+    await settledWhen(mine, () => true);
+    await settledWhen(theirs, () => true);
 
     await theirs.create("shared.py", "theirs").settled;
-    await settled(mine, () => mine.index().at("shared.py") !== undefined);
+    await settledWhen(mine, () => mine.index().at("shared.py") !== undefined);
 
     expect(await mine.read("shared.py")).toEqual({ kind: "text", text: "theirs" });
     mine.stop();
@@ -155,7 +155,7 @@ describeLive("a workspace against a live backend", () => {
    */
   it("lands every write of a run against one file, in the order they were made", async () => {
     await workspace.create("chained.py", "").settled;
-    await settled(workspace, () => workspace.index().at("chained.py") !== undefined);
+    await settledWhen(workspace, () => workspace.index().at("chained.py") !== undefined);
 
     const texts = ["one", "one\ntwo", "one\ntwo\nthree", "one\ntwo\nthree\nfour"];
     const sent = texts.map((text) => workspace.write("chained.py", text));
@@ -168,7 +168,7 @@ describeLive("a workspace against a live backend", () => {
       false,
     ]);
 
-    await settled(
+    await settledWhen(
       workspace,
       () =>
         workspace.index().at("chained.py")?.content_version ===
@@ -178,5 +178,23 @@ describeLive("a workspace against a live backend", () => {
       kind: "text",
       text: texts[texts.length - 1],
     });
+  });
+
+  /**
+   * A snapshot names transactions, and this client shows its own work the
+   * instant it makes it -- so a snapshot can name work that has never left
+   * this machine, which nothing anywhere else can rebuild.
+   */
+  it("says which of a snapshot's transactions have not reached the server", async () => {
+    const { transaction, settled } = workspace.create("portable.py", "x");
+
+    expect(workspace.unsettled([transaction])).toEqual([transaction]);
+
+    await settled;
+    await settledWhen(
+      workspace,
+      () => workspace.unsettled([transaction]).length === 0,
+    );
+    expect(workspace.unsettled([transaction])).toEqual([]);
   });
 });

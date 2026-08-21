@@ -36,12 +36,14 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
-from . import refusals, service
+from . import reconstruct, refusals, service
 from .blobs import Blobs
 from .contract import (
     Create,
     InitializeRequest,
     InitializeResponse,
+    ReconstructionRequest,
+    ReconstructionResponse,
     Refusal,
     Rejected,
     Rejection,
@@ -172,8 +174,17 @@ class Stillborn:
             self._ids.add(request.id)
 
 
-def _never_attempted() -> service.Outcome:
-    return service.Outcome(Rejected(reason=Refusal.CREATE_REFUSED))
+async def _never_attempted(
+    submission: service.Submission, request: Submitted
+) -> service.Outcome:
+    """Refused without being judged -- and recorded all the same.
+
+    This is the one refusal that never reaches `adjudicate`, and for a while
+    it was therefore the one that kept nothing. That was the worst possible
+    place to lose work: replay is the path a queue comes home by, so a single
+    refused create silently discarded every keystroke queued behind it.
+    """
+    return await service.declined(submission, request, Refusal.CREATE_REFUSED)
 
 
 async def reconcile(
@@ -188,7 +199,7 @@ async def reconcile(
     stillborn = Stillborn()
     for request in outbox:
         outcome = (
-            _never_attempted()
+            await _never_attempted(submission, request)
             if request in stillborn
             else await service.adjudicate(submission, request)
         )
@@ -332,21 +343,23 @@ async def resolve_content(
     directly -- the token IS the write, so there is nothing to translate.
     """
     entry = await session.get(backend.models.entry, entry_id)
-    if entry is None or entry.workspace_id != workspace_id:
-        raise HTTPException(404, "no such entry")
-    held = (
-        await _newest_write(backend, session, workspace_id, entry_id)
-        if content_id is None
-        else await _written(backend, session, content_id)
-    )
-    if held is None or held.entry_id != entry_id:
+    known = entry is not None and entry.workspace_id == workspace_id
+
+    held = None
+    if known:
         held = (
-            None
+            await _newest_write(backend, session, workspace_id, entry_id)
             if content_id is None
-            else await _refused_write(backend, session, entry_id, content_id)
+            else await _written(backend, session, content_id)
         )
+        if held is not None and held.entry_id != entry_id:
+            held = None
+
+    if held is None and content_id is not None:
+        held = await _refused_write(backend, session, workspace_id, entry_id, content_id)
+
     if held is None:
-        raise HTTPException(404, "entry has no such content")
+        raise HTTPException(404, "no such entry" if not known else "entry has no such content")
     return held
 
 
@@ -359,7 +372,11 @@ async def _written(
 
 
 async def _refused_write(
-    backend: Backend, session: AsyncSession, entry_id: UUID, content_id: UUID
+    backend: Backend,
+    session: AsyncSession,
+    workspace_id: UUID,
+    entry_id: UUID,
+    content_id: UUID,
 ) -> Any | None:
     """A write this server declined, asked for by the transaction that sent it.
 
@@ -377,6 +394,7 @@ async def _refused_write(
             await session.exec(
                 select(refused)
                 .where(
+                    col(refused.workspace_id) == workspace_id,
                     col(refused.transaction) == content_id,
                     col(refused.entry_id) == entry_id,
                 )
@@ -453,7 +471,19 @@ async def referenced_by(
         .join(entry, col(entry.id) == col(written.entry_id))
         .where(col(entry.workspace_id) == workspace_id, col(written.hash) == digest)
     )
-    return (await session.exec(referencing)).first() is not None
+    if (await session.exec(referencing)).first() is not None:
+        return True
+
+    # A write that was REFUSED names these bytes too, and they are the only
+    # copy of what somebody uploaded. Reachable through `content` by its
+    # transaction already; this is the other door onto the same bytes, and the
+    # two disagreeing is how one of them ends up serving a 404 for something
+    # the other hands over.
+    refused = backend.models.refused_blob
+    named = select(refused).where(
+        col(refused.workspace_id) == workspace_id, col(refused.hash) == digest
+    )
+    return (await session.exec(named)).first() is not None
 
 
 def declared_size(request: Request) -> int | None:
@@ -617,6 +647,33 @@ def create_router(
                 await resolve_content(
                     backend, session, workspace_id, entry_id, content
                 ),
+            )
+
+    @router.post("/workspaces/{workspace_id}/reconstruction")
+    async def reconstruction(
+        workspace_id: Annotated[UUID, APIPath()],
+        body: ReconstructionRequest,
+        _: UUID = Depends(authorize),
+    ) -> ReconstructionResponse:
+        """What a client was looking at, from the transactions it wrote down.
+
+        A POST because the question is a list, and a long one -- a snapshot of
+        a whole workspace names four tokens per entry. Nothing is mutated.
+
+        The work is `reconstruct.reconstructed`, which anything inside this
+        process can call directly. An assistant assembling the files a user
+        could see when they asked a question wants the same answer this
+        returns, and should not have to make an HTTP request to itself for it.
+        """
+        async with database.session() as session:
+            return ReconstructionResponse(
+                entries=await reconstruct.reconstructed(
+                    session,
+                    backend.models,
+                    backend.schema.text,
+                    workspace_id,
+                    body.entries,
+                )
             )
 
     @router.get(
