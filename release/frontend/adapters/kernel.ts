@@ -17,6 +17,13 @@ import type { FileOverride } from ".";
 
 const DIRECTORY = { directory: true } as const;
 
+/**
+ * What bytes from the kernel are called. Python hands `put` a path and a
+ * value and says nothing about type, so guessing a better one here would be
+ * inventing a fact rather than carrying one.
+ */
+const OPAQUE = "application/octet-stream";
+
 const sized = (held: Contents) =>
   typeof held === "string"
     ? new TextEncoder().encode(held).byteLength
@@ -77,9 +84,22 @@ export const filesystem = (
     put: async (path, value) => {
       // The filesystem's caller waits for the server's answer, because a
       // script that writes a file and reads it back expects to be told.
-      if (value === null) await workspace.folder(path).settled;
-      else if (typeof value === "string" && fileOverride?.put(path, value)) {
-      } else await workspace.write(path, value).settled;
+      if (value === null) {
+        await workspace.folder(path).settled;
+        return;
+      }
+      /**
+       * Through the door first, both ways. A script writing a file somebody
+       * has open is the commonest way a shared document gets left describing
+       * a file that has moved on, and it is the one case a client can fix at
+       * the source rather than repair afterwards.
+       */
+      const taken =
+        typeof value === "string"
+          ? await fileOverride?.put(path, value)
+          : await fileOverride?.replaced?.(path, value, OPAQUE);
+      if (taken) return;
+      await workspace.write(path, value).settled;
     },
 
     move: async ({ from, to }) => void (await workspace.move(from, to).settled),

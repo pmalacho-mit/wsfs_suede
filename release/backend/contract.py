@@ -201,6 +201,7 @@ class Write(Transacted):
     """Never null: a file is born with content, so there is always a token to
     present. A folder has none, and a write to one is refused for being a
     folder before its token is ever considered."""
+
     content: Body
     """Carried exactly as a create carries it -- one spelling of content, not
     two. Nesting it also keeps this union flat, which is what lets the schema

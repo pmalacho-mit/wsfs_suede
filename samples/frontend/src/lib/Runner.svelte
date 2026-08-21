@@ -12,7 +12,10 @@
   let {
     kernelPool,
     shared,
-  }: { kernelPool: KernelPool; shared: SharedTextFile } = $props();
+  }: {
+    kernelPool: KernelPool;
+    shared: Pick<SharedTextFile, "source"> & { file: { path: string } };
+  } = $props();
 
   let outputs = $state<Output.Specific[]>([]);
   let running = $state<{ interrupt: () => void } | undefined>(undefined);

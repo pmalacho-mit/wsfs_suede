@@ -461,13 +461,15 @@
         // Not ready means the room has not said what it holds, and writing
         // into it now is how a file ends up saying everything twice. Refused,
         // so the write goes to the workspace the ordinary way instead.
-        if (!sharedText?.ready) return false;
+        //if (!sharedText?.ready) return false; // dropped ready as I was mid-trying to have sync happen after a doc loaded,
+        // but ultimately concluded that was the WRONG way. if ready is necessary, you can add it back into your design
+
         // Only if it actually said something new. The editor writes what it
         // is showing back through here as it opens a file, and storing that
         // would be a version identical to the one before it -- which is waste
         // at best, and at worst a second write racing the first with the same
         // token to present.
-        if (sharedText.forceReplace(value))
+        if (sharedText?.forceReplace(value))
           openFiles.get(id)?.sharedText?.store();
         return true;
       },
@@ -487,7 +489,7 @@
     const editorProps: NonModelEditorProps = { onEditor };
 
     cleanup.add(
-      () => openFiles.forEach((open) => open.dispose()),
+      () => openFiles.forEach((open) => open.sharedText?.dispose()),
       tabsAPI.onDidActivePanelChange(({ panel }) => tree.select(panel?.id)),
       tabsAPI.onDidAddPanel((panel) => inView.watch(panel)),
       tabsAPI.onDidRemovePanel((panel) => {
@@ -495,7 +497,7 @@
         inView.forget(panel.id);
         // Closing is the last chance to keep what was typed, and letting the
         // file go is what makes reopening it start clean rather than resume.
-        openFiles.get(panel.id)?.dispose();
+        openFiles.get(panel.id)?.sharedText?.dispose();
         openFiles.delete(panel.id);
       }),
       tree.subscribe({
@@ -535,7 +537,7 @@
         },
         removed: ({ id }) => {
           tab(id)?.api.close();
-          openFiles.get(id)?.dispose();
+          openFiles.get(id)?.sharedText?.dispose();
           openFiles.delete(id);
         },
       }),

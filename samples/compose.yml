@@ -28,6 +28,10 @@ services:
       DB_NAME: postgres
       PYTHONPATH: /app
       PORT: 8099
+      # Minted into per-user room tokens by /liveblocks/token. Never reaches a
+      # browser. The value here is a placeholder the developer's proxy swaps
+      # for the real key on the way out; a real deployment sets the real one.
+      LIVEBLOCKS_SECRET_KEY: LIVEBLOCKS__SECRET__KEY
     # Live source, so swapping revisions needs a restart rather than a rebuild
     # -- which is what makes a before/after measurement the same image. Point
     # WSFS_RELEASE at another checkout to serve it instead.

@@ -56,3 +56,17 @@ async def test_two_users_share_one_workspace(api: Api, other: Api):
     acknowledged(await other.write(file, await content_version(api, file), "theirs"))
 
     assert (await api.content(file)).json()["content"] == "theirs"
+
+
+async def test_a_host_without_a_liveblocks_key_says_so_rather_than_failing_oddly(
+    instance,
+):
+    """The sample's own route, not wsfs's -- but a host that quietly returned a
+    broken token would send every client into a retry loop against a room they
+    can never enter, which is much harder to read than a 503."""
+    answer = await instance.get(
+        "/liveblocks/token?rooms=any",
+        headers={"X-User-Email": "ada@example.com"},
+    )
+    assert answer.status_code == 503
+    assert "without a Liveblocks key" in answer.text

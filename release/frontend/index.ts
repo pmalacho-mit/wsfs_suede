@@ -44,9 +44,18 @@ export * as contract from "./contract";
 export { DEFAULTS as timing } from "./loop";
 export type { Timing } from "./loop";
 
+/**
+ * Whether a shared document still speaks for the file underneath it. No CRDT
+ * is named here -- the rule is small, easy to get subtly wrong, and worth
+ * being able to test without a network.
+ */
+export * as rooms from "./rooms";
+export type { Standing, Verdict } from "./rooms";
+
 export { provider } from "./adapters/files";
 export type { FileProvider } from "./adapters/files";
 export { filesystem } from "./adapters/kernel";
+export type { FileOverride } from "./adapters";
 /**
  * Per-key debouncing, for a consumer that holds an open buffer and decides
  * when it becomes a write. This client no longer has an opinion about that.

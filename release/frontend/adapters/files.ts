@@ -56,7 +56,7 @@ export const provider = (
   },
 
   write: async (path, text) => {
-    if (fileOverride?.put(path, text)) return;
+    if (await fileOverride?.put(path, text)) return;
     void (await workspace.write(path, text).settled);
   },
 
