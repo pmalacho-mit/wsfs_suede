@@ -34,16 +34,28 @@
     });
   };
 
+  /**
+   * A file that was text can stop being text.
+   *
+   * It used to say "shared text can't become binary" here and stop watching,
+   * which is the assumption a two-browser test disproved: somebody with the
+   * file closed -- another client, a script, a kernel writing an image where
+   * a `.py` used to be -- can write bytes over it, and the write lands. The
+   * room finds out and records it as `replaced`; this is what turns that into
+   * something the person looking at the editor can see.
+   */
   $effect(() => {
-    const {
-      opened: { sharedText, id },
-      workspace,
-    } = params;
-
-    if (sharedText) return; // shared text can't become binary
+    const { opened, workspace } = params;
+    const { id } = opened;
     return workspace.watch((changes) => {
-      if (changes.some(({ kind, entry }) => entry === id && kind === "written"))
-        read();
+      if (!changes.some(({ kind, entry }) => entry === id && kind === "written"))
+        return;
+      // A shared file only re-reads once its room says it is no longer text.
+      // Otherwise every keystroke anybody stores would pull the whole file
+      // back over the document that already has it.
+      if (opened.sharedText && opened.sharedText.shared?.replaced === undefined)
+        return;
+      read();
     });
   });
 
@@ -53,6 +65,12 @@
 </script>
 
 {#if binary}
+  {#if params.opened.sharedText?.shared?.replaced}
+    <p class="note">
+      Somebody wrote {params.opened.sharedText.shared.replaced.mime} over this
+      file. What you were editing is no longer what it holds.
+    </p>
+  {/if}
   <Preview path={params.opened.path} held={binary} />
 {:else if params.opened.sharedText}
   <div class="text" class:runnable>

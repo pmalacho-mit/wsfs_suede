@@ -17,6 +17,7 @@ import {
   type Response,
   type Submitted,
   type Transaction,
+  type Version,
   type Write,
 } from "./contract";
 import * as effective from "./effective";
@@ -70,6 +71,21 @@ export type Workspace = {
 
   read: (path: paths.Path) => Promise<Payload | undefined>;
   holding: (path: paths.Path) => Payload | undefined;
+  /**
+   * What one file held at one version.
+   *
+   * `read` answers for a file as it stands, which is what almost everything
+   * wants. This answers for a version by name, which is what a consumer
+   * RECONCILING needs -- and it needs two of them at once, both older than
+   * anything it is showing. A shared document catching up with a write that
+   * did not go through it applies the difference between two SERVER versions,
+   * because diffing from the document instead would describe the user's own
+   * unsent work as text to delete. See `rooms.ts`.
+   *
+   * By entry rather than by path: the caller is holding a room open on an id,
+   * and the file may have been renamed since the version it is asking about.
+   */
+  at: (entry: Id, version: Version) => Promise<Payload>;
   write: (
     path: paths.Path,
     content: string | Uint8Array,
@@ -299,6 +315,13 @@ export const connect = (options: Options): Workspace => {
 
     read: (path) => content.read(entryAt(path)),
     holding: (path) => content.holding(entryAt(path)),
+    /**
+     * Straight to the transport, past the cache. The cache is keyed by the
+     * token an entry is CURRENTLY at, which is exactly the version this is
+     * never asked about -- and reconciling is rare enough that a read costs
+     * less than a second cache keyed a second way.
+     */
+    at: (entry, version) => transport.content(workspace, entry, version),
 
     write: (path, payload, mime = TEXT) => {
       const entry = index.at(path);

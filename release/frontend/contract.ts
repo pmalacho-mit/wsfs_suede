@@ -35,6 +35,11 @@ export type Initialize = Schemas["InitializeRequest"];
 export type Snapshot = Schemas["InitializeResponse"];
 export type Rejection = Schemas["Rejection"];
 
+export type Versions = Schemas["Versions"];
+export type Reconstructed = Schemas["Reconstructed"];
+export type ReconstructionRequest = Schemas["ReconstructionRequest"];
+export type ReconstructionResponse = Schemas["ReconstructionResponse"];
+
 export type Event = Schemas["Event"];
 export type StreamEvent = Schemas["StreamEvent"];
 

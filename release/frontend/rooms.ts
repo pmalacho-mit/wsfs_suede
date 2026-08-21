@@ -30,6 +30,16 @@
  * entry was lost then treats the other's write as a stranger's. A key per
  * transaction merges; one key holding a list does not.
  *
+ * AND A ROOM NOBODY CAN HEAR MUST NOT WRITE EITHER. The second thing two
+ * browsers turned up, and the one that is hardest to reason your way to. A
+ * member that loses the room keeps its document -- that is what a CRDT is for
+ * -- and it keeps its connection to the SERVER as well, so storing still
+ * works. It must not. The text it would store is text the others have not been
+ * given, so they repair towards it; then the lapse ends, the documents merge,
+ * and the same text arrives a second time as edits nothing can deduplicate.
+ * Neither member did anything wrong and the file says everything twice. The
+ * two channels are used together or not at all: see `speaking`.
+ *
  * THE TRAP THIS EXISTS TO AVOID. Repair means applying somebody else's change
  * into the document as edits. Apply a change the document ALREADY has and the
  * text appears twice -- a CRDT does not deduplicate inserts, it merges them.
@@ -182,3 +192,31 @@ export const opening = (
  * something it has to remember to have done.
  */
 export const settled = (verdict: Verdict) => verdict.kind === "current";
+
+/** Where a room stands with respect to everybody else holding the file. */
+export type Reach = {
+  /** Whether this room is reaching the others right now. */
+  attached: boolean;
+  /** Whether it knows of anything it has not carried in yet -- `settled`. */
+  behind: boolean;
+};
+
+/**
+ * Whether this room may write the file back to the server right now.
+ *
+ * `behind` is the half `settled` answers, and the obvious one. `attached` is
+ * the half that is not obvious at all, and it is the reason this function
+ * exists rather than callers just asking `settled`.
+ *
+ * A member that has lost the room can still reach the server perfectly well,
+ * and what it holds is not wrong -- it is simply not shared yet. Storing it
+ * publishes one member's private state as the file, which makes every other
+ * member repair towards text they are about to be handed anyway when the lapse
+ * ends. The repair inserts it; the merge inserts it again; a CRDT does not
+ * notice the two say the same thing.
+ *
+ * So a lapse costs the right to write around the room as well as the right to
+ * be told about it. The work is not lost -- it stays in the document, and it
+ * goes when the room comes back.
+ */
+export const speaking = ({ attached, behind }: Reach) => attached && !behind;

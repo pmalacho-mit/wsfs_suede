@@ -1,26 +1,26 @@
 <script lang="ts" module>
-  import { createClient, type Status } from "@liveblocks/client";
-  import {
-    getYjsProviderForRoom,
-    type LiveblocksYjsProvider,
-  } from "@liveblocks/yjs";
-  import * as Y from "yjs";
+  import { createClient } from "@liveblocks/client";
   import { Editor } from "wsfs_suede.python-monaco-suede";
   import { nameOf, holderOf } from "$lib/paths";
   import {
-    deltaBetween,
-    editsFor,
     filesystem,
     MappedDebouncer,
     provider,
     type Workspace,
   } from "$wsfs";
+  import {
+    become,
+    Rooms,
+    type Room,
+    type Sending,
+    type Stored,
+  } from "$lib/collab/room.svelte";
+  import { enteringWith } from "$lib/collab/collaborator";
   import type { editor } from "monaco-editor";
   import { UserEdits } from "./edits";
   import { cleaner } from "./utils";
 
   type LiveblocksClient = ReturnType<typeof createClient>;
-  type LiveblocksRoom = ReturnType<LiveblocksClient["enterRoom"]>;
 
   export type NonModelEditorProps = Omit<Editor.Props, "file">;
 
@@ -31,7 +31,7 @@
 
   export class OpenFile {
     readonly id: Id;
-    readonly liveblocks: LiveblocksClient;
+    readonly rooms: Rooms;
     readonly editorProps: NonModelEditorProps;
     readonly workspace: Workspace;
 
@@ -40,13 +40,13 @@
 
     constructor(
       { id, path }: FileTreeModel.Entry,
-      liveblocks: LiveblocksClient,
+      rooms: Rooms,
       editorProps: NonModelEditorProps,
       workspace: Workspace,
     ) {
       this.id = id;
       this.path = path;
-      this.liveblocks = liveblocks;
+      this.rooms = rooms;
       this.editorProps = editorProps;
       this.workspace = workspace;
     }
@@ -63,12 +63,12 @@
      * straight back over it.
      */
     share(content: string) {
-      const { id, path, liveblocks, editorProps } = this;
+      const { id, path, rooms, editorProps } = this;
       this.sharedText ??= new SharedTextFile(
         id,
         path,
         content,
-        liveblocks,
+        rooms,
         editorProps,
         this.workspace,
       );
@@ -97,15 +97,27 @@
     readonly workspace: Workspace;
     readonly file: Editor.Model;
     readonly parent: PsuedoParent;
-    readonly doc: Y.Doc;
-    readonly room: LiveblocksRoom;
-    readonly provider: LiveblocksYjsProvider;
     readonly props: NonModelEditorProps;
     readonly initialContent: string;
 
+    /** Every room this workspace holds -- one stream feeds all of them. */
+    readonly rooms: Rooms;
+
+    /**
+     * The protocol, shared with the two-browser suite.
+     *
+     * Everything about whether this document still speaks for the file lives
+     * in there -- see `collab/room.svelte.ts`. What is left here is the
+     * editor: binding it at the right moment, and telling the room what the
+     * person at the keyboard did.
+     *
+     * Undefined until the room has synced AND reconciled, which is also how
+     * anything rendering this knows not to show an editor yet.
+     */
+    shared = $state<Room>();
+
     readonly cleanup = cleaner();
 
-    status = $state<Status>();
     editor = $state<editor.IStandaloneCodeEditor>();
     userEdits = $state<UserEdits>();
 
@@ -123,44 +135,62 @@
       id: Id,
       path: string,
       content: string,
-      liveblocks: LiveblocksClient,
+      rooms: Rooms,
       props: Omit<Editor.Props, "file">,
       workspace: Workspace,
     ) {
       this.id = id;
       this.initialContent = content;
       this.workspace = workspace;
-      this.room = liveblocks.enterRoom(id);
-      this.provider = getYjsProviderForRoom(this.room.room);
-      this.doc = this.provider.getYDoc();
       this.parent = new PsuedoParent(holderOf(path));
       this.file = new Editor.Model({
         name: nameOf(path),
         parent: this.parent,
         source: content,
       });
-      this.cleanup.add(
-        this.room.room.subscribe("status", (status) => {
-          this.status = status;
-          if (status !== "connected" || this.file.sourceSync) return;
-          this.file.sourceSync = this.doc.getText("content");
-          this.userEdits?.dispose();
-          if (this.editor)
-            this.userEdits = new UserEdits(this.editor, this.file.sourceSync);
-        }),
-      );
+
+      /**
+       * Opened, then bound -- and never the other way about.
+       *
+       * `Rooms.open` does not resolve until the document has been RECEIVED and
+       * reconciled against what the server holds. Binding before that is not a
+       * cosmetic race: `MonacoBinding` makes the model say whatever the
+       * `Y.Text` says the moment it is constructed, so binding an
+       * unsynchronised document does not show an empty file, it MAKES one --
+       * and the next store writes that over the real content.
+       *
+       * This is what the old `subscribe("status")` wiring got wrong. Liveblocks
+       * says `connected` when the SOCKET is up, which is a strictly earlier
+       * moment than the Yjs provider having the document.
+       */
+      this.rooms = rooms;
+      void rooms
+        .open(id)
+        .then((room) => {
+          if (this.#disposed) return;
+          this.shared = room;
+          this.file.sourceSync = room.text;
+          if (this.editor) this.#watching(this.editor);
+        })
+        /**
+         * A room that never syncs leaves the editor on the content the
+         * workspace handed it, unshared and unbound -- which is a worse
+         * experience than collaborating and a much better one than an empty
+         * file. `sourceSync` stays undefined, so `source` falls back to the
+         * model, and `store` answers that it was held.
+         */
+        .catch((reason) => console.error(`room ${id} did not open`, reason));
+
       this.props = {
         ...props,
         onEditor: (editor) => {
           this.editor = editor;
           const disposable = props.onEditor?.(editor);
-          this.userEdits?.dispose();
-          const userEdits = new UserEdits(this.editor, this.file.sourceSync);
-          this.userEdits = userEdits;
+          const userEdits = this.#watching(editor);
           return {
             dispose: () => {
               disposable?.dispose();
-              userEdits?.dispose();
+              userEdits.dispose();
             },
           };
         },
@@ -168,17 +198,92 @@
     }
 
     /**
+     * What the person at this keyboard did, and what it costs.
+     *
+     * The two things that follow from an edit are here TOGETHER because they
+     * are the same fact seen twice: this file now holds something that exists
+     * nowhere else. `dirty` is that fact for anything about to describe the
+     * screen; the debounced store is that fact being fixed.
+     *
+     * Only the user's own edits count. A peer's keystroke arriving through
+     * y-monaco changes this model too, and treating that as this person's work
+     * would have every member of a room storing every other member's typing --
+     * which is why `UserEdits` exists rather than `onDidChangeModelContent`.
+     */
+    #watching(editor: editor.IStandaloneCodeEditor): UserEdits {
+      this.userEdits?.dispose();
+      const userEdits = new UserEdits(editor, this.file.sourceSync);
+      this.userEdits = userEdits;
+      userEdits.subscribe({
+        edited: () => {
+          this.dirty = true;
+          typingDebouncer.enqueue(this.id, () => void this.store());
+        },
+      });
+      return userEdits;
+    }
+
+    /**
      * Stores a version now, and stops being dirty.
      *
      * Clearing first is deliberate: a keystroke landing while the write is in
      * flight has to leave this dirty again, and it will.
+     *
+     * MAY ANSWER THAT IT DID NOT. A room that is not reaching the others, or
+     * that owes a repair, must not write what it is showing back -- see
+     * `rooms.speaking`. Nothing is lost by that: the text stays in the shared
+     * document and goes when the room recovers. It does mean a caller cannot
+     * assume a transaction came back, which is why this says which happened
+     * rather than returning an id that might be a lie.
      */
-    store() {
-      const { id, file, source } = this;
-      typingDebouncer.clear(id);
-      this.dirty = false;
-      const { transaction } = this.workspace.write(file.path, source);
-      return transaction;
+    store(): Promise<Stored> {
+      const sent = this.send();
+      if (sent.held) return Promise.resolve(sent);
+      return sent.settled.then((answer) => ({
+        held: false as const,
+        transaction: sent.transaction,
+        rejected: answer.rejected,
+      }));
+    }
+
+    /**
+     * The same write, answered with the transaction and not waited on.
+     *
+     * What a snapshot uses: it describes the moment it was asked for, and
+     * waiting on the server would describe a later one.
+     */
+    send(): Sending {
+      const { id, file } = this;
+      const room = this.shared;
+      const sent: Sending =
+        room === undefined
+          ? { held: true, why: "the room is not open yet" }
+          : room.send(file.path);
+      /**
+       * Cleared only when the write actually went.
+       *
+       * A HELD WRITE LEAVES THIS DIRTY, and that is the whole point of saying
+       * so: `dirty` means "what the user is looking at exists nowhere else
+       * yet", which is exactly what is still true when a room out of touch
+       * declines to publish it. Clearing here regardless -- which is what this
+       * did before rooms could decline -- would show a saved file that had
+       * never been saved.
+       *
+       * Clearing FIRST, before the answer, is still deliberate: a keystroke
+       * landing while the write is in flight has to leave this dirty again,
+       * and it will.
+       */
+      if (!sent.held) {
+        typingDebouncer.clear(id);
+        this.dirty = false;
+      }
+      return sent;
+    }
+
+    /** The transaction a snapshot can name for this file, if there is one. */
+    storing(): string | undefined {
+      const sent = this.send();
+      return sent.held ? undefined : sent.transaction;
     }
 
     /**
@@ -193,12 +298,7 @@
     forceReplace(value: string): boolean {
       if (this.source === value) return false;
       const yText = this.file.sourceSync;
-      if (yText)
-        this.doc.transact(() => {
-          for (const edit of editsFor(deltaBetween(this.source, value)))
-            if ("insert" in edit) yText.insert(edit.at, edit.insert);
-            else yText.delete(edit.at, edit.remove);
-        });
+      if (yText) become(yText, value);
       else if (this.editor) this.editor.getModel()?.setValue(value);
       return true;
     }
@@ -223,9 +323,7 @@
       this.#disposed = true;
       this.cleanup();
       this.userEdits?.dispose();
-      this.room.leave();
-      this.provider.destroy();
-      this.doc.destroy();
+      this.rooms.close(this.id);
     }
   }
 
@@ -348,10 +446,19 @@
 
     const tree = new FileTreeModel(workspace);
 
+    /**
+     * One registry for the whole workspace, and therefore ONE subscription to
+     * the stream feeding every room. A room that subscribed for itself would
+     * have to be open before it could hear anything -- which is exactly the
+     * case `rooms.opening` exists to cover, and would leave every file that
+     * was ever closed and reopened quietly behind.
+     */
+    const rooms = new Rooms(workspace, enteringWith(liveblocks));
+
     const openInProgress = new Set<Id>();
     const openFiles = new Map<Id, OpenFile>();
     const inView = new InView();
-    cleanup.add(inView);
+    cleanup.add(inView, () => rooms.dispose());
 
     /**
      * Everything this workspace holds, as it stands right now.
@@ -367,9 +474,18 @@
       const stored = new Map<Id, string>();
       if (resolveDirty)
         for (const [entry, open] of openFiles) {
-          if (!open.sharedText?.dirty) continue;
-          const transaction = open.sharedText?.store();
-          stored.set(entry, transaction);
+          const shared = open.sharedText;
+          if (!shared?.dirty) continue;
+          /**
+           * The transaction is known SYNCHRONOUSLY or not at all. A snapshot
+           * describes the moment it was asked for, so waiting on the write
+           * would describe a later one -- and a room that is holding its
+           * writes has no transaction to name at any point. Such an entry
+           * stays `dirty` in the snapshot, which is the honest answer: what
+           * the user is looking at exists nowhere else yet.
+           */
+          const transaction = shared.storing();
+          if (transaction !== undefined) stored.set(entry, transaction);
         }
 
       const index = workspace.index();
@@ -458,19 +574,66 @@
         const id = tree.mapping.of(path);
         if (!id) return false;
         const sharedText = openFiles.get(id)?.sharedText;
-        // Not ready means the room has not said what it holds, and writing
-        // into it now is how a file ends up saying everything twice. Refused,
-        // so the write goes to the workspace the ordinary way instead.
-        //if (!sharedText?.ready) return false; // dropped ready as I was mid-trying to have sync happen after a doc loaded,
-        // but ultimately concluded that was the WRONG way. if ready is necessary, you can add it back into your design
+        /**
+         * A room that has not said what it holds is not a room this write can
+         * go into: editing a document that has not received its own content
+         * merges the two rather than replacing one with the other, which is
+         * how a file ends up saying everything twice. Refused, so the write
+         * goes to the workspace the ordinary way and the room picks it up as
+         * an ordinary gap when it does sync.
+         *
+         * This is the `ready` check that used to be commented out here. It
+         * was right; what was missing was something that could answer it,
+         * and `Room.ready` -- synced AND reconciled -- is that.
+         */
+        if (sharedText?.shared?.ready !== true) return false;
 
         // Only if it actually said something new. The editor writes what it
         // is showing back through here as it opens a file, and storing that
         // would be a version identical to the one before it -- which is waste
         // at best, and at worst a second write racing the first with the same
         // token to present.
-        if (sharedText?.forceReplace(value))
-          openFiles.get(id)?.sharedText?.store();
+        if (sharedText.forceReplace(value)) void sharedText.store();
+        return true;
+      },
+      /**
+       * Bytes replacing a file somebody has open as text.
+       *
+       * The write is NOT taken -- `false` sends it down the ordinary path, so
+       * it lands as a version like any other. What this door is for is the
+       * second half of that: telling the room its file stopped being the text
+       * it is showing, so the editor stops claiming to speak for it. Refusing
+       * was never on the table (a door that can refuse is a door that can
+       * lose data) and merging is not possible -- there is nothing to merge
+       * bytes into.
+       *
+       * The remote case reaches the same conclusion by a different route: a
+       * write from another client arrives over the stream and the room finds
+       * out by READING the file, because nothing in a token says whether it
+       * names text or bytes. This is that conclusion reached one step earlier,
+       * by a caller already holding the bytes.
+       */
+      replaced: async (path, bytes, mime) => {
+        const id = tree.mapping.of(path);
+        if (!id) return false;
+        const room = openFiles.get(id)?.sharedText?.shared;
+        if (room === undefined) return false;
+
+        /**
+         * TAKEN, and that is the only reason to be here at all.
+         *
+         * Nothing is merged -- there is nothing to merge bytes into -- so the
+         * write itself would be identical down the ordinary path. What taking
+         * it buys is the TOKEN: the room has to be told which version ended
+         * it, and the only way to know that before the round trip is to be
+         * the one who sent it.
+         *
+         * Awaited because the kernel's caller is: a script that writes a file
+         * and reads it back expects to have been told.
+         */
+        const { transaction, settled } = workspace.write(path, bytes, mime);
+        const answer = await settled;
+        if (!answer.rejected) room.tookAway(transaction, mime);
         return true;
       },
     };
@@ -509,12 +672,7 @@
           openInProgress.add(id);
           try {
             const title = nameOf(path);
-            const opened = new OpenFile(
-              entry,
-              liveblocks,
-              editorProps,
-              workspace,
-            );
+            const opened = new OpenFile(entry, rooms, editorProps, workspace);
             openFiles.set(id, opened);
             await tabsAPI.addComponentPanel(
               "file",

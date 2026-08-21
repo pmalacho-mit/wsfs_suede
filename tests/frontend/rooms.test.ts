@@ -17,6 +17,7 @@ import {
   opening,
   refused,
   settled,
+  speaking,
 } from "../../release/frontend/rooms";
 
 describe("a room's standing", () => {
@@ -166,5 +167,22 @@ describe("whether the room may be written back", () => {
     expect(settled(opening(standing, base).verdict)).toBe(true);
     expect(settled(opening(standing, mint()).verdict)).toBe(false);
     expect(settled(opening(fresh(), mint()).verdict)).toBe(false);
+  });
+
+  it("is not enough to be up to date if nobody can hear it", () => {
+    expect(speaking({ attached: true, behind: false })).toBe(true);
+    expect(speaking({ attached: false, behind: false })).toBe(false);
+  });
+
+  it("is not enough to be heard if it owes a repair", () => {
+    expect(speaking({ attached: true, behind: true })).toBe(false);
+  });
+
+  it("reads `behind` straight off a verdict", () => {
+    const base = mint();
+    const standing = carried(emitting(fresh(), base), base).standing;
+    const owed = opening(standing, mint()).verdict;
+
+    expect(speaking({ attached: true, behind: !settled(owed) })).toBe(false);
   });
 });

@@ -1,3 +1,34 @@
+<script lang="ts" module>
+  /**
+   * How many times this page has run the suite, and how many bodies it has
+   * run -- both at MODULE scope, which is the whole point.
+   *
+   * The counter these replace lived in the instance script, so it could not
+   * see the thing most worth ruling out: the harness reloads the page by
+   * itself (`Sweater.svelte`, `tryReload`) when it thinks a test changed, and
+   * a reload re-runs every scenario against rooms that already hold the first
+   * run's text. `loads` survives a reload; a body counter in a component
+   * cannot.
+   */
+  const LOADS = "collab:loads";
+
+  const counted = () => {
+    try {
+      const now = Number(sessionStorage.getItem(LOADS) ?? "0") + 1;
+      sessionStorage.setItem(LOADS, String(now));
+      return now;
+    } catch {
+      return 0;
+    }
+  };
+
+  const loads = counted();
+  let bodies = 0;
+
+  /** Stamped into every failure message, because it is never in the assertion. */
+  export const provenance = () => `loads=${loads} bodies=${bodies}`;
+</script>
+
 <script lang="ts">
   /**
    * Two browsers, one workspace, one room each time.
@@ -17,9 +48,6 @@
 
   import { agree, announce, awaiting, browser, me, other, playing, step } from "./collaboration";
   import { Collaborator } from "./collaborator";
-
-  /** How many times a body has run in this page -- see the converge test. */
-  let bodies = 0;
 
   class Pocket {
     who = $state("");
@@ -116,7 +144,7 @@
     const count = (needle: string) => pocket.text.split(needle).length - 1;
     if (count("ada was here") !== 1 || count("grace was here") !== 1)
       throw new Error(
-        `[${browser()} ${me()} bodies=${bodies}] before=${JSON.stringify(before)} ` +
+        `[${browser()} ${me()} ${provenance()}] before=${JSON.stringify(before)} ` +
           `afterType=${JSON.stringify(afterType)} final=${JSON.stringify(pocket.text)}`,
       );
     harness.expect(count("ada was here")).toBe(1);
@@ -141,6 +169,7 @@
       await client.open(entry);
       client.type(entry, "written before grace ever looked\n");
       const stored = await client.store(entry);
+      if (stored.held) throw new Error(`the room would not store: ${stored.why}`);
       harness.expect(stored.rejected).toBe(false);
       await announce(step(id, "latejoin", "stored"));
       pocket.note = "typed and stored";
@@ -223,7 +252,12 @@
      * them are holding.
      */
     const stored = await client.store(entry);
-    pocket.note = stored.rejected ? "lost the swap" : "landed";
+    harness.expect(stored.held).toBe(false);
+    pocket.note = stored.held
+      ? stored.why
+      : stored.rejected
+        ? "lost the swap"
+        : "landed";
 
     await until(
       "the stream to settle",
@@ -236,5 +270,325 @@
 >
   {#snippet vest(pocket: Pocket)}
     <p><b>{pocket.who}</b>: {pocket.note}</p>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="merges an unnoticed lapse without doubling what was typed during it"
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "lapse", "base\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () => client.text(entry).includes("base"));
+    await announce(step(id, "lapse", `open-${me()}`));
+    await awaiting(step(id, "lapse", `open-${other()}`));
+
+    if (playing("ada")) {
+      /**
+       * The network goes and Ada does not notice, which is the whole point:
+       * the document is hers, so it goes on taking what she types, and every
+       * one of those edits arrives at once when a provider is attached again.
+       */
+      client.goOffline(entry);
+      client.type(entry, client.text(entry) + "ada kept typing\n");
+      await announce(step(id, "lapse", "gone"));
+      await awaiting(step(id, "lapse", "carried on"));
+      await client.comeBack(entry);
+      pocket.note = "lapsed, typed, came back";
+    } else {
+      await awaiting(step(id, "lapse", "gone"));
+      client.type(entry, client.text(entry) + "grace carried on\n");
+      await announce(step(id, "lapse", "carried on"));
+      pocket.note = "carried on while ada was away";
+    }
+
+    await until(
+      "both lines to arrive",
+      () =>
+        client.text(entry).includes("ada kept typing") &&
+        client.text(entry).includes("grace carried on"),
+    );
+    pocket.text = client.text(entry);
+
+    const count = (needle: string) => pocket.text.split(needle).length - 1;
+    harness.expect(count("ada kept typing")).toBe(1);
+    harness.expect(count("grace carried on")).toBe(1);
+    harness.expect(count("base")).toBe(1);
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="holds a store while the room is not reaching anybody"
+  body={async (harness) => {
+    /**
+     * The finding this scenario exists for.
+     *
+     * A detached member is still perfectly able to reach the SERVER, and
+     * storing from there looks harmless -- the write lands, the others hear
+     * about it, and they repair towards it. But the text they repair towards
+     * is text this member is about to hand them again through the document,
+     * and a CRDT merges two inserts rather than noticing they say the same
+     * thing. The file then says everything twice, and nobody involved did
+     * anything wrong.
+     *
+     * So the rule is the one in `rooms.speaking`: the two channels are used
+     * together or not at all. Lose the room and you have also lost the right
+     * to write around it.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "held", "kept\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () => client.text(entry).includes("kept"));
+    await announce(step(id, "held", `open-${me()}`));
+    await awaiting(step(id, "held", `open-${other()}`));
+
+    if (playing("ada")) {
+      client.goOffline(entry);
+      client.type(entry, client.text(entry) + "ada while away\n");
+
+      const held = await client.store(entry);
+      harness.expect(held.held).toBe(true);
+      harness.expect(client.speaks(entry)).toBe(false);
+      pocket.note = held.held ? held.why : "stored anyway";
+
+      await client.comeBack(entry);
+      await until("the room to speak again", () => client.speaks(entry));
+
+      /** And now it may -- the others are holding the same text by then. */
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`still held: ${stored.why}`);
+      harness.expect(stored.rejected).toBe(false);
+      await announce(step(id, "held", "stored"));
+    } else {
+      await awaiting(step(id, "held", "stored"));
+      await until("ada's line to arrive", () =>
+        client.text(entry).includes("ada while away"),
+      );
+      pocket.note = "saw it once ada was back";
+    }
+
+    await until("the two to agree", () =>
+      client.text(entry).includes("ada while away"),
+    );
+    pocket.text = client.text(entry);
+    harness.expect(pocket.text.split("ada while away").length - 1).toBe(1);
+    harness.expect(client.verdicts.some((verdict) => verdict.kind === "repair")).toBe(
+      false,
+    );
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="both lapse at once, both type, and both come back"
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "bothlapse", "shared start\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () =>
+      client.text(entry).includes("shared start"),
+    );
+    await announce(step(id, "bothlapse", `open-${me()}`));
+    await awaiting(step(id, "bothlapse", `open-${other()}`));
+
+    /**
+     * Both go, so neither is anybody's witness. Nothing either of them writes
+     * during this reaches the other by any route -- which is what makes the
+     * come-back the only place the two documents can be reconciled.
+     */
+    client.goOffline(entry);
+    client.type(entry, client.text(entry) + `${me()} was alone\n`);
+    await announce(step(id, "bothlapse", `alone-${me()}`));
+    await awaiting(step(id, "bothlapse", `alone-${other()}`));
+
+    await client.comeBack(entry);
+    await until(
+      "both lines to arrive",
+      () =>
+        client.text(entry).includes("ada was alone") &&
+        client.text(entry).includes("grace was alone"),
+    );
+    pocket.text = client.text(entry);
+    pocket.note = "came back";
+
+    const count = (needle: string) => pocket.text.split(needle).length - 1;
+    harness.expect(count("ada was alone")).toBe(1);
+    harness.expect(count("grace was alone")).toBe(1);
+    harness.expect(count("shared start")).toBe(1);
+
+    /** And one of them storing afterwards is not a conflict for the other. */
+    await until("the room to speak again", () => client.speaks(entry));
+    if (playing("ada")) {
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`the room would not store: ${stored.why}`);
+      await announce(step(id, "bothlapse", "stored"));
+    } else {
+      await awaiting(step(id, "bothlapse", "stored"));
+      await until(
+        "the stream to carry it",
+        () => client.verdicts.length > 0,
+        15_000,
+      ).catch(() => undefined);
+    }
+    harness.expect(client.verdicts.some((verdict) => verdict.kind === "repair")).toBe(
+      false,
+    );
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a write that is not text takes the file away from the room"
+  body={async (harness) => {
+    /**
+     * The design decision this checks, taken before it was written: the write
+     * LANDS. A room showing text has nothing to merge bytes into, so refusing
+     * would be a door that loses data, and merging is not on the table. What
+     * is left is telling the room its file stopped being what it is showing,
+     * and that is what `replacement` records.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "binary", "readable\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      await client.open(entry);
+      await until("the room to carry the file", () =>
+        client.text(entry).includes("readable"),
+      );
+      await announce(step(id, "binary", "open"));
+
+      await awaiting(step(id, "binary", "replaced"));
+      await until(
+        "the room to be told the file is not its text any more",
+        () => client.replacement(entry) !== undefined,
+      );
+      pocket.note = `stood down: ${client.replacement(entry)?.mime}`;
+
+      /** Not corrupted, and not repaired: the document is left as it was. */
+      harness.expect(client.text(entry)).toBe("readable\n");
+      harness.expect(client.speaks(entry)).toBe(false);
+      harness.expect(client.replacement(entry)?.mime).toBe("image/png");
+
+      /** And it may not write its stale text back over the bytes. */
+      const held = await client.store(entry);
+      harness.expect(held.held).toBe(true);
+    } else {
+      /** Grace never opens it. She writes bytes the way a kernel would. */
+      await awaiting(step(id, "binary", "open"));
+      const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
+      const answer = await client.replace(entry, png, "image/png");
+      harness.expect(answer.rejected).toBe(false);
+      await announce(step(id, "binary", "replaced"));
+      pocket.note = "wrote bytes over it";
+    }
+    pocket.text = client.text(entry);
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="rebuilds what a client was looking at after the file has moved on"
+  body={async (harness) => {
+    /**
+     * The loop this closes. A client writes down four tokens per entry; the
+     * file then moves on; and the server hands back what those transactions
+     * SAID rather than what the file holds now. That is the difference
+     * between an assistant reading the screen somebody asked about and one
+     * reading the screen as it is by the time it answers.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "rebuild", "before\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () => client.text(entry).includes("before"));
+    await announce(step(id, "rebuild", `open-${me()}`));
+    await awaiting(step(id, "rebuild", `open-${other()}`));
+
+    if (playing("ada")) {
+      await until("the room to speak", () => client.speaks(entry));
+      client.type(entry, client.text(entry) + "ada wrote this\n");
+      const looking = client.text(entry);
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`the room would not store: ${stored.why}`);
+      harness.expect(stored.rejected).toBe(false);
+
+      /** The snapshot has to name the version, so wait for it to be one. */
+      await until(
+        "the stream to carry the store",
+        () => client.token(entry) === stored.transaction,
+      );
+      const taken = [client.snapshot(entry)];
+
+      /** Empty is what makes it portable -- see `Workspace.unsettled`. */
+      harness.expect(client.unsettled(taken)).toEqual([]);
+      await announce(step(id, "rebuild", "snapped"));
+
+      /** Now let the file move on underneath the snapshot. */
+      await awaiting(step(id, "rebuild", "moved"));
+      await until(
+        "the file to have moved past it",
+        () => client.token(entry) !== stored.transaction,
+      );
+
+      const [rebuilt] = await client.rebuild(taken);
+      pocket.note = "rebuilt";
+      harness.expect(rebuilt.unresolved).toEqual([]);
+      harness.expect(rebuilt.content?.type).toBe("text");
+      const said = rebuilt.content?.type === "text" ? rebuilt.content.content : "";
+      pocket.text = said;
+
+      /** What she was looking at, NOT what the file says now. */
+      harness.expect(said).toBe(looking);
+      harness.expect(said.includes("grace moved it on")).toBe(false);
+    } else {
+      await awaiting(step(id, "rebuild", "snapped"));
+      await until("the room to speak", () => client.speaks(entry));
+      client.type(entry, client.text(entry) + "grace moved it on\n");
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`the room would not store: ${stored.why}`);
+      await announce(step(id, "rebuild", "moved"));
+      pocket.note = "moved the file on";
+      pocket.text = client.text(entry);
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
