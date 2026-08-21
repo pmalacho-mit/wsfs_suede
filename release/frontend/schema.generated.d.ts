@@ -497,6 +497,8 @@ export interface components {
             content_version: string;
             /** Content */
             content: components["schemas"]["TextBody"] | components["schemas"]["BinaryBody"];
+            /** Predecessor */
+            predecessor?: string | null;
         };
     };
     responses: never;
