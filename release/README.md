@@ -1,2 +1,4 @@
 > [!NOTE]
-> This is a [suede](https://github.com/pmalacho-mit/suede) dependency. 
+> This is a [suede](https://github.com/pmalacho-mit/suede) dependency.
+
+web workspace
