@@ -361,6 +361,54 @@ class Metadata(BaseModel):
     """
 
 
+class Versions(BaseModel):
+    """One entry, at the transactions a client was looking at.
+
+    Every field but `id` is optional so that a caller can ask about as little
+    as it knows. A client replicating a whole filesystem sends all four; one
+    asking only what a file held sends `content_version` alone.
+    """
+
+    id: UUID
+    name_version: UUID | None = None
+    parent_version: UUID | None = None
+    deleted_version: UUID | None = None
+    content_version: UUID | None = None
+
+
+class ReconstructionRequest(BaseModel):
+    entries: list[Versions]
+
+
+class Reconstructed(BaseModel):
+    """What those transactions said -- whichever way each of them went.
+
+    Nothing here says whether a transaction was accepted. That is deliberate:
+    the question this answers is what the USER WAS SEEING, and a client shows
+    its own queued work before the server has ruled on it. A transaction later
+    refused still described the screen at the moment it was taken.
+    """
+
+    id: UUID
+    name: str | None = None
+    parent: UUID | None = None
+    deleted: bool | None = None
+    content: Body | None = None
+
+    unresolved: list[str] = []
+    """Which of the tokens asked about this server has never seen.
+
+    Empty is the answer a caller wants. Anything in it names work that never
+    arrived -- still in some client's outbox, or lost with the tab that held
+    it -- and a caller replicating a filesystem has to treat that as a hole
+    rather than as an entry that had no name.
+    """
+
+
+class ReconstructionResponse(BaseModel):
+    entries: list[Reconstructed]
+
+
 class Moved(BaseModel):
     """Where an entry went, and what it is called now."""
 

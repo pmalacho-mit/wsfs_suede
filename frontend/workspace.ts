@@ -84,6 +84,20 @@ export type Workspace = {
   move: (from: paths.Path, to: paths.Path) => Submitting;
   remove: (path: paths.Path) => Submitting;
 
+  /**
+   * Which of these transactions this client has not yet heard the server
+   * confirm -- queued, in flight, or answered but not yet carried by the
+   * stream.
+   *
+   * A snapshot names transactions, and a client shows its own work the
+   * instant it makes it, so a snapshot can name work that has never left this
+   * machine. Nothing anywhere else can rebuild that: the bytes are here and
+   * nowhere. A consumer handing a snapshot to something that will read it
+   * elsewhere asks this first, and an empty answer is what makes the snapshot
+   * portable.
+   */
+  unsettled: (transactions: Iterable<Transaction>) => Transaction[];
+
   stop: () => void;
   nudge: () => void;
 };
@@ -340,6 +354,30 @@ export const connect = (options: Options): Workspace => {
         },
       });
       return { transaction, settled };
+    },
+
+    /**
+     * Read off the CONFIRMED map rather than off the outbox, and the
+     * difference matters. A transaction the outbox has never heard of is not
+     * settled -- it is one this client has not got round to queueing, or one
+     * whose bytes died with a tab, and answering "portable" for either would
+     * be answering for something that does not exist anywhere.
+     *
+     * Every transaction a snapshot names is a property token of something it
+     * was showing, so a token standing in the confirmed map is exactly the
+     * question "has the server told me about this", asked completely.
+     */
+    unsettled: (transactions) => {
+      const confirmed = new Set<Transaction>();
+      for (const entry of map.values()) {
+        confirmed.add(entry.name_version);
+        confirmed.add(entry.parent_version);
+        confirmed.add(entry.deleted_version);
+        if (entry.content_version != null) confirmed.add(entry.content_version);
+      }
+      return [...transactions].filter(
+        (transaction) => !confirmed.has(transaction),
+      );
     },
 
     stop: sync.stop,

@@ -979,7 +979,7 @@ async def _minted_elsewhere(submission: Submission, request: Create) -> bool:
     )
 
 
-async def _declined(
+async def declined(
     submission: Submission, request: Submitted, reason: str
 ) -> Outcome:
     """Every refusal leaves this way, so none of them can leave without being
@@ -997,13 +997,13 @@ async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
     applied = await _already_applied(submission, request)
     if applied is not None:
         if isinstance(applied.response, Rejected):
-            return await _declined(submission, request, applied.response.reason)
+            return await declined(submission, request, applied.response.reason)
         return applied  # a replay after a dropped response: free, by design
     if isinstance(request, Create) and await _minted_elsewhere(submission, request):
-        return await _declined(submission, request, Refusal.ID_TAKEN)
+        return await declined(submission, request, Refusal.ID_TAKEN)
     refused = await refusal(submission, request)
     if refused is not None:
-        return await _declined(submission, request, refused)
+        return await declined(submission, request, refused)
     return await _APPLICATION[request.op](submission, request)
 
 

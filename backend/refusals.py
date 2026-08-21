@@ -72,6 +72,7 @@ def _common(submission: Any, request: Transacted, reason: str) -> dict[str, Any]
     return {
         "transaction": request.transaction,
         "entry_id": request.id,
+        "workspace_id": submission.workspace,
         "user_id": submission.user,
         "op": request.op,
         "reason": reason,
@@ -358,7 +359,11 @@ async def record(submission: Any, request: Submitted, reason: str, *logs: type) 
     if reason in ELSEWHERE:
         table = models.unknown_entry if reason == Refusal.ENTRY_UNKNOWN else models.taken_id
         submission.session.add(table(**_common(submission, request, reason)))
-        return
+        # and on, deliberately. These two are kept apart so they can be
+        # COUNTED apart -- a workspace collecting them is saying something is
+        # wrong. That is no reason to throw away what the user had typed: a
+        # write to an entry whose create was refused earlier arrives here, and
+        # its text is the only copy anybody has.
 
     for log in logs:
         kind = models.refused_for(log)
