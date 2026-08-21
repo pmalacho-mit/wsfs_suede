@@ -12,7 +12,8 @@
         "esbenp.prettier-vscode",
         "ms-azuretools.vscode-containers",
         "ms-python.python",
-        "ms-python.black-formatter"
+        "ms-python.black-formatter",
+        "svelte.svelte-vscode"
       ],
       "settings": {
         "[javascript]": {
@@ -26,15 +27,22 @@
           "editor.defaultFormatter": "ms-python.black-formatter",
           "editor.formatOnSave": true
         },
+        "[svelte]": {
+          "editor.defaultFormatter": "svelte.svelte-vscode"
+        },
         "[typescript]": {
           "editor.defaultFormatter": "esbenp.prettier-vscode",
           "editor.formatOnSave": true
         },
         "editor.formatOnSave": true,
         "editor.tabSize": 2,
+        "files.autoSave": "off",
         "basedpyright.analysis.extraPaths": [
           "/usr/local/python/3.12.14/lib/python3.12/site-packages"
-        ]
+        ],
+        "svelte.enable-ts-plugin": true,
+        "svelte.plugin.typescript.enable": true,
+        "svelte.ask-to-enable-ts-plugin": false
       }
     }
   },
