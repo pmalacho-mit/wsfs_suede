@@ -70,41 +70,61 @@ custom server build.
 
 ---
 
-## Notebooks
+## Chained documents
 
-Each cell is its own Monaco instance and its own document, but the language
-server sees each cell prefixed with every earlier cell — the same chaining
-VSCode uses to make a name bound in one cell visible in the next.
+A notebook cell is analysed as its own document with every earlier cell in
+front of it — the same chaining VSCode uses to make a name bound in one cell
+visible in the next. Nothing here is specific to notebooks: hand over an
+ordered list of files and they share one namespace.
 
-```svelte
-<script lang="ts">
-  import { Notebook } from "<path>/python-monaco-suede";
+```ts
+import { Chained, Editor } from "<path>/python-monaco-suede";
 
-  const notebook = new Notebook.Model({ path: "/lesson" });
-  notebook.add("greeting = 'hello'");
-  notebook.add("greeting.upper()");
-</script>
+const files = [
+  new Editor.Model({ name: "1.py", parent: chain, source: "greeting = 'hello'" }),
+  new Editor.Model({ name: "2.py", parent: chain, source: "greeting.upper()" }),
+];
 
-<Notebook.Component {notebook} />
+const chain = { path: "/lesson", files };
+
+const unregister = Chained.register(chain);
 ```
+
+`files` is read on every query rather than copied, so the list may be reordered,
+added to and removed from in place. When one file's text changes, tell the
+server that the files after it need analysing again:
+
+```ts
+await Chained.resyncAfter(chain, edited);
+```
+
+Debounce that: a keystroke in the first of twenty cells otherwise resends
+nineteen documents.
 
 Positions are translated in both directions at the protocol level, so:
 
-- Hover and completion in a later cell resolve names from earlier ones.
-- Go-to-definition on such a name lands in the cell that owns it, not on a
+- Hover and completion in a later file resolve names from earlier ones.
+- Go-to-definition on such a name lands in the file that owns it, not on a
   phantom line in the current one.
-- A mistake in cell 1 is reported on cell 1 only, never repeated on cell 2.
-- Editing a cell resends the cells after it, from the same shared version
-  counter the import loader uses, since the editor is not the only author of a
-  cell's text.
+- A mistake in file 1 is reported on file 1 only, never repeated on file 2.
+- Resends carry versions from the same counter the import loader uses, since
+  the editor is not the only author of a chained file's text.
 
-The cost is quadratic in cell count: cell *n*'s document contains *n* cells'
-worth of text. Resends are debounced.
+The cost is quadratic in chain length: file *n*'s document contains *n* files'
+worth of text.
 
-The server can also chain cells itself, over `notebookDocument/didOpen` with
-`vscode-notebook-cell:` URIs, which would remove the rewriting layer entirely.
-That needs cell models to carry that URI scheme, so it is not what this does
-today.
+The server can also chain notebook cells itself, over `notebookDocument/didOpen`
+with `vscode-notebook-cell:` URIs, which would remove the rewriting layer
+entirely. That needs cell models to carry that URI scheme, so it is not what
+this does today.
+
+### Displaying and running a notebook
+
+This package deliberately stops at "Python in a Monaco editor". Rendering a
+notebook — cell ordering, markdown, outputs, execution against a kernel, and
+optional collaborative editing — is
+[python-notebook-suede](https://github.com/pmalacho-mit/python-notebook-suede),
+which builds its cell chain out of the API above.
 
 ### With a python web kernel
 

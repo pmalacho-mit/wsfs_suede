@@ -69,11 +69,18 @@ export class Filesystem {
 
   readonly memory = new FileProvider.Memory();
 
+  /**
+   * Registering the overlay reaches for the workspace's services, and asking
+   * for them is what counts as bringing them up — before whoever is meant to
+   * configure them has. Files can be held meanwhile; only the editor's view of
+   * them waits.
+   */
   constructor(
     private readonly toUri: (path: string) => monaco.Uri,
     priority: number,
+    servicesReady: Promise<void>,
   ) {
-    registerFileSystemOverlay(priority, this.overlay);
+    void servicesReady.then(() => registerFileSystemOverlay(priority, this.overlay));
     void this.mount(this.memory);
   }
 

@@ -128,6 +128,8 @@ export const createLanguageClient = async ({
   const host = new MonacoEditorLanguageClientWrapper();
   await host.init({
     $type: "extended",
+    // The editor brought these up; a second attempt throws.
+    vscodeApiConfig: { vscodeApiInitPerformExternally: true },
     editorAppConfig: { monacoWorkerFactory: configureDefaultWorkerFactory },
     languageClientConfigs: {
       automaticallyDispose: false,

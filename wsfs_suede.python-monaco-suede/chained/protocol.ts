@@ -6,7 +6,7 @@ import {
   notification,
   OpenDocuments,
 } from "../language/documents";
-import type { Origin } from "./chain";
+import type { Origin } from "./lines";
 
 export type ChainedDocuments = {
   /** Lines of preceding cells prefixed onto this document, or undefined if not a cell. */

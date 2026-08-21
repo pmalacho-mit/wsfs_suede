@@ -4,7 +4,7 @@ import {
 } from "./Editor.svelte";
 import { default as NotebookComponent } from "./Notebook.svelte";
 import { EditableFile } from "./models.svelte";
-import { Notebook as NotebookModel } from "./notebook/models.svelte";
+import type { Chain, ChainedFile } from "./chained/registry";
 import type { PythonAnalysis } from "./language/settings";
 import { FileProvider } from "./filesystem/provider";
 import type { DiagnosticFilter as Filter } from "./language/diagnostics";
@@ -20,6 +20,7 @@ import { uri, workspace } from "./workspace";
 export type { FileProvider } from "./filesystem/provider";
 export type { PythonAnalysis } from "./language/settings";
 export type { DiagnosticContext } from "./language/diagnostics";
+export type { Chain, ChainedFile } from "./chained/registry";
 
 /**
  * The filters worth having, by name. Declared alongside the type of the same
@@ -92,15 +93,23 @@ export namespace Editor {
   export type Props = EditorProps;
 }
 
-export const Notebook = {
-  Component: NotebookComponent,
-  Model: NotebookModel,
-};
+/**
+ * Files analysed as one shared namespace: each is its own document, but the
+ * language server sees it prefixed with every earlier file in its chain — the
+ * same trick VSCode uses to make a name bound in one notebook cell visible in
+ * the next. Positions are translated back on the way out, so hover, completion
+ * and go-to-definition land where the reader is looking.
+ */
+export const Chained = {
+  register: (chain: Chain) => workspace.chains.add(chain),
 
-export namespace Notebook {
-  export type Model = NotebookModel;
-  export type Component = NotebookComponent;
-}
+  /**
+   * A file's document contains every earlier file in its chain, so editing one
+   * leaves every file after it analysed against text the server no longer has.
+   */
+  resyncAfter: async (chain: Chain, file: ChainedFile) =>
+    workspace.chains.resyncAfter(chain, file, await workspace.client),
+};
 
 /** One filesystem, read by both the editor and the kernel that runs the code. */
 export const WebKernel = {
