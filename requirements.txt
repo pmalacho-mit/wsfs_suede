@@ -4,4 +4,3 @@ fastapi==0.141.1
 fast_diff_match_patch==2.1.0
 asyncpg>=0.29
 pycrdt==0.14.3
-liveblocks==3.23.0

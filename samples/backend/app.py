@@ -31,6 +31,8 @@ from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.associations import WithID
 from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.tablenames import tablename
 
+from wsfs_suede.samples.backend.hosting import keeper_over
+
 
 class Account(WithID, tablename("plural"), table=True):
     """The host's users. wsfs never reads this table -- it stores ids that
@@ -170,6 +172,25 @@ def create_sample_app(
             session.add(project)
             await session.commit()
             return {"id": str(project.id)}
+
+    @app.post("/rooms/{entry_id}", status_code=204)
+    async def ensure_room(entry_id: UUID) -> None:
+        """Make this entry's shared room exist and say what the file says.
+
+        Idempotent, and the only way a room is ever filled: the browsers used
+        to elect one of themselves to do it, which is a race no client can
+        settle because a document that has not synced looks exactly like an
+        empty one.
+        """
+        await _rooms().ensure(str(entry_id))
+
+    def _rooms():
+        secret = os.environ.get("LIVEBLOCKS_SECRET_KEY")
+        if not secret:
+            raise HTTPException(503, "this host was started without a Liveblocks key")
+        if not hasattr(app.state, "rooms"):
+            app.state.rooms = keeper_over(backend, secret)
+        return app.state.rooms
 
     backend = Backend.over(
         MODELS,
