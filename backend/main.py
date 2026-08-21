@@ -30,13 +30,13 @@ from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, R
 from fastapi import Path as APIPath
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import delete, func
-from sqlmodel import col, select
+from sqlmodel import col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
-from . import service
+from . import refusals, service
 from .blobs import Blobs
 from .contract import (
     Create,
@@ -325,7 +325,7 @@ async def resolve_content(
     workspace_id: UUID,
     entry_id: UUID,
     content_id: UUID | None,
-) -> TextContentRow | BlobContentRow:
+) -> Any:
     """The write a content token names.
 
     A client holds `content_version` in its metadata and fetches with it
@@ -340,6 +340,12 @@ async def resolve_content(
         else await _written(backend, session, content_id)
     )
     if held is None or held.entry_id != entry_id:
+        held = (
+            None
+            if content_id is None
+            else await _refused_write(backend, session, entry_id, content_id)
+        )
+    if held is None:
         raise HTTPException(404, "entry has no such content")
     return held
 
@@ -350,6 +356,36 @@ async def _written(
     return await session.get(
         backend.models.text_content, content_id
     ) or await session.get(backend.models.blob_content, content_id)
+
+
+async def _refused_write(
+    backend: Backend, session: AsyncSession, entry_id: UUID, content_id: UUID
+) -> Any | None:
+    """A write this server declined, asked for by the transaction that sent it.
+
+    Answered at the same address as an accepted one, because a client holding
+    a transaction id should not have to know which way the answer went to ask
+    what it said -- and the reason it is asking is usually that it does not.
+
+    Newest of its transaction, which matters only for a request re-sent after
+    a dropped connection: refused twice, two rows, and the one this client was
+    holding when it gave up is the later.
+    """
+    models = backend.models
+    for refused in models.refused_content:
+        found = (
+            await session.exec(
+                select(refused)
+                .where(
+                    col(refused.transaction) == content_id,
+                    col(refused.entry_id) == entry_id,
+                )
+                .order_by(desc(col(refused.timestamp)))
+            )
+        ).first()
+        if found is not None:
+            return found
+    return None
 
 
 async def _newest_write(
@@ -364,7 +400,30 @@ async def _newest_write(
 async def content_response(
     backend: Backend, session: AsyncSession, held: Any
 ) -> Response:
-    if isinstance(held, backend.models.text_content):
+    """The same answer whether this write landed or not.
+
+    The version a refused write reports is its TRANSACTION, not the surrogate
+    key of the row keeping it: the transaction is the only name the client
+    ever knew it by, and a refusal never became a token anyone can present.
+    """
+    models = backend.models
+    if isinstance(held, models.refused_text):
+        body = TextContentResponse(
+            content=await refusals.text_of(
+                session, models, backend.schema.text, held
+            ),
+            version=held.transaction,
+        )
+        return JSONResponse(
+            body.model_dump(mode="json"), headers={"ETag": str(held.transaction)}
+        )
+    if isinstance(held, models.refused_blob):
+        return Response(
+            content=await backend.blobs.read(held.hash),
+            media_type=held.mime,
+            headers={"ETag": str(held.transaction), "X-Content-Hash": held.hash},
+        )
+    if isinstance(held, models.text_content):
         body = TextContentResponse(
             content=await backend.schema.text.at(session, held.entry_id, held.position),
             version=held.id,

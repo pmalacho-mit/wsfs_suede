@@ -206,6 +206,20 @@ class Write(Transacted):
     two. Nesting it also keeps this union flat, which is what lets the schema
     express `op` as a discriminator and a client generate itself from it."""
 
+    predecessor: UUID | None = None
+    """This client's previous write to this entry, if it had one and it lost.
+
+    A HINT ABOUT STORAGE, and nothing else. It cannot make a write land that
+    would otherwise be refused, it is not consulted before the answer is
+    given, and a value naming nothing the server holds is ignored rather than
+    refused. Leaving it out costs only space.
+
+    What it buys: a client whose writes are losing in a row drifts further
+    from the accepted head with each one, so recording each refusal as a diff
+    against that head stores the whole divergence again every time. Against
+    the previous refusal it stores what was typed since. See `refusals`.
+    """
+
 
 Submitted = Annotated[
     Create | Delete | Rename | Reparent | Move | Write, Field(discriminator="op")

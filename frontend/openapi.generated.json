@@ -1179,6 +1179,18 @@
                 "text": "#/components/schemas/TextBody"
               }
             }
+          },
+          "predecessor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predecessor"
           }
         },
         "type": "object",

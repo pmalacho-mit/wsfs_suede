@@ -191,7 +191,20 @@ export const pump = (wiring: Wiring): Pump => {
         ? ahead.request.transaction
         : (wiring.token(request.id) ?? request.content_version);
 
-    return { ...request, content: body, content_version: against } as Submitted;
+    /**
+     * What the server diffs this against if it has to keep it. Only ever the
+     * write in front of THIS chain, and only a hint: naming it cannot make
+     * this land, and leaving it out costs the server space rather than
+     * correctness. See `refusals` on the backend.
+     */
+    const predecessor = ahead?.request.transaction ?? null;
+
+    return {
+      ...request,
+      content: body,
+      content_version: against,
+      predecessor,
+    } as Submitted;
   };
 
   const drain = async (entry: Id) => {

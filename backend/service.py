@@ -37,7 +37,7 @@ from sqlalchemy import literal, union_all
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import minted, stream
+from . import minted, refusals, stream
 from .blobs import Blobs
 from .contract import (
     Acknowledged,
@@ -979,19 +979,31 @@ async def _minted_elsewhere(submission: Submission, request: Create) -> bool:
     )
 
 
+async def _declined(
+    submission: Submission, request: Submitted, reason: str
+) -> Outcome:
+    """Every refusal leaves this way, so none of them can leave without being
+    recorded. What was asked is kept whether or not it was granted -- see
+    `refusals`."""
+    await refusals.record(
+        submission, request, reason, *_writes(submission.models, request)
+    )
+    return Outcome(
+        Rejected(reason=reason, version=await _conflicting_version(submission, request))
+    )
+
+
 async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
     applied = await _already_applied(submission, request)
     if applied is not None:
+        if isinstance(applied.response, Rejected):
+            return await _declined(submission, request, applied.response.reason)
         return applied  # a replay after a dropped response: free, by design
     if isinstance(request, Create) and await _minted_elsewhere(submission, request):
-        return Outcome(Rejected(reason=Refusal.ID_TAKEN))
+        return await _declined(submission, request, Refusal.ID_TAKEN)
     refused = await refusal(submission, request)
     if refused is not None:
-        return Outcome(
-            Rejected(
-                reason=refused, version=await _conflicting_version(submission, request)
-            )
-        )
+        return await _declined(submission, request, refused)
     return await _APPLICATION[request.op](submission, request)
 
 

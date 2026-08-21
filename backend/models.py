@@ -136,16 +136,31 @@ class TransactionRow(Minted, Positioned, WithTime, IsAbstractClass):
     """
 
 
-class NameRow(TransactionRow, IsAbstractClass):
+class NamePayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+    """What a change to a name says.
+
+    Split from the log row because a REFUSED rename says exactly the same
+    thing -- the name the user wanted -- and the two must not be able to
+    describe it differently. The same goes for the three payloads below.
+    """
+
     name: str = Field(nullable=False)
 
 
-class ParentRow(TransactionRow, IsAbstractClass):
+class ParentPayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
     parent_entry_id: ID | None
     """Absent means the workspace root."""
 
 
-class DeletionRow(TransactionRow, IsAbstractClass):
+class NameRow(TransactionRow, NamePayload, IsAbstractClass):
+    pass
+
+
+class ParentRow(TransactionRow, ParentPayload, IsAbstractClass):
+    pass
+
+
+class DeletionPayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
     deleted: bool = Field(default=False, nullable=False)
     """Stated, not implied by the row's existence.
 
@@ -160,18 +175,145 @@ class DeletionRow(TransactionRow, IsAbstractClass):
     """
 
 
-class ContentRow(TransactionRow, IsAbstractClass):
+class DeletionRow(TransactionRow, DeletionPayload, IsAbstractClass):
+    pass
+
+
+class ContentPayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
     size: int = Field(default=0, nullable=False)
     mime: str = Field(default="text/plain", nullable=False)
 
 
-class TextContentRow(ContentRow, IsAbstractClass):
+class TextPayload(ContentPayload, IsAbstractClass):
     delta: Delta = Field(sa_type=JSONB, nullable=False)
-    """How this write's text differs from the entry's previous text."""
+    """How this write's text differs from the text it was written against."""
 
 
-class BlobContentRow(ContentRow, IsAbstractClass):
+class BlobPayload(ContentPayload, IsAbstractClass):
     hash: str = Field(index=True, nullable=False)
+
+
+class ContentRow(TransactionRow, ContentPayload, IsAbstractClass):
+    pass
+
+
+class TextContentRow(ContentRow, TextPayload, IsAbstractClass):
+    pass
+
+
+class BlobContentRow(ContentRow, BlobPayload, IsAbstractClass):
+    pass
+
+
+class RefusedRow(WithID, WithTime, IsAbstractClass):
+    """One transaction the server declined, kept whole.
+
+    The log rows above are what HAPPENED. These are what was ASKED, and they
+    exist because a refusal that leaves no trace makes the server a record of
+    outcomes rather than of a session: a user's work that lost a
+    compare-and-swap would be unrecoverable, and nobody could say afterwards
+    what they had been looking at when they asked.
+
+    NOT `Minted`, and not keyed by the transaction. A transaction id is spent
+    once on one APPLIED change, but a client whose connection drops re-sends
+    the same request, and a request refused twice was genuinely sent twice --
+    so the id is an indexed column and repeats are rows. `WithID` mints the
+    surrogate.
+
+    NOT `Positioned` either, which is the point. Positions are the event
+    stream and the delta chain, and nothing here is in either: a reader
+    folding an entry's history, a subscriber replaying it, and dedup deciding
+    whether an id is spent must all be unable to see these rows -- which they
+    are, by being in different tables, rather than by remembering to filter.
+
+    NO FOREIGN KEY on `entry_id`. A refused CREATE names an entry that was
+    never created, and a constraint would make the one case most worth
+    recording the one case that cannot be.
+    """
+
+    transaction: ID = Field(index=True, nullable=False)
+    user_id: ID
+    entry_id: ID = Field(index=True, nullable=False)
+    op: str = Field(nullable=False)
+    reason: str = Field(index=True, nullable=False)
+
+    presented: ID | None = Field(default=None, nullable=True)
+    """The token this request claimed for the property this row is about.
+
+    One token, not the whole `Seen` a delete presents: this row is about one
+    property, and the token that matters to it is its own. It is also what
+    makes a refused write readable again -- it names the text the delta below
+    was taken against.
+    """
+
+    utc_offset: int | None = Field(default=None, nullable=True)
+    """The client's minutes east of UTC, as on `TransactionRow`."""
+
+
+class RefusedNameRow(RefusedRow, NamePayload, IsAbstractClass):
+    pass
+
+
+class RefusedParentRow(RefusedRow, ParentPayload, IsAbstractClass):
+    pass
+
+
+class RefusedDeletionRow(RefusedRow, DeletionPayload, IsAbstractClass):
+    pass
+
+
+class RefusedTextRow(RefusedRow, TextPayload, IsAbstractClass):
+    basis: ID | None = Field(default=None, nullable=True)
+    """Another refusal this delta was taken against, when there was one.
+
+    A client whose writes are losing in a row diverges further from the
+    accepted head with every one, so diffing each against that head stores the
+    whole divergence again and again. Diffing against the PREVIOUS REFUSAL
+    stores only what the user typed since. The client says which one that was;
+    see `refusals.basis`.
+
+    Purely how this row is stored. It has no bearing on what was accepted, and
+    could not: by the time this row exists the answer has already been given.
+    """
+
+
+class RefusedBlobRow(RefusedRow, BlobPayload, IsAbstractClass):
+    pass
+
+
+class UnknownEntryRow(RefusedRow, IsAbstractClass):
+    """A transaction naming an entry this workspace does not have.
+
+    Its own table because there is no entry to attribute it to and no property
+    it can be said to be about -- and because a workspace collecting these is
+    saying something is wrong, which is easier to notice when they are not
+    mixed in with ordinary lost races.
+    """
+
+
+class TakenIdRow(RefusedRow, IsAbstractClass):
+    """A transaction id already spent on something else.
+
+    Kept apart for the same reason: this is a client minting badly, not a user
+    losing a race, and the two are worth counting separately.
+    """
+
+
+class RefusedTextCacheRow(WithID, IsAbstractClass):
+    """Derived, never authoritative: one client's newest refused text.
+
+    The anchor `basis` folds against, so the common case -- a run of refusals,
+    each diffed against the one before -- costs one delta rather than a walk
+    back down the chain. One row per entry per user: keyed by the client too,
+    because two clients contesting one file would otherwise evict each other
+    exactly when their chains are longest. Deleting the whole table only costs
+    time.
+    """
+
+    entry_id: ID
+    user_id: ID
+    refusal_id: ID
+    content: str = Field(nullable=False)
 
 
 class TextCacheRow(WithID, IsAbstractClass):
@@ -231,6 +373,15 @@ class Models:
     text_cache: type[TextCacheRow]
     token: type[TokenRow]
 
+    refused_name: type[RefusedNameRow]
+    refused_parent: type[RefusedParentRow]
+    refused_deletion: type[RefusedDeletionRow]
+    refused_text: type[RefusedTextRow]
+    refused_blob: type[RefusedBlobRow]
+    unknown_entry: type[UnknownEntryRow]
+    taken_id: type[TakenIdRow]
+    refused_text_cache: type[RefusedTextCacheRow]
+
     @property
     def logs(self) -> tuple[type[TransactionRow], ...]:
         """The five append-only logs, which are also the event stream."""
@@ -247,9 +398,47 @@ class Models:
         return (self.text_content, self.blob_content)
 
     @property
+    def refused_logs(self) -> tuple[type[RefusedRow], ...]:
+        """The same five properties, for transactions that were declined.
+
+        In the same order as `logs`, and paired with it by `service._writes`:
+        a refusal records the logs its operation WOULD have written, so a
+        refused move leaves a name and a parent exactly as an accepted one
+        would have.
+        """
+        return (
+            self.refused_name,
+            self.refused_parent,
+            self.refused_deletion,
+            self.refused_text,
+            self.refused_blob,
+        )
+
+    def refused_for(self, log: type[TransactionRow]) -> type[RefusedRow]:
+        """The refused table paired with one log.
+
+        By POSITION in the two tuples, so a property added to one and not the
+        other stops being buildable rather than silently recording nothing.
+        """
+        return dict(zip(self.logs, self.refused_logs, strict=True))[log]
+
+    @property
+    def refused_content(self) -> tuple[type[RefusedRow], ...]:
+        return (self.refused_text, self.refused_blob)
+
+    @property
     def tables(self) -> tuple[type[SQLModel], ...]:
         """Everything this schema owns -- for create_all, or a migration."""
-        return (self.entry, *self.logs, self.text_cache, self.token)
+        return (
+            self.entry,
+            *self.logs,
+            *self.refused_logs,
+            self.unknown_entry,
+            self.taken_id,
+            self.text_cache,
+            self.refused_text_cache,
+            self.token,
+        )
 
 
 def build_models(
@@ -346,6 +535,45 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
     class BlobContent(Transaction, BlobContentRow, named("blob_content"), table=True):
         __table_args__: ClassVar[tuple[SchemaItem, ...]] = logged("blob_content")
 
+    class Refused(RefusedRow, IsAbstractClass):
+        """The one id here that had to wait for a host to say where it points.
+
+        `entry_id` deliberately does not join it -- see `RefusedRow`.
+        """
+
+        user_id: ID = ForeignKeyField(users)
+
+    class RefusedName(Refused, RefusedNameRow, named("refused_names"), table=True):
+        pass
+
+    class RefusedParent(Refused, RefusedParentRow, named("refused_parentage"), table=True):
+        pass
+
+    class RefusedDeletion(
+        Refused, RefusedDeletionRow, named("refused_deletions"), table=True
+    ):
+        pass
+
+    class RefusedText(Refused, RefusedTextRow, named("refused_text_content"), table=True):
+        pass
+
+    class RefusedBlob(Refused, RefusedBlobRow, named("refused_blob_content"), table=True):
+        pass
+
+    class UnknownEntry(Refused, UnknownEntryRow, named("unknown_entries"), table=True):
+        pass
+
+    class TakenId(Refused, TakenIdRow, named("taken_ids"), table=True):
+        pass
+
+    class RefusedTextCache(RefusedTextCacheRow, named("refused_text_cache"), table=True):
+        user_id: ID = ForeignKeyField(users)
+        refusal_id: ID = ForeignKeyField(RefusedText)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            UniqueConstraint("entry_id", "user_id"),
+        )
+
     class TextContentCache(TextCacheRow, named("text_cache"), table=True):
         entry_id: ID = ForeignKeyField(Entry)
         content_id: ID = ForeignKeyField(TextContent)
@@ -365,4 +593,12 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         blob_content=BlobContent,
         text_cache=TextContentCache,
         token=StreamToken,
+        refused_name=RefusedName,
+        refused_parent=RefusedParent,
+        refused_deletion=RefusedDeletion,
+        refused_text=RefusedText,
+        refused_blob=RefusedBlob,
+        unknown_entry=UnknownEntry,
+        taken_id=TakenId,
+        refused_text_cache=RefusedTextCache,
     )
