@@ -67,10 +67,28 @@
       return agree("workspace", mine);
     })());
 
-  const until = async (what: string, holds: () => boolean, within = 30_000) => {
+  /**
+   * Wait for something, and say what was there instead when it never came.
+   *
+   * `seen` is the whole point of the third argument. A bare "waited 30000ms
+   * for the stream to carry the store" says only that a condition stayed
+   * false, which is the one thing already known -- and the difference between
+   * "the token never moved" and "it moved somewhere else" is the difference
+   * between a lost event and a mismatched id. Cheap to pass, and it is the
+   * only evidence that survives a browser nobody is watching.
+   */
+  const until = async (
+    what: string,
+    holds: () => boolean,
+    within = 30_000,
+    seen?: () => string,
+  ) => {
     const deadline = Date.now() + within;
     while (!holds()) {
-      if (Date.now() > deadline) throw new Error(`waited ${within}ms for ${what}`);
+      if (Date.now() > deadline) {
+        const had = seen ? ` -- saw ${seen()}` : "";
+        throw new Error(`waited ${within}ms for ${what}${had}`);
+      }
       await new Promise((carry) => setTimeout(carry, 100));
     }
   };
@@ -384,10 +402,23 @@
       client.text(entry).includes("ada while away"),
     );
     pocket.text = client.text(entry);
-    harness.expect(pocket.text.split("ada while away").length - 1).toBe(1);
-    harness.expect(client.verdicts.some((verdict) => verdict.kind === "repair")).toBe(
-      false,
-    );
+
+    /**
+     * Thrown rather than asserted, so the failure carries the two things that
+     * distinguish the shapes this can fail in: whether the line is actually
+     * doubled, and whether a repair was so much as contemplated. `expected 2
+     * to be 1` on its own does not say which member repaired, or against
+     * what.
+     */
+    const said = pocket.text.split("ada while away").length - 1;
+    const repairs = client.verdicts.filter((verdict) => verdict.kind === "repair");
+    const detail =
+      `[${browser()} ${me()}] said=${said} ` +
+      `repairs=${JSON.stringify(repairs)} ` +
+      `verdicts=${JSON.stringify(client.verdicts.map((v) => v.kind))} ` +
+      `text=${JSON.stringify(pocket.text)}`;
+    if (said !== 1) throw new Error(`the line is not there exactly once -- ${detail}`);
+    if (repairs.length > 0) throw new Error(`a repair was reached for -- ${detail}`);
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -489,6 +520,10 @@
       await until(
         "the room to be told the file is not its text any more",
         () => client.replacement(entry) !== undefined,
+        30_000,
+        () =>
+          `token=${client.token(entry)} speaks=${client.speaks(entry)} ` +
+          `verdicts=${JSON.stringify(client.verdicts)}`,
       );
       pocket.note = `stood down: ${client.replacement(entry)?.mime}`;
 
@@ -551,6 +586,8 @@
       await until(
         "the stream to carry the store",
         () => client.token(entry) === stored.transaction,
+        30_000,
+        () => `token=${client.token(entry)} wanted=${stored.transaction}`,
       );
       const taken = [client.snapshot(entry)];
 

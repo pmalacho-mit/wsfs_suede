@@ -1,9 +1,13 @@
 # Where the collaboration work is, and what to pick up
 
-Written across two sessions. Everything below is either verified or explicitly
-marked as not — and the second session ends with **a large amount unverified**,
+Written across three sessions. The second ended with a large amount unverified,
 because the docker runtime wedged before any of it could be run in a browser.
-Read *What is not verified* before trusting anything in *What was built*.
+**The third session ran all of it.** The wedge turned out to have a mechanical
+cause and is fixed; the four original scenarios still pass against the extracted
+protocol; and the run found one real bug, which is written up as finding 5.
+
+What is left unverified is now small and named, in *What is not verified*, and
+the honest summary of the rest is the table in *Verified results*.
 
 ---
 
@@ -39,52 +43,73 @@ configured and does not return here, so a full patch blocks forever while
 `git diff --stat` works fine. Use `git diff --no-ext-diff`. This cost real time
 to work out, because it looks exactly like the wedge below.
 
-### The docker wedge — what it looks like and how to avoid it
+### The docker wedge — found, and fixed
 
-**It has now happened twice, and both times while the two browser-control
-containers were being created at once.** First time: mid-`tests/run.sh`, with
-the sample stack, chromium, firefox and pytest all at once. Second time: the
-sample stack plus a first-ever `npm run test:browser -- --browser chromium
---browser firefox`, about a minute in, with both containers mid-`runc create`.
+**It happened twice, and both times while the two browser-control containers
+were being created at once.** That was not a coincidence and it was not bad
+luck; it was the driver.
 
-**How to recognise it.** Every docker client hangs, including `docker ps`, and
-`timeout` and `kill -9` do nothing to them — check `ps` and you will see them in
-state **`D`**, uninterruptible sleep. `dockerd` and `containerd` are both still
-alive; a raw `curl --unix-socket /var/run/docker.sock http://localhost/_ping`
-hangs too, and that is the cheapest endpoint there is. It is not resource
-exhaustion: disk and inodes were at 9% and 4%, and 34G of memory was free. Load
-average climbs anyway, because `D`-state processes count towards it.
+`generateReport` in `sweater-vest-suede/report/index.ts` prepared its browsers
+with `await Promise.all(browsers.map(prepare))`, and `prepare` does not merely
+start a container — **it builds the image**. So a two-browser run put two
+`playwright install --with-deps` builds and then two `runc create`s in flight at
+once, which is exactly the state the daemon died in. `prepare` is now a serial
+loop, with the reasoning recorded beside it. **About twenty container creates
+across the third session, no wedge.**
 
-**There is no recovery from inside the devcontainer.** The stuck clients cannot
-be killed, so the daemon has to be restarted from outside.
+**The advice that used to be here — warm the containers one at a time so the
+two-browser run can attach — was half wrong, and worth knowing why.** The
+`finally` block removes both containers on every run, so `skipIfRunning` never
+fires across invocations and a warmed container never survives. What warming
+actually buys is the **image**, which is cached and is the expensive part. So
+warming one browser at a time is still right for a first-ever run, and it is
+the images you are protecting, not the containers.
 
-**So do not do these:**
+**How to recognise it, if it ever comes back.** Every docker client hangs,
+including `docker ps`, and `timeout` and `kill -9` do nothing to them — check
+`ps` and you will see them in state **`D`**, uninterruptible sleep. `dockerd`
+and `containerd` are both still alive; a raw `curl --unix-socket
+/var/run/docker.sock http://localhost/_ping` hangs too, and that is the cheapest
+endpoint there is. It is not resource exhaustion: disk and inodes were at 9% and
+4%, and 34G of memory was free. Load average climbs anyway, because `D`-state
+processes count towards it. **There is no recovery from inside the
+devcontainer** — the daemon has to be restarted from outside.
 
-- **Do not poll `docker ps` while a browser run is starting.** It will not tell
-  you anything a wedge has not already decided, and each poll leaves another
-  unkillable process behind. Read the run's own output instead. (The polls did
-  not cause the second wedge — the first one was already stuck — but they made
-  it much harder to see what had.)
-- **Do not create both browser containers for the first time in one go.** They
-  are named by devcontainer id specifically so they are **reused** across runs
-  (`report/index.ts`, `namer`), so the expensive create is a one-off. Pay it
-  once per browser, separately, and the two-browser run then only has to attach:
+**Still don't poll `docker ps` while a browser run is starting.** It tells you
+nothing the run's own output does not, and each poll leaves another unkillable
+process behind if the daemon is already gone.
 
-  ```bash
-  npm run test:browser -- --component Reach --browser chromium
-  npm run test:browser -- --component Reach --browser firefox
-  npm run test:browser -- --component Shared --browser chromium --browser firefox
-  ```
+**Don't pipe a run through `tail`.** `npm run test:browser ... | tail -80` shows
+nothing at all until the run ends, so a run that hangs is indistinguishable from
+a run that is working. Redirect to a file and read it.
 
-  `Reach` is the right thing to warm with: it is one test, it is the reachability
-  check, and if it fails you have learnt something worth knowing before spending
-  ten minutes on the full suite.
-- **Do not pipe a run through `tail`.** `npm run test:browser ... | tail -80`
-  shows nothing at all until the run ends, so a run that hangs is
-  indistinguishable from a run that is working. Redirect to a file and read it.
+### `--silence` is the flag you will actually need
 
-**A full run is slow.** Budget ten minutes-plus for four scenarios across two
-browsers, and more the first time, when the browser images are being built.
+**The default silence window is 120s, and it is too short for this suite.** The
+window is time since *any* browser last said anything, and the report gives up
+with `Report server timed out` — which reads exactly like a hang and is not one.
+A single cascading failure can burn well over 120s of quiet, and that is how the
+third session's first two full runs died having proved nothing.
+
+```bash
+npm run test:browser -- --component Shared --browser chromium --browser firefox --silence 180
+```
+
+### Run the scenarios one at a time
+
+This is the single most useful change to how the suite is driven. The cascade
+described under *Known problems* is real — one test dying desynchronises the
+pair and the partner times out on a barrier a test later — and it makes a full
+run's output nearly unreadable. `--test` takes a regex, and a paired single
+scenario runs in **four to eight seconds**:
+
+```bash
+npm run test:browser -- --component Shared --test "holds a store" \
+    --browser chromium --browser firefox --silence 180
+```
+
+`curl -X DELETE http://localhost:8099/rendezvous` between runs. Every result in
+the table below was produced this way.
 
 ---
 
@@ -174,70 +199,93 @@ two-browser suite proves what ships.
   `ReconstructionResponse` named, so the reconstruction round trip is typed
   from the generated schema rather than by hand.
 
+### What the third session changed
+
+Small, and all of it in service of running what was already there.
+
+- **`room.svelte.ts`** — `#settling`, and `reattach` waiting before it
+  reconciles. Finding 5. `send` grew a third `why`.
+- **`sweater-vest-suede/report/index.ts`** — browsers are prepared **serially**.
+  This is the docker wedge fix, and it is one line plus the reason for it.
+- **`Shared.test.svelte`** — `until` takes an optional `seen()` and puts what it
+  actually observed into the timeout message. Both intermittent scenarios were
+  unreadable without it: "waited 30000ms for the stream to carry the store" says
+  only that a condition stayed false, and `saw token=… wanted=…` is what turned
+  that into a finding. Scenario 6's two final assertions now throw with the
+  verdict log and the text attached, for the same reason.
+
 ## Verified results
 
-### From the first session (browser-verified, before the refactor)
+All of the following was run in the third session, against the stack described
+at the top of this file.
 
-`npm run test:browser -- --component "Shared" --browser chromium --browser firefox`
+### The two-browser suite
 
-Four scenarios, both browsers, **8 passed** on 4 of 7 full runs:
+Each scenario run as its own paired chromium+firefox run, per *Run the scenarios
+one at a time*. Both browsers must pass for a row to be green.
 
-1. **converges when both type into one open file**
-2. **shows a late joiner what was typed before they opened it**
-3. **notices when somebody writes around the room** — this is the case `rooms.ts`
-   exists for, and it works: Grace writes outside the room, Ada's room is told it
-   fell behind, and the outside write reaches her document.
-4. **does not call it a conflict when both store from the same room**
+| # | scenario | result |
+|---|----------|--------|
+| 1 | converges when both type into one open file | **pass** |
+| 2 | shows a late joiner what was typed before they opened it | **pass** |
+| 3 | notices when somebody writes around the room | **pass** |
+| 4 | does not call it a conflict when both store from the same room | **pass** |
+| 5 | merges an unnoticed lapse without doubling what was typed during it | **pass** |
+| 6 | holds a store while the room is not reaching anybody | **pass** — 0/4 before finding 5 was fixed, 6/7 after |
+| 7 | both lapse at once, both type, and both come back | **pass** |
+| 8 | a write that is not text takes the file away from the room | **intermittent — 4/6** |
+| 9 | rebuilds what a client was looking at after the file has moved on | **intermittent — 3/6** |
 
-**These results predate the `room.svelte.ts` extraction.** The scenarios are
-unchanged in substance, but the code under them was rewritten, so they are
-evidence about the design and not about the current tree.
+**The four original scenarios pass against the extracted protocol.** That was
+the first question the second session left open, and the answer is that
+`room.svelte.ts` is not a regression.
 
-### From the second session (everything that could be checked without docker)
+**Scenarios 5 and 7 pass, which is the offline-merge design working.** A member
+can lose the room, type, and come back — alone or at the same time as the other
+— and each line arrives exactly once.
 
-- `npx vitest run` — **113 passed, 16 skipped**, including
-  `tests/frontend/rooms.test.ts` at **17** (was 14; three cover `speaking`).
-- `cd samples/frontend && npm run check` — **1821 files, 0 errors**, covering
-  `room.svelte.ts`, `collaborator.ts`, `Shared.test.svelte`, `Workspace.svelte`
-  and `FileView.svelte`.
-- `npm run typecheck` at the root — 24 errors, **all pre-existing and all in
-  `wsfs_suede.python-web-kernel-suede`**; none in `release/`, `tests/` or
-  `samples/`.
+**Scenario 6 is finding 4 observed rather than reasoned.** Ada detaches, types,
+and *is* refused the store; she comes back and the store lands; `ada while away`
+appears exactly once and no repair is recorded. It also found finding 5 on the
+way — see below.
+
+**Scenarios 8 and 9 fail intermittently, and they fail the same way.** See
+*The stream sometimes does not carry a write* under *Known problems*.
+
+### Everything else
+
+- `./tests/run.sh` — **193 passed** in 97s.
+- `npx vitest run` — **113 passed, 16 skipped**.
+- `cd samples/frontend && npm run check` — **1821 files, 0 errors**, 20 warnings,
+  all pre-existing and none in the collaboration code.
+- `npm run test:browser -- --component Reach` — **2 passed** in chromium and
+  **2 passed** in firefox, separately. A browser container mints a token through
+  the proxy and opens a websocket to a real Liveblocks room.
+- `GET /liveblocks/token` returns a real JWT from the host, with
+  `X-User-Email` — which is **required**, and a request without it is a 422.
+- `npm run test:browser -- --component Sample --browser chromium` —
+  **15 passed, 3 failed**. See *The sample shell has three failures* below.
 
 ## What is not verified
 
-**Nothing in this session has been run in a browser.** The docker daemon wedged
-during the first two-browser run of the session — see *The docker wedge* above
-— and never came back, so the baseline run produced no result either. Concretely,
-none of this has been executed anywhere:
+Short now, and named.
 
-- The four new scenarios (below). They typecheck; they have never run.
-- `room.svelte.ts` at runtime, in either consumer.
-- Every claim in *Workspace.svelte, wired at last*. The reasoning behind each is
-  written down, and the `MonacoBinding` one in particular is a reading of
-  y-monaco's constructor rather than something observed.
-- Whether the four *old* scenarios still pass against the extracted protocol.
-  **Run these first**, before the new ones: a failure there is a refactor
-  regression, and a failure in the new ones is a finding.
-- The typing-to-storing wiring. `Sample.test.svelte` has a test that waits for
-  a file to go dirty, which nothing could have satisfied before this change —
-  so that test was already failing, and whether it now passes is unknown.
+- **`Workspace.svelte` in front of a real Liveblocks room.** Everything under
+  *Workspace.svelte, wired at last* is exercised by `Sample`, which uses the
+  `solo()` fake room — and in the third session three of those tests fail. The
+  component has still never been driven against a real provider by anything
+  other than a person.
+- **The retry-a-held-store gap**, which is still unimplemented rather than
+  unverified. See *Known problems*.
+- **`Runner.test.svelte`**, recorded two sessions ago as mid-edit. `npm run
+  check` reports 0 errors across 1821 files, so it is either fixed or outside
+  the check's scope; still worth one look.
 
-The order to re-verify in, once docker is back (and warming the browser
-containers one at a time first, per the wedge section):
-
-```bash
-npm run test:browser -- --component Reach   --browser chromium
-npm run test:browser -- --component Reach   --browser firefox
-npm run test:browser -- --component Shared  --browser chromium --browser firefox
-npm run test:browser -- --component Sample  --browser chromium
-./tests/run.sh                              # backend, 193
-```
-
-## Four findings, all fixed
+## Five findings
 
 None of the first three would have shown up in one browser. The fourth would
-not have shown up in one *session*.
+not have shown up in one *session*. The fifth would not have shown up without
+running the fourth's test.
 
 **1. `Standing` has to be held in structures that merge.** `produced` started as
 a list in one `Y.Map` slot, which is last-writer-wins. Two clients storing at the
@@ -293,10 +341,104 @@ the scenario *holds a store while the room is not reaching anybody* — which
 **has never been run**, so finding 4 is reasoned rather than observed. It is the
 first thing to check when docker is back.
 
+**5. Coming back is not the same as having been heard.** The third session's
+finding, and the half of finding 4 that was missing.
+
+Finding 4 says a room that cannot reach anybody must not write to the server.
+True, and **not sufficient**. The symmetric case is the moment it comes *back*:
+`provider.synced` is the provider saying **this client has received the room**,
+and it says nothing whatever about whether the room has received this client.
+A room that stored in that window sent, through the SERVER, text whose only
+other copy was still in flight through the DOCUMENT. The others met a token
+they had no bookkeeping for, carrying text they did not hold, and did the one
+thing that is correct on the evidence available: they repaired towards it. Then
+the merge landed and said the same thing again.
+
+It is finding 4's own doubling, reached from the other direction, and by
+exactly the members who did nothing wrong.
+
+**Observed, not reasoned.** `holds a store while the room is not reaching
+anybody` failed **four times out of four** on the member who stayed — three
+times as a repair that should not have happened, and once, decisively, as
+
+```
+said=2  verdicts=["seed","repair"]  text="kept\nada while away\nada while away\n"
+```
+
+Note what the three non-doubling failures mean: `#act` records the verdict from
+one comparison and `#mend` re-reads before acting, so when the merge lands
+between the two the repair is contemplated and then declined. The file is
+right; the verdict log records a repair that never happened. That is the same
+race, caught by the guard rather than by luck — which is why asserting on the
+verdict log, and not only on the text, is what made this visible at all.
+
+The fix is `#settling` in `room.svelte.ts`: a room that has just reattached
+does not speak until what it holds has had a chance to go out, and `send`
+answers `{ held: true, why: "the room has not finished handing over what it
+holds" }` until then. Scenario 6 went from **0 of 4** to **6 of 7**, and the
+doubling is gone. The one remaining failure is a different shape — the member
+who stayed never received the line at all — which belongs to *The stream
+sometimes does not carry a write* rather than to this.
+
+**It is a timer, and it should not be.** `#settling` waits `CONVERGING` — the
+same 600ms guess seeding uses. Both callers are asking the same question from
+opposite ends: *has this document been round the room yet?* Neither can ask it,
+so both guess. This is now the second place where correctness rests on a
+duration, which makes replacing it with a real acknowledgement the most
+valuable change left in the protocol rather than merely the tidiest.
+
 ## Known problems
 
-**The suite is flaky.** 4 of 7 full runs were fully green; the others failed 1–3
-tests. Two distinct shapes:
+**The stream sometimes does not carry a write.** The one thing to look at next,
+because it is the only problem here that is about data rather than timing, and
+because two scenarios fail on it.
+
+- Scenario 9 fails when the storing client's **own** write never becomes its
+  entry's `content_version`. The write was accepted — `rejected` is `false` —
+  and thirty seconds later the index is still at the previous transaction.
+  Captured: `token=01a02361-dad9-755a-… wanted=01a02361-e423-71aa-…`, and the
+  tokens are UUIDv7, so `dad9` is genuinely the *earlier* one.
+- Scenario 8 fails when **another client's** write never reaches the room at
+  all: Grace's PNG lands, Ada's room is never told, and `replaced` stays
+  undefined.
+
+Both are the same sentence — *a write the server accepted did not arrive as a
+stream event* — seen from the two possible ends. `content_version` only ever
+advances in `confirmed.ts` on a `write` event, so a dropped event is
+indistinguishable from a write that never happened, and nothing retries. This
+is in the release client and the backend, **not** in `room.svelte.ts`: the room
+protocol behaves correctly on the information it is given. Rates over the third
+session: scenario 8 failed 2 of 6 paired runs, scenario 9 failed 3 of 6.
+
+**The sample shell has three failures.** `--component Sample --browser chromium`
+is 15 passed, 3 failed:
+
+- *test 10* — `the shell creates a file the way a person does, and says nothing
+  in the console` fails because something logs `room <id> did not open`. That is
+  `Workspace.svelte`'s own catch, so **a room genuinely failed to open**, and it
+  failed fast rather than timing out — which points at the provider constructor
+  throwing rather than a sync that never came.
+- *test 13* — `an open buffer is what a reader gets, and what reaches the
+  server` times out waiting for the other client to have the typing.
+- *test 18* — `a snapshot resolves what the user has not stored, in one pass`
+  times out waiting for the file to go dirty. **This is the test the second
+  session flagged as unknown, and the answer is that it still fails.**
+
+`solo()` in `samples/frontend/src/lib/liveblocks.ts` is the first suspect and
+its own docstring names this outcome: it is written against `kInternal` and the
+ydoc message shape, neither of which Liveblocks considers public, and it warns
+that an upgrade will look like "a constructor throwing or a file that never
+opens". Worth checking before anything else, because if `solo()` is broken then
+all three failures have one cause and none of them is about `Workspace.svelte`.
+
+Against that: `UserEdits` sets `dirty` from `onDidChangeModelContent` and does
+not need a shared text to do it, so test 18 is not *obviously* downstream of a
+missing room. Do not assume the single cause without checking that one.
+
+**The suite is flaky in a full run, and much less so one scenario at a time.**
+4 of 7 full runs in the first session were fully green. Running scenarios
+singly (see *Run the scenarios one at a time*) removes the cascade below
+entirely and leaves only the stream problem above. Two distinct shapes:
 
 - *Cascade.* The browsers run these in the same order, so scenario N pairs with
   scenario N. One test hanging desynchronises the pair and the partner times out
@@ -354,46 +496,52 @@ than trusting this note.
 
 ## What to pick up
 
-**Run it.** Everything below is downstream of that; see *What is not verified*
-for the order, and *The docker wedge* for how not to lose the daemon doing it.
+In order. The first two are about the file being right; the rest is about not
+frustrating anybody.
 
-**The four new scenarios, written and never executed.** In
-`Shared.test.svelte`, after the original four:
+**1. Find out why a write sometimes never arrives as a stream event.** See *The
+stream sometimes does not carry a write*. This is the only open problem where
+the user loses something real: a client can hold a file it believes is stored,
+or miss that a file stopped being text, and nothing anywhere retries or
+notices. Everything else on this list is a delay or an affordance. Start from
+`confirmed.ts` and the subscription in `Rooms`, and note that the storing
+client's own write going missing rules out a good deal.
 
-3. *merges an unnoticed lapse without doubling what was typed during it* — Ada
-   detaches, types, Grace types on, Ada reattaches; each line exactly once.
-4. *holds a store while the room is not reaching anybody* — finding 4, made
-   into a test. Ada detaches, types, and is **refused** a store; she comes back,
-   the room speaks again, and the store lands with nothing doubled and no repair
-   recorded anywhere. **If finding 4 is wrong, this is where it shows.**
-5. *both lapse at once, both type, and both come back* — the seeding election
-   and the doubling guard getting their real test, then a store that must not
-   look like a conflict to the other.
-6. *a write that is not text takes the file away from the room* — Grace writes a
-   PNG over a file Ada has open; Ada's document is neither repaired nor
-   corrupted, her room stops speaking, and her store is held.
-7. *rebuilds what a client was looking at after the file has moved on* — Ada
-   stores, snapshots four tokens, checks `unsettled` is empty, lets Grace move
-   the file on, then `POST /workspaces/{id}/reconstruction` and asserts she gets
-   back **what she was looking at**, not what the file says now.
+**2. Replace `CONVERGING` with an acknowledgement.** `room.svelte.ts`. It is
+now load-bearing in **two** places — seeding, and `#settling` from finding 5 —
+and both are asking the provider the same question it has no API for: *has this
+document been round the room yet?* 600ms is a guess that happens to work on a
+fast network between two containers on one machine. It is the single change
+that would most improve how this behaves for a real user on a real connection,
+because it is the only place where being slow turns into being wrong.
 
-**`CONVERGING` is still a 600ms guess.** `room.svelte.ts`. Hang it off a
-provider acknowledgement. This is the highest-value single change left in the
-protocol, because it is the only place where correctness rests on a duration.
+**3. Fix the sample shell's three failures**, and find out first whether
+`solo()` is the single cause. See *The sample shell has three failures*. Until
+this is green, `Workspace.svelte` — the only one of the two consumers a user
+ever touches — has no automated coverage of its collaboration path at all.
 
-**Retry a held store**, and give being out of touch an affordance — both under
-*Known problems* above.
+**4. Retry a held store.** Unchanged and still the clearest user-facing gap: a
+store refused because the room was out of touch leaves the file `dirty`,
+correctly, but nothing re-arms the debouncer, so the work waits for the next
+keystroke rather than for the room to come back. With finding 5 there is now a
+second reason to be held — settling — which makes this more visible, not less.
+The clean fix is an effect on `Room.speaks` that flushes when it turns true; it
+wants `$effect.root` because `SharedTextFile` is a plain class.
 
-**`y-indexeddb`.** Not installed, not wired. It is for surviving a *tab close*,
-which is a different thing from the network lapse the offline scenarios
-simulate. When it lands: there are then **two** `synced` events, and "the
-document is empty" is only a fact after both — so `Room.attach` grows a second
-thing to wait for, and `Rooms.open` is the only place that needs to change.
+**5. Give being out of touch an affordance.** `Room.attached` and
+`Room.replaced` are `$state` precisely so a banner can exist, and none does.
+A user whose typing is not going anywhere should be told, particularly now that
+there are three distinct reasons a store can be held and `send` already
+returns the right sentence for each.
 
-**A migration story.** Unchanged from last session and still nothing; see
-*The migration gap*.
+**6. `y-indexeddb`.** Not installed, not wired. It is for surviving a *tab
+close*, which is a different thing from the network lapse the offline scenarios
+simulate. When it lands there are **two** `synced` events, and "the document is
+empty" is only a fact after both — so `Room.attach` grows a second thing to
+wait for, and `Rooms.open` is the only place that needs to change.
 
----
+**7. A migration story.** Unchanged from two sessions ago and still nothing;
+see *The migration gap*.
 
 ## Costs
 

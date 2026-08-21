@@ -84,12 +84,18 @@ const CONTENT = "content";
 const SEEDING = "seeding";
 
 /**
- * How long a room waits for its seeding claim to converge.
+ * How long a room waits to believe its document has reached the others.
  *
  * A GUESS AT A DURATION, not a fact, and the one piece of this that should be
  * replaced first: it wants to hang off an acknowledgement from the provider
  * rather than a timer. Short enough not to be felt, long enough for a claim to
  * come back from a provider that has already synced once.
+ *
+ * TWO CALLERS, and they want the same thing from opposite ends. Seeding waits
+ * to find out whether somebody else claimed first; reattaching waits to find
+ * out whether what it holds has been handed over. Both are asking "has this
+ * document been round the room yet", which is the acknowledgement neither can
+ * currently ask for.
  */
 const CONVERGING = 600;
 
@@ -146,6 +152,24 @@ export class Room {
   attached = $state(false);
 
   /**
+   * Just back, and not yet sure anybody has heard what it holds.
+   *
+   * THE HALF OF FINDING 4 THAT WAS MISSING. Not writing while detached is
+   * necessary and it is not sufficient: `synced` is the provider saying this
+   * client has RECEIVED the room, which says nothing about whether the room
+   * has received this client. Store in that window and the write reaches the
+   * others through the SERVER while the text behind it is still in flight
+   * through the DOCUMENT -- so they see a token they have no bookkeeping for,
+   * carrying text they do not yet hold, and repair towards it. Then the merge
+   * lands and says the same thing a second time.
+   *
+   * Observed, not reasoned: `holds a store while the room is not reaching
+   * anybody` failed four times out of four on the member who stayed, once as
+   * "kept\nada while away\nada while away\n".
+   */
+  #settling = $state(false);
+
+  /**
    * Heard something while detached, and has not reconciled since.
    *
    * Nothing more is remembered, deliberately: whatever happened while the room
@@ -195,6 +219,7 @@ export class Room {
    */
   get speaks(): boolean {
     if (this.replaced !== undefined) return false;
+    if (this.#settling) return false;
     return rooms.speaking({
       attached: this.attached,
       behind: this.#missed || !rooms.settled(this.#owes),
@@ -411,9 +436,11 @@ export class Room {
     if (!this.speaks)
       return {
         held: true,
-        why: this.attached
-          ? "the room owes a repair"
-          : "the room is not reaching anybody",
+        why: this.#settling
+          ? "the room has not finished handing over what it holds"
+          : this.attached
+            ? "the room owes a repair"
+            : "the room is not reaching anybody",
       };
 
     const { transaction, settled } = this.held.workspace.write(
@@ -508,7 +535,25 @@ export class Room {
    */
   async reattach(): Promise<void> {
     await this.attach();
-    await this.reconcile();
+    /**
+     * Held back until what this room slept on has had a chance to go out.
+     *
+     * The order matters and it is the whole fix: reconciling first would let
+     * `speaks` turn true the moment the verdict settled, which is before the
+     * document this room is about to write has been anywhere. A member that
+     * stayed would then meet the write as a stranger's.
+     *
+     * A TIMER STANDING IN FOR AN ACKNOWLEDGEMENT, exactly as `CONVERGING`
+     * says. Correctness rests on a duration here, which is not where it
+     * should rest -- but the alternative on offer is a rule that is wrong.
+     */
+    this.#settling = true;
+    try {
+      await new Promise((carry) => setTimeout(carry, CONVERGING));
+      await this.reconcile();
+    } finally {
+      this.#settling = false;
+    }
   }
 
   dispose() {
