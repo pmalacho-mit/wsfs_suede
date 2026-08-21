@@ -1,4 +1,4 @@
 > [!NOTE]
 > This is a [suede](https://github.com/pmalacho-mit/suede) dependency.
 
-web workspace
+web workspace for python development
