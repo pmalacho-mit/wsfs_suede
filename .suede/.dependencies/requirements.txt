@@ -1,0 +1,5 @@
+inflection==0.5.1
+sqlmodel==0.0.39
+fastapi==0.141.1
+fast_diff_match_patch==2.1.0
+asyncpg>=0.29
