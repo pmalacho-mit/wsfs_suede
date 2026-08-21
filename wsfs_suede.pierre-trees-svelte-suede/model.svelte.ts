@@ -295,10 +295,6 @@ export class Model {
   #held: (() => void) | undefined;
   #container: HTMLElement | undefined;
 
-  #draft: Draft | undefined;
-  #held: (() => void) | undefined;
-  #container: HTMLElement | undefined;
-
   constructor(options: Options) {
     const prepared = announcing(options, { emit: this.#outward });
     // Kept as the tree took it, callbacks and all, so a drop this wrapper
