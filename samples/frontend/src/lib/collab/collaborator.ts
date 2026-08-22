@@ -76,11 +76,36 @@ export const settling: Settle = async (entry) => {
   if (!answer.ok) throw new Error(`settling ${entry}: ${answer.status}`);
 };
 
+const synchronized = (provider: LiveblocksYjsProvider) =>
+  provider.getStatus() === "synchronized";
+
+/**
+ * Settles once Liveblocks has confirmed everything this client is holding.
+ *
+ * Subscribed rather than polled, and it is the answer `#settling` used to
+ * guess at with 600ms. What matters is that the SERVER has the changes, not
+ * that other browsers have applied them: the host reads a room through the
+ * same REST API, so once Liveblocks has them, a read will see them.
+ */
+const handedOver = (liveblocks: LiveblocksClient, provider: LiveblocksYjsProvider) =>
+  new Promise<void>((done) => {
+    if (synchronized(provider)) return done();
+    const stop = liveblocks.events.syncStatus.subscribe(() => {
+      if (!synchronized(provider)) return;
+      stop();
+      done();
+    });
+  });
+
 export const enteringWith = (liveblocks: LiveblocksClient) =>
   ((entry, doc) => {
     const entered = liveblocks.enterRoom(entry);
+    const provider = new LiveblocksYjsProvider(entered.room, doc);
     return {
-      provider: new LiveblocksYjsProvider(entered.room, doc),
+      provider: Object.assign(provider, {
+        ahead: () => provider.getStatus() === "synchronizing",
+        handedOver: () => handedOver(liveblocks, provider),
+      }),
       leave: () => entered.leave(),
     };
   }) satisfies ConstructorParameters<typeof Rooms>[1];

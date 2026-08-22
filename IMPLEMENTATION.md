@@ -192,30 +192,71 @@ will land shortly* share a table and must never share a presentation.
 
 ---
 
-## Step 4 — The client declares its own sync state
+## Step 4 — The client declares its own sync state — DONE, and simpler than planned
 
-**Now.** A client decides whether it may store from `attached && !behind`, plus a
-600ms wait after reconnecting.
+**The plan here was wrong in a useful way.** It proposed computing
+`Y.encodeStateAsUpdate(doc, roomStateVector)` and, when the provider would not
+give up a fresh room state vector, asking the server for one. Liveblocks
+answers the question directly:
 
-**Wanted.** A locally computed answer to *"could my work already have reached
-anyone?"*, biased to no. If the room connection is down, or was down at any
-point since the last checkpoint, the answer is no. The store carries that label.
+```
+provider.getStatus()            "loading" | "synchronizing" | "synchronized"
+client.getSyncStatus()          "synchronizing" | "synchronized"   (all rooms)
+client.events.syncStatus        an Observable to subscribe to
+```
 
-The exact form is `Y.encodeStateAsUpdate(doc, roomStateVector)` being non-empty —
-verified to separate *ahead* (32 bytes outstanding) from merely *behind* (2
-bytes, an empty update) exactly. Check whether the provider exposes the remote
-state vector from its last sync; if not, tracking connection state across edits
-is sufficient for a conservative answer.
+`synchronizing` means *this client is holding changes the server has not
+confirmed* -- which is `ahead` exactly, and says nothing about being behind.
 
-**Delete.** Both 600ms timers, for good.
+**Why that bar is the right one.** It is about reaching LIVEBLOCKS, not about
+other browsers having applied anything. The host reads a room through the same
+REST API, so once Liveblocks has the changes, the keeper's read will see them.
+The thing being guarded against is the keeper carrying in text that is still in
+flight.
 
-**Confirm.**
-- Scenario 6 passes with no timers anywhere.
-- **No store is ever refused outright** — every store either lands as content or
-  lands as a draft. Assert this across the whole suite.
-- Deliberately mislabel in a test build: force a draft label while fully
-  connected and confirm the only consequence is a redundant, promptly cleared
-  row.
+**Verified before being relied on.** A browser test disconnects the provider,
+types, and asserts the status reports `synchronizing`; reconnects and asserts
+it returns to `synchronized`. Note that the status does NOT flip synchronously
+on a local edit while connected -- the first version of that test asserted it
+did and failed -- so the signal is only meaningful as "has it settled", which
+is how it is used.
+
+**What went.** `#settling`, `SETTLING`, and the last duration correctness ever
+rested on. `reattach` now waits on `handedOver()` -- a subscription to
+`client.events.syncStatus`, not a poll and not a timer -- before asking the
+server to bring the room up to date.
+
+**Measured first.** With the timer simply deleted and nothing put in its place,
+the three reattach scenarios passed 12 of 12: the server-side guards already
+covered it in practice. The race was narrow rather than closed, though, and
+doubling is the one failure worth being ruthless about, so it was replaced
+rather than dropped.
+
+### Waiting is not the same as refusing, and the tests said so
+
+The first wiring made `speaks` false while `synchronizing`, so a store in that
+window was **refused**. Half the suite then failed the opposite way -- *"the
+room would not store: the room has not finished handing over what it holds"*.
+
+Typing and immediately storing is the ORDINARY case. A client always holds
+what it just typed, so a rule that refuses in that state refuses everything.
+The hazard is not that the client is holding something; it is that the SERVER
+would see a write whose content the room does not have yet.
+
+So `store` **waits** for the handover and then sends, and `send` -- which has
+to stay synchronous, because a caller describing what the user is looking at
+needs the transaction at the moment it asks -- keeps the refusal for the case
+where waiting is not possible. By the time `store` calls it, there is nothing
+left to wait for.
+
+**Confirm.** The three reattach scenarios pass 9 of 9 on the real signal, and
+the full suite twice over.
+
+### The one timer left in the system
+
+`attach` gives up after 30 seconds of a provider that never syncs. That is a
+failure timeout, not a correctness guess -- it decides when to stop waiting,
+not what is true. The typing debounce stays by design.
 
 ---
 

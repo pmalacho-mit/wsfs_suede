@@ -20,6 +20,15 @@ import { contract, deltaBetween, editsFor, rooms, type Workspace } from "$wsfs";
 export type Provider = {
   readonly synced: boolean;
   once: (event: "synced", handler: () => void) => void;
+  /**
+   * Whether this client is holding changes the server has not confirmed.
+   *
+   * The `ahead` of `SCENARIOS.md`, and the question a store turns on. Being
+   * BEHIND -- missing somebody else's typing -- is harmless and is not this.
+   */
+  ahead: () => boolean;
+  /** Settles once nothing this client holds is still on its way. */
+  handedOver: () => Promise<void>;
   destroy: () => void;
 };
 
@@ -75,19 +84,6 @@ const PRODUCED = "produced";
 const BASE = "base";
 
 /**
- * How long a room just back waits before it may write the file again.
- *
- * A GUESS AT A DURATION, and the last one left. `synced` is the provider
- * saying this client has RECEIVED the room, which says nothing about whether
- * the room has received this client -- and a store in that window sends,
- * through the server, text whose only other copy is still in flight.
- *
- * It wants to be `Y.encodeStateAsUpdate(doc, roomStateVector)` being empty,
- * which answers the same question exactly.
- */
-const SETTLING = 600;
-
-/**
  * Make a shared text say `next`, changing as little as possible.
  *
  * Never a replacement. The positions a CRDT hands out are what let two people
@@ -133,9 +129,6 @@ export class Room {
   /** Reaching the others right now. Reactive, because a banner depends on it. */
   attached = $state(false);
 
-  /** Just back, and not yet sure anybody has heard what it holds. */
-  #settling = $state(false);
-
   /**
    * Heard something while detached, and has not caught up since.
    *
@@ -179,8 +172,19 @@ export class Room {
    */
   get speaks(): boolean {
     if (this.replaced !== undefined) return false;
-    if (this.#settling) return false;
+    if (this.#ahead) return false;
     return rooms.speaking({ attached: this.attached, behind: this.#missed });
+  }
+
+  /**
+   * Holding text the server has not got, so nobody else can have it either.
+   *
+   * Storing now would have the server tell the others about a write whose
+   * content is still in flight, and carry it into their document -- and then
+   * this client's own copy would arrive and say it a second time.
+   */
+  get #ahead(): boolean {
+    return this.#provider?.ahead() ?? false;
   }
 
   /**
@@ -249,7 +253,7 @@ export class Room {
   }
 
   get #whyNot(): string {
-    if (this.#settling) return "the room has not finished handing over what it holds";
+    if (this.#ahead) return "the room has not finished handing over what it holds";
     return this.attached ? "the room owes a catch-up" : "the room is not reaching anybody";
   }
 
@@ -261,7 +265,18 @@ export class Room {
     this.doc.getMap(PRODUCED).delete(transaction);
   }
 
+  /**
+   * Waits for what this client is holding to reach the server, then stores.
+   *
+   * Storing text that is still on its way is the whole hazard: the server
+   * would see a write whose content the room does not have, carry it in, and
+   * then this client's own copy would arrive and say it twice. Typing and
+   * immediately storing is the ORDINARY case, so this waits rather than
+   * refusing -- `send` is the one that refuses, and by then there is nothing
+   * left to wait for.
+   */
   async store(path: string): Promise<Stored> {
+    if (this.attached) await this.#provider?.handedOver();
     const sent = this.send(path);
     if (sent.held) return sent;
     const answer = await sent.settled;
@@ -330,19 +345,14 @@ export class Room {
   /**
    * The network comes back, and the room does not speak straight away.
    *
-   * Held back until what this room slept on has had a chance to go out. A
-   * member that stayed would otherwise meet the write as a stranger's, with
-   * text it has not been given yet.
+   * Waited on rather than timed. Asking the server to bring the room up to
+   * date while this client is still holding text would have it carry in what
+   * is already on its way, and the room would say it twice.
    */
   async reattach(): Promise<void> {
     await this.attach();
-    this.#settling = true;
-    try {
-      await new Promise((carry) => setTimeout(carry, SETTLING));
-      await this.catchUp();
-    } finally {
-      this.#settling = false;
-    }
+    await this.#provider?.handedOver();
+    await this.catchUp();
   }
 
   dispose() {

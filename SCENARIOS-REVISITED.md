@@ -14,9 +14,21 @@ A **draft** is a write the client submits with a label saying *"store this, but
 I know it has not reached anyone else, so do not make it the file's current
 content."*
 
-The client can know this locally and for free. If its room connection is down —
-or was down at any point since its last checkpoint — its work definitively has
-not propagated. No round trip is needed to establish that.
+The client can know this locally and for free, and better than expected:
+Liveblocks answers it directly. `provider.getStatus()` reports
+`synchronizing` while this client is holding changes the server has not
+confirmed, and `synchronized` once it is not — with
+`client.events.syncStatus` to subscribe to. That is `ahead` exactly, and it
+says nothing about being behind.
+
+The bar is reaching **Liveblocks**, not other browsers, and that is the right
+one: the host reads a room through the same REST API, so once Liveblocks has
+the changes, a read will see them.
+
+Verified rather than assumed — and one detail matters. The status does **not**
+flip synchronously when a connected client types; it is only meaningful as
+"has it settled". Asking it the instant after an edit reports `synchronized`
+and would be a trap.
 
 The check does not need to be exact, only **conservative**, because the costs
 are asymmetric:
