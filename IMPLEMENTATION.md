@@ -152,43 +152,60 @@ about a write whose content is in flight. That is step 4.
 
 ---
 
-## Step 3 — Drafts
+## Step 3 — Drafts — DONE (the first half)
 
-**Now.** A write is either accepted as the file's current content or refused,
-with refusals kept in `wsfs_refused_*`. A client that cannot legitimately store
-is told the store was held, and nothing retries it.
+**Where they live, and why that was not a new table after all.** The refusal
+store already records *what was asked and not granted*, delta-encoded, kept out
+of the event stream and out of the dedup scan, and already resolvable at its own
+transaction by the content endpoint. A draft is the same shape with a different
+reason: `Refusal.NOT_SHARED`, *"the client had not shared this"*. One table, one
+retention story, one query — and reconstruction works for drafts without a line
+of new code, which was the whole point of J7.
 
-**Wanted.**
+`Write.predecessor` already existed for chaining a run of one client's
+unadopted writes so storage holds only what was typed since. Drafts inherit it.
+**Note this contradicts the plan's "never chain"** — the codebase had already
+made the opposite call, for stated reasons, and it is the better one here.
 
-- **One table for content submitted and not adopted as current**, replacing the
-  refused-writes tables, with a disposition column: `refused` (the server said
-  no) or `draft` (the client said not-yet). One retention story, one storage
-  mechanism, and one uniform path for reconstruction to resolve any submitted
-  transaction whatever became of it.
-- **Retained forever.** Delta-encoded against the version the draft is based on,
-  and **never chained** — every chain stays length one, so reconstruction is
-  O(1) while storage collapses. Deduped by digest before writing.
-- A draft records the entry, the submitting client/session, the base version,
-  and a **cleared** flag **owned by the server**. The client's local list is a
-  convenience; the stranded case is exactly the one where that machine never
-  comes back.
-- Same-client supersession for the same entry, to bound a long offline session.
+**The client says `keep`, not `write(draft: true)`.** A name rather than a
+flag: `workspace.write` makes this the file's content, `workspace.keep` records
+it without doing so.
 
-**Keep separate in the UI.** *The system rejected this* and *this is yours and
-will land shortly* share a table and must never share a presentation.
+**What a held store now is.** `Held` carries the draft's transaction — held from
+the FILE, not from the server. `store` waits for it to land before answering, so
+a caller that is told "held" knows the work is already durable. *"A held store
+is never retried"* stops being a problem rather than getting a fix.
 
-**Confirm.**
-- Take one browser's room connection away, type, store → a draft row exists, the
-  file's current content is unchanged, and the other browser is unaffected.
-- Give the connection back → the work merges once, an ordinary store lands, and
-  **the draft is marked cleared.**
-- The draft's content is byte-identical to what was typed.
-- The clearing condition is propagation, not content: let the collaborator delete
-  that text before anyone stores, and the draft must **still** clear (J4).
-- Storage: type continuously for several minutes offline and confirm the drafts
-  are deltas against one base, not full copies and not a chain.
-- A snapshot naming a draft resolves through the reconstruction endpoint —
-  extend scenario 9, which today asserts nothing unsettled remains.
+### Two things the tests caught that reading would not have
+
+**A draft must not become the token the next write presents.** The per-entry
+write queue lets a follower write against the transaction in front of it once
+that one is accepted. A draft is answered `rejected: false`, so it landed in
+that set — and Ada's real store, after coming back, presented the draft's
+transaction as its `content_version`. The server never issued it. Every store
+after a draft was refused.
+
+A draft is now excluded from `accepted` while remaining a valid `predecessor`,
+which is exactly the distinction those two things were always for: one is *what
+the file is at*, the other is *what to diff against for storage*.
+
+**A draft has to be awaited.** `send` answers synchronously, so the draft's
+write was still in flight when the caller read it back — a 404 that looked like
+the draft had not been recorded at all. `store` awaits it; `send` still does
+not, and says so.
+
+**Confirm.** Nine backend tests in `tests/drafts.py`; scenario 6 in the browser
+now asserts the whole contract — the store is held, the draft reads back equal
+to what was typed, the file does NOT contain it, and after coming back the real
+store lands with the line appearing exactly once.
+
+### Not done
+
+The `cleared` flag, and the report of stranded drafts, are not built. Nothing
+depends on them for correctness — an uncleared draft is a redundant row, not a
+wrong one — but *"has my work ever actually got out"* is the question drafts
+exist to answer, and it cannot be asked yet. Same-client supersession and digest
+dedup are also unbuilt; `predecessor` bounds the storage in the meantime.
 
 ---
 
@@ -267,7 +284,11 @@ since the last successful store.
 
 **Wanted.**
 
-- `y-indexeddb`, so typing is durable the moment it happens.
+- `y-indexeddb`, wired by us. `LiveblocksYjsProvider` has an
+  `offlineSupport_experimental` option with an internal indexeddb provider and
+  a `clearOfflineData()`, and we are deliberately NOT using it: it is
+  undocumented and experimental, and durability is the one thing that has to be
+  completely clear to whoever reads it next.
 - On page load, the client sends its outbox **and** Yjs updates for documents it
   knows are dirty — not every document. Most loads carry nothing.
 - The server forwards those updates into the rooms and sets `base` from the

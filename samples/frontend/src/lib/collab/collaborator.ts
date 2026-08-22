@@ -152,6 +152,15 @@ export class Collaborator {
     return undefined;
   }
 
+  /** What the server says this entry holds, now or at one version. */
+  async reads(entry: string, version?: string): Promise<string> {
+    const held =
+      version === undefined
+        ? await this.workspace.read(this.#path(entry))
+        : await this.workspace.at(entry, version);
+    return held !== undefined && held.kind === "text" ? held.text : "";
+  }
+
   token(entry: string): string | null {
     return this.rooms.token(entry);
   }
@@ -177,6 +186,10 @@ export class Collaborator {
   }
 
   /** Whether this room may answer for the file, and write it back. */
+  attached(entry: string): boolean {
+    return this.rooms.get(entry)?.attached === true;
+  }
+
   speaks(entry: string): boolean {
     return this.rooms.get(entry)?.speaks === true;
   }

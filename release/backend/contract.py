@@ -207,6 +207,20 @@ class Write(Transacted):
     two. Nesting it also keeps this union flat, which is what lets the schema
     express `op` as a discriminator and a client generate itself from it."""
 
+    draft: bool = False
+    """Keep this, and do not make it the file's content.
+
+    Asked by a client that knows its text has reached nobody else -- it is
+    holding changes the collaboration server has not confirmed, so the others
+    cannot be shown what it is about to store. Adopting it would either lose
+    the text, because the next store from somebody else would not contain it,
+    or have the text carried into their documents, where this client's own
+    copy would arrive and say it twice.
+
+    The token this presents is NOT consumed and nothing rebases under it, so
+    the write that eventually shares the work presents the same one.
+    """
+
     predecessor: UUID | None = None
     """This client's previous write to this entry, if it had one and it lost.
 
@@ -235,6 +249,16 @@ no longer online-only, because the client already knows the id."""
 class Acknowledged(BaseModel):
     rejected: Literal[False] = False
 
+    draft: bool = False
+    """Recorded, and deliberately not made the file's content.
+
+    Set only in answer to a request that asked for it. It is not a refusal --
+    nothing was declined and nothing was lost -- and it is not an ordinary
+    acknowledgement either, because NO STREAM EVENT WILL EVER FOLLOW IT. A
+    client holding this in its outbox must let it go on this answer, the way
+    it does for a rejection.
+    """
+
 
 class Rejected(BaseModel):
     rejected: Literal[True] = True
@@ -258,6 +282,15 @@ class Refusal:
     ALREADY_RENAMED = "entry was already renamed"
     ALREADY_MOVED = "entry had already been moved"
     ALREADY_WRITTEN = "content was already updated"
+
+    NOT_SHARED = "the client had not shared this"
+    """Why a draft is kept rather than applied.
+
+    A reason like the others so that one table holds everything submitted and
+    not adopted, and one query answers "what did this client have". It is not
+    like the others in what it means: every reason above is the system saying
+    no, and this one is the client saying not yet.
+    """
 
     # Failures the contract does not enumerate, each naming something it could
     # otherwise only answer with a lie.

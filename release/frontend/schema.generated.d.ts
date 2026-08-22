@@ -587,6 +587,11 @@ export interface components {
             content_version: string;
             /** Content */
             content: components["schemas"]["TextBody"] | components["schemas"]["BinaryBody"];
+            /**
+             * Draft
+             * @default false
+             */
+            draft: boolean;
             /** Predecessor */
             predecessor?: string | null;
         };

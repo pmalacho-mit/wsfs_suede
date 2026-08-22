@@ -55,8 +55,27 @@ export type Replacement = {
   mime: string;
 };
 
-/** Why a room out of touch is not allowed to write the file back. */
-export type Held = { held: true; why: string };
+/**
+ * Why a room out of touch did not write the file back, and where the work went.
+ *
+ * Held from the FILE, not from the server: the text is recorded as a draft, so
+ * it is durable and recoverable the moment it is typed. Nothing is waiting to
+ * be retried.
+ */
+export type Held = {
+  held: true;
+  why: string;
+  /** The draft the text went into, or `null` when there was no text to keep. */
+  draft: contract.Transaction | null;
+  /**
+   * The draft reaching the server, for a caller that needs it to have.
+   *
+   * Named alongside the transaction rather than awaited before returning it,
+   * because `send` answers synchronously -- a caller describing what the user
+   * is looking at needs the id at the moment it asks. `store` waits.
+   */
+  settled: Promise<contract.Response> | null;
+};
 
 /**
  * A write on its way, named before it is answered.
@@ -233,8 +252,8 @@ export class Room {
    */
   send(path: string): Sending {
     if (this.replaced !== undefined)
-      return { held: true, why: "the file stopped being this room's text" };
-    if (!this.speaks) return { held: true, why: this.#whyNot };
+      return this.#kept(path, "the file stopped being this room's text");
+    if (!this.speaks) return this.#kept(path, this.#whyNot);
 
     const { transaction, settled } = this.held.workspace.write(
       path,
@@ -250,6 +269,22 @@ export class Room {
       if (answer.rejected) this.#disown(transaction);
     });
     return { held: false, transaction, settled };
+  }
+
+  /**
+   * Text nobody else has, put somewhere it cannot be lost.
+   *
+   * Not the file's content, because the others have not been shown it: making
+   * it the file would either drop it -- their next store would not contain it
+   * -- or have the server carry it into their documents, where this client's
+   * own copy would arrive and say it twice.
+   */
+  #kept(path: string, why: string): Held {
+    const { transaction, settled } = this.held.workspace.keep(
+      path,
+      this.text.toString(),
+    );
+    return { held: true, why, draft: transaction, settled };
   }
 
   get #whyNot(): string {
@@ -278,7 +313,10 @@ export class Room {
   async store(path: string): Promise<Stored> {
     if (this.attached) await this.#provider?.handedOver();
     const sent = this.send(path);
-    if (sent.held) return sent;
+    if (sent.held) {
+      await sent.settled;
+      return sent;
+    }
     const answer = await sent.settled;
     return {
       held: false,

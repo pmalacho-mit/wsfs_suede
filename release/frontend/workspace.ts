@@ -10,6 +10,7 @@ import * as changes from "./changes";
 import * as confirmed from "./confirmed";
 import { cache, type Content, type Payload } from "./content";
 import {
+  settledHere,
   UNSOUND,
   type Body,
   type Id,
@@ -87,6 +88,18 @@ export type Workspace = {
    */
   at: (entry: Id, version: Version) => Promise<Payload>;
   write: (
+    path: paths.Path,
+    content: string | Uint8Array,
+    mime?: string,
+  ) => Submitting;
+  /**
+   * Record this without making it the file's content.
+   *
+   * For a client whose text has reached nobody else. The token it presents is
+   * not consumed and nothing rebases under it, so the write that eventually
+   * shares the work presents the same one.
+   */
+  keep: (
     path: paths.Path,
     content: string | Uint8Array,
     mime?: string,
@@ -186,7 +199,8 @@ export const connect = (options: Options): Workspace => {
    * at the first one opens a window where the entry is in neither the outbox
    * nor the confirmed map, so a file blinks out of the tree just after it is
    * created. A rejection is the one answer no event will ever follow, so that
-   * is the one this evicts itself.
+   * is one of the two this evicts itself; a draft, which was never going to
+   * become content, is the other.
    */
   const submit = async (
     submitted: Submitted,
@@ -200,8 +214,8 @@ export const connect = (options: Options): Workspace => {
       content.remember(request.transaction, heldAs(payload, mime));
     recomputed();
     const response = await transport.submit(workspace, request);
-    if (response.rejected) {
-      if (response.reason === UNSOUND) sync.nudge();
+    if (settledHere(response)) {
+      if (response.rejected && response.reason === UNSOUND) sync.nudge();
       bytes.forget(queue.evict([request.transaction]));
       recomputed();
     }
@@ -246,6 +260,7 @@ export const connect = (options: Options): Workspace => {
     entry: Metadata,
     payload: string | Uint8Array,
     mime: string,
+    draft = false,
   ): Submitting => {
     const seen = entry.content_version;
     if (seen == null) throw new Error(`Not a file: ${entry.name}`);
@@ -265,6 +280,7 @@ export const connect = (options: Options): Workspace => {
           id: entry.id,
           content_version: seen,
           content: await staged(payload, mime),
+          draft,
         } as Write,
         payload,
         mime,
@@ -329,6 +345,9 @@ export const connect = (options: Options): Workspace => {
         ? created(path, payload, mime)
         : written(entry, payload, mime);
     },
+
+    keep: (path, payload, mime = TEXT) =>
+      written(entryAt(path), payload, mime, true),
 
     create: (path, payload, mime = TEXT) => created(path, payload, mime),
 

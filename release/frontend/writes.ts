@@ -29,6 +29,7 @@
 import type { Digest, Store } from "./bytes";
 import type { Payload } from "./content";
 import {
+  kept,
   UNSOUND,
   type Body,
   type Id,
@@ -92,7 +93,14 @@ export const pump = (wiring: Wiring): Pump => {
   const failed = new Map<Transaction, (error: unknown) => void>();
   /** Sent and still unanswered, or answered and not yet off the queue. */
   const sent = new Set<Transaction>();
-  /** Sent and accepted: the tokens a follower is allowed to write against. */
+  /**
+   * Sent and accepted AS CONTENT: the tokens a follower may write against.
+   *
+   * A draft is answered without being rejected and is still not one of these.
+   * It never became the file's content, so the server never issued its
+   * transaction as a version -- presenting it would be presenting a token
+   * nobody has heard of.
+   */
   const accepted = new Set<Transaction>();
   const draining = new Set<Id>();
   /** One entry's captures, in the order they were asked for. */
@@ -199,6 +207,7 @@ export const pump = (wiring: Wiring): Pump => {
      */
     const predecessor = ahead?.request.transaction ?? null;
 
+
     return {
       ...request,
       content: body,
@@ -243,6 +252,16 @@ export const pump = (wiring: Wiring): Pump => {
         owed.get(transaction)?.(answer);
         owed.delete(transaction);
         failed.delete(transaction);
+
+        if (kept(answer)) {
+          /**
+           * Kept, not applied. It leaves the queue like a refusal -- no event
+           * will follow it either -- but it is not a failure and the writes
+           * behind it carry on against the token it presented.
+           */
+          released(queue.evict([transaction]));
+          continue;
+        }
 
         if (!answer.rejected) {
           accepted.add(transaction);

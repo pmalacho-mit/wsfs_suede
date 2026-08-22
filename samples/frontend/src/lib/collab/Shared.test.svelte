@@ -392,9 +392,24 @@
       client.type(entry, client.text(entry) + "ada while away\n");
 
       const held = await client.store(entry);
-      harness.expect(held.held).toBe(true);
-      harness.expect(client.speaks(entry)).toBe(false);
-      pocket.note = held.held ? held.why : "stored anyway";
+      if (!held.held)
+        throw new Error(
+          `stored anyway -- speaks=${client.speaks(entry)} attached=${client.attached(entry)}`,
+        );
+      if (client.speaks(entry))
+        throw new Error(
+          `still speaking while away -- attached=${client.attached(entry)} why=${held.why}`,
+        );
+      pocket.note = held.why;
+
+      /**
+       * Held from the FILE, not from the server. The work is durable the
+       * moment it is typed, so there is nothing waiting to be retried -- and
+       * it can be read back at the transaction it was kept under.
+       */
+      if (!held.held || held.draft === null) throw new Error("nothing was kept");
+      harness.expect(await client.reads(entry, held.draft)).toBe(client.text(entry));
+      harness.expect(await client.reads(entry)).not.toContain("ada while away");
 
       await client.comeBack(entry);
       await until("the room to speak again", () => client.speaks(entry));

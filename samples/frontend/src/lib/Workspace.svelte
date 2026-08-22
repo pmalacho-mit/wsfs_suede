@@ -257,7 +257,7 @@
       const room = this.shared;
       const sent: Sending =
         room === undefined
-          ? { held: true, why: "the room is not open yet" }
+          ? { held: true, why: "the room is not open yet", draft: null, settled: null }
           : room.send(file.path);
       /**
        * Cleared only when the write actually went.
