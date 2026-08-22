@@ -33,10 +33,11 @@ export { inMemory } from "./bytes";
  * three things a durable outbox needs: where payloads live, where the queue is
  * written down, and what was there last time.
  */
-export { keeping } from "./indexed";
+export { evictable, keeping, persist } from "./indexed";
 export type { Keeping } from "./indexed";
 export { nothing, nowhere, remembering } from "./kept";
-export type { Kept, Restored } from "./kept";
+export type { Faltering, Kept, Restored } from "./kept";
+export type { Unreadable } from "./outbox";
 
 /**
  * Text diffing, as the outbox uses it to store a chained write as an edit

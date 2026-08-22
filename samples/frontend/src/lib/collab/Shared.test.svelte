@@ -1521,3 +1521,87 @@
     <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
+
+<Sweater
+  name="two tabs on one workspace do not eat each other's queued work"
+  body={async (harness) => {
+    /**
+     * Browser storage is shared per origin, so the outbox being durable makes
+     * a sentence load-bearing that used to be free: NOTHING MAY ASSUME AN
+     * ENTRY IN THE OUTBOX WAS WRITTEN BY THE TAB THAT FINDS IT.
+     *
+     * The sharp edge is the byte store. A queued write is a row of pointers,
+     * and when one tab's write is answered it releases the payloads nothing
+     * needs any more -- computed from ITS queue, which knows nothing of the
+     * other tab's. Releasing against one tab's view would take bytes the other
+     * tab's chained delta is the only remaining reader of. So releases are
+     * checked against what is WRITTEN DOWN, and this is what says so.
+     *
+     * Solo: two tabs is one browser, and a second browser would only add a
+     * barrier to wait on.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    if (!playing("ada")) {
+      pocket.note = "not this one's scenario";
+      return;
+    }
+
+    const id = await workspace();
+    const one = await Collaborator.opened(me(), id);
+    harness.onAbort(() => one.dispose());
+    const mine = one.workspace.create("mine.py", "start\n");
+    const theirs = one.workspace.create("theirs.py", "start\n");
+    await Promise.all([mine.settled, theirs.settled]);
+
+    /** The first tab loses the server and types a chain nobody has answered. */
+    one.reachable(false);
+    const queued = [
+      one.workspace.write("mine.py", "start\none\n"),
+      one.workspace.write("mine.py", "start\none\ntwo\n"),
+      one.workspace.write("mine.py", "start\none\ntwo\nthree\n"),
+    ];
+    queued.forEach((sent) => void sent.settled.catch(() => undefined));
+    await new Promise((carry) => setTimeout(carry, 500));
+
+    /**
+     * The second tab is fine, and busy. Every write it lands is answered and
+     * evicted, and every eviction releases bytes -- against the same store the
+     * first tab's chain is written down in.
+     */
+    const two = await Collaborator.opened(me(), id);
+    harness.onAbort(() => two.dispose());
+    for (const said of ["one", "two", "three", "four"])
+      await two.workspace.write("theirs.py", `start\n${said}\n`).settled;
+
+    /** And the first tab comes back. Its chain has to be intact. */
+    one.reachable(true);
+    const said = await untilAsked(
+      "the first tab's queued chain to land",
+      () => one.reads(mine.entry),
+      (text) => text.includes("three"),
+    );
+    harness.expect(said).toBe("start\none\ntwo\nthree\n");
+
+    /**
+     * The last of the chain is the file's current version, so this tab can
+     * see for itself that it landed. The two behind it were answered while
+     * the OTHER tab was the one talking, and an answer is remembered by the
+     * tab that received it -- so this one still calls them unsettled. That is
+     * the conservative direction, and the honest test of whether the work is
+     * really somewhere else is the rebuild below.
+     */
+    harness.expect(
+      one.workspace.unsettled([queued[queued.length - 1]!.transaction]),
+    ).toEqual([]);
+
+    pocket.text = said;
+    pocket.note = "kept its chain while the other tab churned the store";
+    await one.rebuildable();
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>

@@ -254,6 +254,18 @@ export const chained = (before: string, after: string): string =>
   JSON.stringify(deltaBetween(before, after));
 
 /**
+ * What a queued item could not say, and why.
+ *
+ * Its bytes are gone: the browser cleared the store, or the tab died between
+ * the payload landing and the row that names it. The work is not recoverable
+ * from anywhere -- but it is ONE transaction, and the queue behind it is
+ * fine, so this is reported rather than thrown.
+ */
+export type Unreadable = { transaction: Transaction; why: string };
+
+export type Presented = { presented: Submitted[]; unreadable: Unreadable[] };
+
+/**
  * What Initialize is given: the requests themselves, in the order they were
  * queued, with elided bodies filled back in.
  *
@@ -263,27 +275,42 @@ export const chained = (before: string, after: string): string =>
  * one. Replay is a single batch with no answers in it, so there is nowhere for
  * that agreement to happen; the followers go out afterwards, through the pump,
  * one answer at a time.
+ *
+ * NOTHING HERE THROWS. It used to, and the cost was the whole workspace: an
+ * item whose bytes could not be read failed Initialize, the loop backed off
+ * and re-entered at Initialize, and failed the same way for ever. One
+ * unreadable transaction stopped every OTHER queued transaction from ever
+ * being sent -- turning a single lost write into a queue that never drains
+ * again. What cannot be read is named and left for the caller to evict.
  */
 export const presenting = async (
   items: Entry[],
   queue: Queue,
   bytes: Store,
-): Promise<Submitted[]> => {
+): Promise<Presented> => {
   const led = new Set<Id>();
   const presented: Submitted[] = [];
+  const unreadable: Unreadable[] = [];
   for (const item of items) {
     if (isWrite(item.request as Submitted)) {
       if (led.has(item.request.id)) continue;
       led.add(item.request.id);
     }
-    presented.push(
-      isElided(item.request)
-        ? {
-            ...(item.request as Elided),
-            content: { type: "text", content: await textOf(item, queue, bytes) },
-          }
-        : (item.request as Submitted),
-    );
+    if (!isElided(item.request)) {
+      presented.push(item.request as Submitted);
+      continue;
+    }
+    try {
+      presented.push({
+        ...(item.request as Elided),
+        content: { type: "text", content: await textOf(item, queue, bytes) },
+      });
+    } catch (reason) {
+      unreadable.push({
+        transaction: item.request.transaction,
+        why: reason instanceof Error ? reason.message : String(reason),
+      });
+    }
   }
-  return presented;
+  return { presented, unreadable };
 };

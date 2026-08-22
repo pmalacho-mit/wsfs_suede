@@ -58,6 +58,14 @@ export type Options = {
    */
   kept?: Kept;
   restored?: Restored;
+  /**
+   * Queued work that can never be sent, because the bytes it named are gone.
+   *
+   * Reported rather than swallowed: it is the one loss this client cannot
+   * undo, and a user who is told can retype a paragraph. One that is not told
+   * finds out much later, from a file that is missing something.
+   */
+  lost?: (entries: outbox.Unreadable[]) => void;
 };
 
 /**
@@ -280,8 +288,15 @@ export const connect = (options: Options): Workspace => {
     mime = TEXT,
   ): Promise<Response> => {
     const request = { ...submitted, offset: offset() };
-    const digest = payload === undefined ? undefined : await bytes.put(payload);
+    /**
+     * Hashed, queued, and only then stored. The row that NAMES the payload
+     * goes down first, because the two orders fail differently: bytes with no
+     * row are work that is gone and cannot be noticed, a row with no bytes is
+     * work that is gone and says so. Only one of those can be told to a user.
+     */
+    const digest = payload === undefined ? undefined : await digestOf(payload);
     queue.capture(request, digest);
+    if (payload !== undefined) await bytes.put(payload, digest);
     if (payload !== undefined)
       content.remember(request.transaction, heldAs(payload, mime));
     recomputed();
@@ -367,10 +382,24 @@ export const connect = (options: Options): Workspace => {
   const sync = loop.run(
     {
       reconcile: async () => {
-        const snapshot = await transport.initialize(
-          workspace,
-          await outbox.presenting(queue.entries(), queue, bytes),
+        /**
+         * What cannot be read is dropped BEFORE the batch goes, not after.
+         * Its bytes are gone, so it can never be sent however many times this
+         * comes round -- and leaving it in place used to stop everything
+         * behind it from being sent either.
+         */
+        const { presented, unreadable } = await outbox.presenting(
+          queue.entries(),
+          queue,
+          bytes,
         );
+        if (unreadable.length > 0) {
+          bytes.forget(
+            queue.evict(unreadable.map(({ transaction }) => transaction)),
+          );
+          options.lost?.(unreadable);
+        }
+        const snapshot = await transport.initialize(workspace, presented);
         /**
          * Replay is an answer like any other, and it used to be the one that
          * was not written down. A draft sent during Initialize left the queue

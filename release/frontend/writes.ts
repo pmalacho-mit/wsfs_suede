@@ -26,7 +26,7 @@
  * queue affordable: only the head of a chain holds whole text, and the rest
  * are deltas against it, so the wait costs a diff rather than a document.
  */
-import type { Digest, Store } from "./bytes";
+import { digestOf, type Digest, type Store } from "./bytes";
 import type { Payload } from "./content";
 import {
   kept,
@@ -151,14 +151,16 @@ export const pump = (wiring: Wiring): Pump => {
   const staged = async (
     entry: Id,
     payload: string | Uint8Array,
-  ): Promise<{ content: Digest; basis?: Transaction }> => {
+  ): Promise<{ held: string | Uint8Array; content: Digest; basis?: Transaction }> => {
     const chain = queue.chain(entry);
     const tail = chain[chain.length - 1];
     if (!isText(payload) || tail === undefined || !isElided(tail.request))
-      return { content: await bytes.put(payload) };
+      return { held: payload, content: await digestOf(payload) };
     const before = await textOf(tail, queue, bytes);
+    const delta = chained(before, payload);
     return {
-      content: await bytes.put(chained(before, payload)),
+      held: delta,
+      content: await digestOf(delta),
       basis: tail.request.transaction,
     };
   };
@@ -183,12 +185,16 @@ export const pump = (wiring: Wiring): Pump => {
     payload: string | Uint8Array,
   ): Promise<void> => {
     for (;;) {
-      const { content, basis } = await staged(entry, payload);
-      if (basis === undefined || queue.find(basis) !== undefined) {
-        queue.capture({ ...request, offset: offset() }, content, basis);
-        return;
-      }
-      released([content]);
+      const { held, content, basis } = await staged(entry, payload);
+      if (basis !== undefined && queue.find(basis) === undefined) continue;
+      /**
+       * Row first, bytes second, and no `await` between the check and the
+       * capture. Bytes with no row are work that is gone unnoticed; a row
+       * with no bytes is work that is gone and says so.
+       */
+      queue.capture({ ...request, offset: offset() }, content, basis);
+      await bytes.put(held, content);
+      return;
     }
   };
 
@@ -208,8 +214,13 @@ export const pump = (wiring: Wiring): Pump => {
     if (isElided(item.request)) {
       const text = await textOf(item, queue, bytes);
       body = { type: "text", content: text };
-      if (item.basis !== undefined)
-        released(queue.promote(request.transaction, await bytes.put(text)));
+      if (item.basis !== undefined) {
+        /** Row first here too, for the same reason it is first everywhere. */
+        const whole = await digestOf(text);
+        const freed = queue.promote(request.transaction, whole);
+        await bytes.put(text, whole);
+        released(freed);
+      }
     }
 
     /**

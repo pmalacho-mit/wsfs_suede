@@ -13,7 +13,7 @@
  */
 import { asText, digestOf, type Digest, type Store } from "./bytes";
 import type { Id, Transaction } from "./contract";
-import { referenced, type Kept, type Restored } from "./kept";
+import { referenced, type Faltering, type Kept, type Restored } from "./kept";
 import type { Entry } from "./outbox";
 
 const DATABASE = "wsfs";
@@ -80,10 +80,69 @@ const everythingIn = <T>(
       .getAll(IDBKeyRange.only(workspace)),
   ) as Promise<T[]>;
 
+const isFull = (reason: unknown) =>
+  reason instanceof Error &&
+  (reason.name === "QuotaExceededError" || /quota/i.test(reason.message));
+
+const troubleFrom = (reason: unknown): Faltering =>
+  isFull(reason)
+    ? {
+        says: "there is no room left to write down work that has not been sent",
+        full: true,
+      }
+    : {
+        says:
+          "work that has not been sent is not being written down: " +
+          (reason instanceof Error ? reason.message : String(reason)),
+        full: false,
+      };
+
+/**
+ * Whether the browser may clear this origin's storage to make room.
+ *
+ * Asked WITHOUT prompting. Storage a browser is willing to evict is storage
+ * the outbox can be evicted from, and the answer is worth knowing even where
+ * nothing is going to be done about it.
+ */
+export const evictable = async (): Promise<boolean> => {
+  try {
+    return !((await navigator.storage?.persisted?.()) ?? false);
+  } catch {
+    return true;
+  }
+};
+
+/**
+ * Ask the browser not to clear this origin's storage.
+ *
+ * SEPARATE FROM `keeping`, and deliberately, because in some browsers this
+ * shows the user a permission prompt -- and a library that made one appear as
+ * a side effect of opening a queue would be deciding something that is not
+ * its to decide. Call it at a moment that makes sense to the person looking
+ * at the screen. Answers whether it worked; false is not an error, it is a
+ * browser saying no.
+ */
+export const persist = async (): Promise<boolean> => {
+  try {
+    return (await navigator.storage?.persist?.()) ?? false;
+  } catch {
+    return false;
+  }
+};
+
 export type Keeping = {
   bytes: Store;
   kept: Kept;
   restored: Restored;
+  /**
+   * Whether the queue is actually reaching the disk, and what is wrong if not.
+   *
+   * `undefined` means it is. Anything else means work is being kept only in
+   * memory, which is the one thing this module exists to prevent -- so it is
+   * answered rather than logged, and `watch` says when it changes.
+   */
+  faltering: () => Faltering | undefined;
+  watch: (changed: () => void) => () => void;
   /**
    * Every workspace with unsent work written down here.
    *
@@ -117,9 +176,31 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
    * happened, in both browsers, the first time a real store was underneath.
    */
   let writing: Promise<unknown> = Promise.resolve();
+  let faltering: Faltering | undefined;
+  const watchers = new Set<() => void>();
+
+  const nowSaying = (trouble: Faltering | undefined) => {
+    const before = faltering?.says;
+    faltering = trouble;
+    if (before === trouble?.says) return;
+    for (const changed of [...watchers]) changed();
+  };
+
+  /**
+   * Every failure is caught, and NONE is swallowed.
+   *
+   * This used to end `.catch(() => undefined)`, which meant a full disk, a
+   * blocked store or a browser clearing site data made the queue stop being
+   * durable in total silence -- the client went on looking exactly like one
+   * that was safe. The chain still has to survive a failure, or one bad write
+   * would stop every later one; what changed is that somebody is told.
+   */
   const inOrder = <T>(work: () => Promise<T>): Promise<T> => {
     const mine = writing.then(work, work);
-    writing = mine.catch(() => undefined);
+    writing = mine.then(
+      () => nowSaying(undefined),
+      (reason) => nowSaying(troubleFrom(reason)),
+    );
     return mine;
   };
 
@@ -199,23 +280,32 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
     ) as Promise<Bytes | undefined>;
 
   const bytes: Store = {
-    put: async (content) => {
-      const digest = await digestOf(content);
+    /**
+     * ON THE SAME CHAIN as the rows, which is what makes "the row first, then
+     * the bytes" mean anything. Stored the other way round, a tab dying in
+     * between leaves bytes that nothing points at -- lost, and undetectably
+     * so. This way it leaves a row naming bytes that are not there, which is
+     * lost and SAYS so, and `presenting` reports it and drops it.
+     */
+    put: async (content, at) => {
+      const digest = at ?? (await digestOf(content));
       const stored =
         typeof content === "string"
           ? new TextEncoder().encode(content)
           : content;
       stamped.set(digest, (tick += 1));
-      await awaited(
-        database
-          .transaction(BYTES, "readwrite")
-          .objectStore(BYTES)
-          .put({
-            key: keyed(workspace, digest),
-            workspace,
-            digest,
-            bytes: stored,
-          }),
+      await inOrder(() =>
+        awaited(
+          database
+            .transaction(BYTES, "readwrite")
+            .objectStore(BYTES)
+            .put({
+              key: keyed(workspace, digest),
+              workspace,
+              digest,
+              bytes: stored,
+            }),
+        ),
       );
       return digest;
     },
@@ -259,6 +349,11 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
   return {
     bytes,
     kept,
+    faltering: () => faltering,
+    watch: (changed) => (
+      watchers.add(changed),
+      () => void watchers.delete(changed)
+    ),
     restored: {
       entries: queued.map((row) => row.entry),
       recorded: answers.map((row) => row.transaction),

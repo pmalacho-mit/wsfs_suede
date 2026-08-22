@@ -49,6 +49,8 @@ Every row is either covered by a browser scenario or named here as uncovered.
 | the outbox outliving the page | queued work sent by the tab that comes next | 18, and `tests/frontend/kept.test.ts` |
 | B3, client side | server lost, room kept: work still reaches everybody | 19 |
 | F5 / H4 | rolled back to an earlier version under an open document | 20 |
+| E5, with a durable store | two tabs sharing one outbox, neither eating the other's | 21 |
+| one queued write that cannot be read | costs that transaction and nothing else | `tests/frontend/wedge.test.ts` |
 | a queue in a workspace nobody is looking at | waits, then drains on return | `tests/frontend/kept.test.ts` |
 
 And **B3 in both directions** — a client that can reach the host but not the
@@ -76,6 +78,32 @@ existed both were ordinary scenarios to write:
   because the restored content is text the room has ALREADY SEEN — a document
   reasoning about what it recognised rather than about what the server
   stamped would decide there was nothing to do.
+
+### What can still lose work
+
+Network instability alone no longer can, and that is demonstrated rather than
+argued. What is left is storage and the machine:
+
+- **Two windows, both narrow.** Work is in memory only until the row naming it
+  reaches the disk. The row is written BEFORE the payload, deliberately: bytes
+  with no row are work that is gone unnoticed, a row with no bytes is work that
+  is gone and says so — and `presenting` reports the second and drops it rather
+  than wedging the queue.
+- **The browser may clear the store.** `persist()` asks it not to, and a
+  browser is free to say no. Whether it did is `evictable()`.
+- **Storage failing mid-session** is surfaced, not swallowed: `Keeping.faltering`
+  names it, quota by name, and the sample shows it. It used to end
+  `.catch(() => undefined)`, which meant a full disk made the queue stop being
+  durable in silence.
+- **Text typed and never saved** lives in the Yjs document, persisted by
+  y-indexeddb on its own schedule. It becomes an outbox transaction only when
+  something decides to save.
+- **The machine itself.** Work that has not reached the server exists in one
+  place. Persistence moved that exposure from "a reload" to "this machine",
+  and nothing client-side moves it further.
+- **`unsettled` under-reports across tabs.** An answer is remembered by the tab
+  that received it, so a second tab calls work settled elsewhere unsettled.
+  Conservative direction, and the rebuild check is the honest test.
 
 ### Where the design is genuinely weak
 

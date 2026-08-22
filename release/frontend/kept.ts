@@ -25,6 +25,21 @@ import type { Digest } from "./bytes";
 import type { Transaction } from "./contract";
 import type { Entry } from "./outbox";
 
+/**
+ * The queue is not being written down.
+ *
+ * The one failure that must never be quiet. Everything else here degrades
+ * into "sent later"; this degrades into "kept nowhere", and a client that
+ * swallowed it would go on looking exactly like one that was safe. Quota is
+ * called out by name because it is both the likeliest cause and the only one
+ * a person can do something about.
+ */
+export type Faltering = {
+  says: string;
+  /** Whether the store is simply full, which a person can act on. */
+  full: boolean;
+};
+
 /** What a client starts with, having been here before. */
 export type Restored = {
   entries: Entry[];
@@ -88,7 +103,8 @@ export const remembering = (restored: Restored = nothing) => {
 
   const kept: Kept = {
     moved: ({ written = [], gone = [] }) => {
-      for (const entry of written) entries.set(entry.request.transaction, entry);
+      for (const entry of written)
+        entries.set(entry.request.transaction, entry);
       for (const transaction of gone) entries.delete(transaction);
     },
     answered: (transactions) => {
