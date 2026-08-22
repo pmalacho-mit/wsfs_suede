@@ -37,23 +37,31 @@ class Files(Protocol):
     async def at(self, entry: str, version: str) -> str: ...
 
 
+class Standings(Protocol):
+    """What this host remembers about each room, across restarts."""
+
+    async def standing(self, entry: str) -> tuple[bool, str | None]:
+        """Whether the room has been created, and where its text stands."""
+
+    async def remember(self, entry: str, base: str | None) -> None: ...
+
+
 class Keeper:
-    def __init__(self, *, liveblocks: Liveblocks, files: Files) -> None:
+    def __init__(
+        self, *, liveblocks: Liveblocks, files: Files, standings: Standings
+    ) -> None:
         self._liveblocks = liveblocks
         self._files = files
+        self._standings = standings
         self._alone: dict[str, asyncio.Lock] = {}
-        self._created: set[str] = set()
-        self._base: dict[str, str] = {}
-        """The version each room's text is believed to descend from.
+        self._known: dict[str, tuple[bool, str | None]] = {}
+        """What `standings` last said, so the hot path asks nothing at all.
 
-        THE WHOLE POINT OF KEEPING IT HERE. Every client with a file open asks
-        this host to settle its room each time anybody writes -- so if
-        answering that meant reading the collaboration server, one person
-        typing would cost a round trip per collaborator per save. Held here,
-        the answer is almost always "nothing to do" and costs nothing.
-
-        Lost on restart, which costs one read per room the first time it is
-        asked about, and nothing after.
+        THE WHOLE POINT. Every client with a file open asks this host to
+        settle its room each time anybody saves -- so if answering meant a
+        round trip to the collaboration server, one person typing would cost
+        one per collaborator per save. It does not even cost a query: the
+        table is the durable copy, this is the one that answers.
         """
 
     async def ensure(self, entry: str) -> str | None:
@@ -66,23 +74,36 @@ class Keeper:
         file = await self._files.now(entry)
         if file is None:
             return None
-        if self._base.get(entry) == file.version:
+        if await self._standing(entry) == file.version:
             return file.version
         async with self._alone_with(entry):
-            if self._base.get(entry) == file.version:
+            if await self._standing(entry) == file.version:
                 return file.version
             await self._created_once(entry)
             await self._settle(entry, file)
-        return self._base.get(entry)
+        return await self._standing(entry)
 
     async def stored(self, entry: str, version: str) -> None:
         """A room member wrote the file, so the room already holds its text.
 
-        Nothing is sent anywhere. This is the whole saving: the alternative is
-        every client that hears about the write asking the collaboration
-        server what the room contains, which it already knows.
+        Nothing is sent to the collaboration server. This is the whole
+        saving: the alternative is every client that hears about the write
+        asking it what the room contains, which this host already knows.
         """
-        self._base[entry] = version
+        await self._moved(entry, version)
+
+    async def _standing(self, entry: str) -> str | None:
+        return (await self._remembered(entry))[1]
+
+    async def _remembered(self, entry: str) -> tuple[bool, str | None]:
+        if entry not in self._known:
+            self._known[entry] = await self._standings.standing(entry)
+        return self._known[entry]
+
+    async def _moved(self, entry: str, base: str | None) -> None:
+        created, _ = await self._remembered(entry)
+        self._known[entry] = (created, base)
+        await self._standings.remember(entry, base)
 
     async def hand_over(self, entry: str, update: bytes) -> None:
         """Put one client's own update into the room on its behalf.
@@ -109,15 +130,23 @@ class Keeper:
         return self._alone.setdefault(entry, asyncio.Lock())
 
     async def _created_once(self, entry: str) -> None:
-        if entry in self._created:
+        """Created there once, ever.
+
+        Nothing here destroys a room, so this is a fact rather than a state --
+        which is why it is remembered across restarts instead of being asked
+        about again on the first file anybody opens.
+        """
+        created, base = await self._remembered(entry)
+        if created:
             return
         await self._liveblocks.create(entry)
-        self._created.add(entry)
+        self._known[entry] = (True, base)
+        await self._standings.remember(entry, base)
 
     async def _settle(self, entry: str, file: Held) -> None:
-        room = standing_of(await self._liveblocks.document(entry), self._base.get(entry))
+        room = standing_of(await self._liveblocks.document(entry), await self._standing(entry))
         await self._act(entry, plan(room, file))
-        self._base[entry] = file.version
+        await self._moved(entry, file.version)
 
     async def _act(self, entry: str, wanted: Plan) -> None:
         if isinstance(wanted, Settled):

@@ -92,4 +92,8 @@ async def main() -> None:
         print(f"  p50 {at(0.5):.0f}ms   p95 {at(0.95):.0f}ms   p99 {at(0.99):.0f}ms   max {latencies[-1]:.0f}ms")
         print(f"  mean {statistics.mean(latencies):.0f}ms")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    # Collected by pytest along with everything else under `tests`, and it is
+    # not a test: it needs a running stack and it measures rather than
+    # asserts. Guarded so collection imports it and nothing happens.
+    asyncio.run(main())

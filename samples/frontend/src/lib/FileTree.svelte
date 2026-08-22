@@ -304,6 +304,7 @@
 </script>
 
 <script lang="ts">
+  import { warming } from "$lib/collab/collaborator";
   import { onDestroy } from "svelte";
   import type { Change, Submitting, Workspace } from "$wsfs";
   import { pointAsRect } from "./utils";
@@ -432,7 +433,14 @@
       isFolder ? workspace.folder(path) : workspace.create(path, ""),
     );
     model.holding(() => mapping.set(entry, path));
-    if (!isFolder) awaiting.add(entry);
+    if (!isFolder) {
+      awaiting.add(entry);
+      /**
+       * Filled now rather than when somebody opens it. Nobody is waiting
+       * here; whoever opens it first would be.
+       */
+      void warming(entry);
+    }
   };
 
   const move = (from: string, to: string) => {

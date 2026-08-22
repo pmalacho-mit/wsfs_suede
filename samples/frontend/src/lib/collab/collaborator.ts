@@ -83,6 +83,18 @@ export const settling: Settle = async (entry) => {
 };
 
 /**
+ * Asking the host to fill a room now, so opening the file later is instant.
+ *
+ * Answered before the work is done, on purpose: nobody is waiting for it.
+ * Creating a room, asking what it holds and filling it costs a second or two,
+ * and the only alternative to paying it here is paying it in front of
+ * whoever opens the file first.
+ */
+export const warming = async (entry: string): Promise<void> => {
+  await fetch(`/rooms/${encodeURIComponent(entry)}/warm`, { method: "POST" });
+};
+
+/**
  * Telling the host a member of this room wrote the file.
  *
  * Cheap on purpose, and it is what makes everybody else's settle free: the

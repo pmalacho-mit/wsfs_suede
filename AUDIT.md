@@ -164,19 +164,34 @@ calls, once per file ever.
 `create_room` really is required before a room can be written — verified by
 trying without it and getting `ROOM_NOT_FOUND`.
 
-### The one thing to fix before this is fast enough to feel right
+### Opening a file is instant, because the room was filled when it was made
 
-**A file's first open costs 1.7–2.3 seconds**, and the user waits for it: the
-editor cannot bind until the room holds the file, or it would show an empty
-document and then save that over the real one.
+A first open used to cost 1.7–2.3 seconds, and the user waited for it: an
+editor cannot bind until the room holds the file, or it shows an empty
+document and then saves that over the real one.
 
-The fix is not to make the calls faster, it is to make them earlier. **Fill
-the room when the file is CREATED** rather than when it is first opened —
-nobody is waiting then, and by the time anyone opens it the settle is the
-11ms path. Files that predate this, or were made by a script, still pay on
-first open.
+The calls are not faster; they happen earlier. `POST /rooms/{entry}/warm`
+schedules the filling as a background task and answers immediately, and it is
+called when a file is CREATED — when nobody is waiting.
 
-That is the single highest-value performance change left, and it is not built.
+| | |
+|---|---|
+| first open, cold | 1770–3006 ms |
+| the warm call itself | **1 ms** (202, work continues behind it) |
+| first open, warmed at create | **12–13 ms** |
+| first open after the host restarts | **60 ms** |
+
+The restart figure is the point of keeping this in a table rather than in
+memory. A room is created once and nothing here destroys one, so `created` is
+a permanent fact; `base` is where its text stands. Both survive, so a restart
+does not charge for them again on the first file anybody opens.
+
+**This is the path a cloned workspace should use.** Whatever creates the
+entries — a person in the tree, or code copying another workspace — should
+warm each one as it goes. In-process, that is `keeper.ensure(entry)` on a
+background task; over HTTP it is the endpoint above. Files that predate this,
+or that nothing warmed, still pay the cold cost on first open and then never
+again.
 
 ### Scaling past one machine
 
@@ -190,8 +205,10 @@ ample for 200 clients, but it is one process: to use more cores, shard by
 workspace across processes with a sticky router, which is what the invariant
 already permits. Nothing needs to change in the code to do it.
 
-The room-standing cache is per-process and in memory, so a restart costs one
-extra read per room the first time it is asked about, and nothing after.
+What this host knows about rooms lives in its own `rooms` table, so it is
+shared by anything reading that database and survives restarts. The keeper
+keeps an in-memory copy in front of it, which is what makes the repeating
+path -- settle after somebody saved -- cost neither a query nor a call.
 
 ---
 
@@ -206,5 +223,6 @@ essentially no CPU; saves are tens of milliseconds and the tail is queueing
 that only appears well past a realistic peak. The collaboration server is
 touched once per file per lifetime and not at all on the paths that repeat.
 
-The honest caveat is the one above: opening a file for the first time takes
-about two seconds, and that is a felt delay rather than a throughput problem.
+Opening a file is instant when the room was filled at creation, which is the
+path anything creating entries should use, including a workspace being cloned
+for somebody.

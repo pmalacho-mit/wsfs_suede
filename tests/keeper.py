@@ -70,8 +70,27 @@ class FakeFiles:
         return self.history[version]
 
 
-def keeping(liveblocks: FakeLiveblocks, files: FakeFiles) -> Keeper:
-    return Keeper(liveblocks=liveblocks, files=files)
+class FakeStandings:
+    """A table that survives, as far as a test is concerned."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str | None] = {}
+        self.reads = 0
+
+    async def standing(self, entry: str) -> tuple[bool, str | None]:
+        self.reads += 1
+        return (entry in self.rows, self.rows.get(entry))
+
+    async def remember(self, entry: str, base: str | None) -> None:
+        self.rows[entry] = base
+
+
+def keeping(
+    liveblocks: FakeLiveblocks,
+    files: FakeFiles,
+    standings: FakeStandings | None = None,
+) -> Keeper:
+    return Keeper(liveblocks=liveblocks, files=files, standings=standings or FakeStandings())
 
 
 async def test_a_room_is_created_and_filled_from_the_file():
@@ -250,3 +269,36 @@ async def test_a_client_that_cannot_reach_the_room_is_carried_into_it(api_free=N
     await keeper.hand_over("entry", mine)
 
     assert liveblocks.text("entry") == "hello\ntyped with no room\n"
+
+
+async def test_what_the_host_knows_survives_it_being_restarted():
+    """A room is created once, ever, and nothing here destroys one.
+
+    Remembering that in a table rather than in memory is what stops a restart
+    charging for the answer again on the first file anybody opens.
+    """
+    liveblocks = FakeLiveblocks()
+    standings = FakeStandings()
+    files = FakeFiles(Held("hello\n", BORN))
+    await keeping(liveblocks, files, standings).ensure("entry")
+
+    afresh = keeping(liveblocks, files, standings)
+    await afresh.ensure("entry")
+
+    assert liveblocks.created == ["entry"]
+    assert liveblocks.sent == ["entry"]
+    assert liveblocks.reads == 1
+
+
+async def test_settling_a_room_already_where_it_should_be_asks_nothing():
+    """Not the collaboration server, and not the table either."""
+    liveblocks = FakeLiveblocks()
+    standings = FakeStandings()
+    keeper = keeping(liveblocks, FakeFiles(Held("hello\n", BORN)), standings)
+    await keeper.ensure("entry")
+    reads = standings.reads
+
+    for _ in range(50):
+        await keeper.ensure("entry")
+
+    assert standings.reads == reads

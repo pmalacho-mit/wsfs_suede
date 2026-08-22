@@ -63,6 +63,34 @@ class LiveblocksRooms:
             raise RuntimeError(f"liveblocks {method} {path}: {answer.status_code} {answer.text}")
 
 
+class RememberedRooms:
+    """The `Room` table, as the keeper wants it.
+
+    Read through the keeper's own cache, so this is touched when a room is
+    first asked about and when it moves -- not on the path that repeats.
+    """
+
+    def __init__(self, backend: Backend, rooms: type) -> None:
+        self._backend = backend
+        self._rooms = rooms
+
+    async def standing(self, entry: str) -> tuple[bool, str | None]:
+        async with self._backend.database.session() as session:
+            held = await session.get(self._rooms, UUID(entry))
+            if held is None:
+                return (False, None)
+            return (True, None if held.base is None else str(held.base))
+
+    async def remember(self, entry: str, base: str | None) -> None:
+        async with self._backend.database.session() as session:
+            held = await session.get(self._rooms, UUID(entry))
+            if held is None:
+                held = self._rooms(entry_id=UUID(entry))
+            held.base = None if base is None else UUID(base)
+            session.add(held)
+            await session.commit()
+
+
 class WsfsFiles:
     """What wsfs says a file holds, for a keeper that knows only entries."""
 
@@ -110,5 +138,9 @@ class WsfsFiles:
         return None if found is None else found.workspace_id
 
 
-def keeper_over(backend: Backend, secret: str) -> Keeper:
-    return Keeper(liveblocks=LiveblocksRooms(secret), files=WsfsFiles(backend))
+def keeper_over(backend: Backend, secret: str, rooms: type) -> Keeper:
+    return Keeper(
+        liveblocks=LiveblocksRooms(secret),
+        files=WsfsFiles(backend),
+        standings=RememberedRooms(backend, rooms),
+    )

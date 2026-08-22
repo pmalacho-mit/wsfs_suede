@@ -19,7 +19,7 @@ import os
 import time
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as APIPath
 from sqlmodel import Field, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -45,6 +45,28 @@ class Project(WithID, tablename("plural"), table=True):
     """The host's workspaces, with whatever else a host would keep here."""
 
     name: str = Field(default="", nullable=False)
+
+
+class Room(tablename("plural"), table=True):
+    """One entry's shared room, as this host knows it.
+
+    Two facts, and both are here because the alternative is asking the
+    collaboration server.
+
+    `entry_id` existing at all means the room has been CREATED there. That is
+    permanent -- nothing here ever destroys a room -- so it is worth knowing
+    once rather than checking. Held in a table rather than in memory because a
+    restart would otherwise pay for the answer again on every file anybody
+    opens.
+
+    `base` is which stored version the room's text descends from. It changes
+    every time somebody saves, which is exactly why it must not live in the
+    shared document: advancing it there is a write, and every client that
+    heard about the save would have to be told.
+    """
+
+    entry_id: UUID = Field(primary_key=True)
+    base: UUID | None = Field(default=None, nullable=True)
 
 
 MODELS = build_models(user_table=Account, workspace_table=Project)
@@ -182,6 +204,22 @@ def create_sample_app(
         """
         await _rooms().hand_over(str(entry_id), await request.body())
 
+    @app.post("/rooms/{entry_id}/warm", status_code=202)
+    async def warm_room(entry_id: UUID, later: BackgroundTasks) -> None:
+        """Fill this entry's room now, so that opening it later is instant.
+
+        Creating a room, asking what it holds and filling it is three calls to
+        the collaboration server and takes a second or two. Somebody opening a
+        file has to wait for that, because an editor bound to a room that has
+        not been filled shows an empty file and then saves it over the real
+        one.
+
+        Nobody is waiting at creation time, so that is where it belongs --
+        whether the file was made by a person or by a workspace being cloned
+        for one.
+        """
+        later.add_task(_rooms().ensure, str(entry_id))
+
     @app.post("/rooms/{entry_id}/stored", status_code=204)
     async def room_stored(entry_id: UUID, body: dict[str, str]) -> None:
         """A member of this room wrote the file.
@@ -208,7 +246,7 @@ def create_sample_app(
         if not secret:
             raise HTTPException(503, "this host was started without a Liveblocks key")
         if not hasattr(app.state, "rooms"):
-            app.state.rooms = keeper_over(backend, secret)
+            app.state.rooms = keeper_over(backend, secret, Room)
         return app.state.rooms
 
     backend = Backend.over(
