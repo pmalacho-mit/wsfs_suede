@@ -19,7 +19,7 @@
   import FileTree, { Model as FileTreeModel } from "$lib/FileTree.svelte";
   import Shell from "$lib/Workspace.svelte";
   import type { Client } from "$lib/testing.svelte";
-  import { solo } from "$lib/liveblocks";
+  import { drivable, solo } from "$lib/liveblocks";
   import {
     alongside,
     clickRow,
@@ -39,8 +39,27 @@
     until,
   } from "$lib/testing.svelte";
 
-  /** One room's worth of collaboration, with nobody else in it. */
+  /**
+   * A room with nobody else in it, and a connection the test can answer for.
+   *
+   * WHAT THIS CANNOT DO, and it is worth knowing before trusting it: `solo`
+   * answers as a genuinely EMPTY room. That was right while the client filled
+   * a room from the file; the host fills it now, on the real collaboration
+   * server, which this knows nothing about. So the shared document here is
+   * always empty, and the two tests that turn on the shared document holding
+   * the file cannot pass against it.
+   *
+   * Swapping `solo()` for `clientAs(ADA)` makes them pass -- verified, one of
+   * them in three seconds on its own -- but eighteen tests each opening a
+   * real room is minutes rather than seconds, so it is not the default. See
+   * COLLABORATION.md.
+   *
+   * The CONNECTION is drivable either way: whether this client's work is
+   * reaching anybody is a question about a network, and no room, real or
+   * fake, answers it on demand.
+   */
   const collaboration = solo();
+  const room = drivable(collaboration);
 
   /**
    * Type the way a person does, which is the only kind of edit that counts.
@@ -76,7 +95,7 @@
       `${path} to be shared`,
       () => take().entries.find((one: any) => one.path === path)?.stage === "open",
       () => JSON.stringify(take().entries.find((one: any) => one.path === path)),
-      20_000,
+      45_000,
     );
 
   class Pocket {
@@ -440,7 +459,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -483,7 +506,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -561,7 +588,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -602,7 +633,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -647,7 +682,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -718,6 +757,7 @@
         <Shell
           workspace={p.workspace.workspace}
           liveblocks={collaboration}
+          entering={room.entering}
           onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
         />
       {/if}
@@ -907,7 +947,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -963,7 +1007,11 @@
   {#snippet vest(p: Pocket)}
     <div class="stage" bind:this={p.root}>
       {#if p.workspace}
-        <Shell workspace={p.workspace.workspace} liveblocks={collaboration} />
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={collaboration}
+          entering={room.entering}
+        />
       {/if}
     </div>
   {/snippet}
@@ -1032,7 +1080,12 @@
     await until(
       "the other client has what was snapshotted",
       () => texted(other.workspace.holding("draft.py")) === "start more",
-      () => JSON.stringify(other.workspace.holding("draft.py")),
+      () =>
+        JSON.stringify({
+          other: other.workspace.holding("draft.py"),
+          resolved,
+          here: take().entries.find((one: any) => one.path === "draft.py"),
+        }),
       15_000,
     );
     harness.expect(take().entries.some((held: any) => held.dirty)).toBe(false);
@@ -1044,6 +1097,7 @@
         <Shell
           workspace={p.workspace.workspace}
           liveblocks={collaboration}
+          entering={room.entering}
           onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
           onSnapshot={(take) => (p.take = take)}
         />

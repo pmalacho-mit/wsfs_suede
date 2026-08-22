@@ -11,6 +11,7 @@
   import {
     become,
     Rooms,
+    type Enter,
     type Room,
     type Sending,
     type Written,
@@ -462,11 +463,23 @@
   let {
     workspace,
     liveblocks,
+    entering,
     onEditor,
     onSnapshot,
   }: {
     workspace: Workspace;
     liveblocks: LiveblocksClient;
+    /**
+     * How a room joins the shared document, for a caller that has to say.
+     *
+     * `Provider` is this codebase's own type, not Liveblocks', and two of its
+     * members -- whether this client is holding changes, and waiting until it
+     * is not -- are questions a real provider answers about a real
+     * connection. A test that wants to say "given a room reaching nobody"
+     * has to be able to answer them itself, and no amount of pretending to
+     * be a Liveblocks room lets it.
+     */
+    entering?: Enter;
     /** Every editor as it mounts -- for type tracking later, and for a test
      *  that wants to drive one the way a person does. */
     onEditor?: NonModelEditorProps["onEditor"];
@@ -495,7 +508,14 @@
      * case `rooms.opening` exists to cover, and would leave every file that
      * was ever closed and reopened quietly behind.
      */
-    const rooms = new Rooms(workspace, enteringWith(liveblocks), settling, storedFromRoom, handingOver, persisting);
+    const rooms = new Rooms(
+      workspace,
+      entering ?? enteringWith(liveblocks),
+      settling,
+      storedFromRoom,
+      handingOver,
+      persisting,
+    );
 
     const openInProgress = new Set<Id>();
     const openFiles = new Map<Id, OpenFile>();

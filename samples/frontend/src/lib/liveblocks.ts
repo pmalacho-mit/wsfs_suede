@@ -20,6 +20,9 @@
  */
 import { kInternal, ServerMsgCode } from "@liveblocks/core";
 import type { createClient } from "@liveblocks/client";
+import { LiveblocksYjsProvider } from "@liveblocks/yjs";
+
+import type { Enter } from "./collab/room.svelte";
 import * as Y from "yjs";
 
 type Client = ReturnType<typeof createClient>;
@@ -124,4 +127,54 @@ export const solo = (): Client => {
       return { room: entered, leave: () => rooms.delete(id) };
     },
   } as unknown as Client;
+};
+
+
+/**
+ * A room a test drives, rather than one it pretends to be.
+ *
+ * `solo` is a real `LiveblocksYjsProvider` over a room that answers, and that
+ * is the right shape for "one editor, one screen". It cannot answer the two
+ * questions `Provider` asks that are about a CONNECTION rather than a
+ * document -- whether this client is still holding changes, and waiting until
+ * it is not -- because a provider works those out from a real server
+ * acknowledging real messages. Emulating that is emulating a wire protocol.
+ *
+ * So this stops pretending. The document still comes from `solo`, so text and
+ * bindings behave exactly as they do in the app, and the connection's answers
+ * come from here, where a test can say what they are:
+ *
+ *     const room = drivable();
+ *     room.reaching(false);   // now this client is holding work nobody has
+ */
+export const drivable = (liveblocks: Client = solo()) => {
+  let reaching = true;
+  let waiting: (() => void)[] = [];
+
+  const entering = ((entry, doc) => {
+    const entered = liveblocks.enterRoom(entry);
+    const provider = new LiveblocksYjsProvider(entered.room, doc);
+    return {
+      provider: Object.assign(provider, {
+        ahead: () => !reaching,
+        handedOver: () =>
+          reaching
+            ? Promise.resolve()
+            : new Promise<void>((done) => waiting.push(done)),
+      }),
+      leave: () => entered.leave(),
+    };
+  }) satisfies Enter;
+
+  return {
+    entering,
+    /** Whether this client's work is reaching anybody else right now. */
+    reaching: (now: boolean) => {
+      reaching = now;
+      if (!now) return;
+      const held = waiting;
+      waiting = [];
+      for (const done of held) done();
+    },
+  };
 };

@@ -395,34 +395,44 @@ brought up to date at startup rather than silently disagreeing.
 none does.** A user whose typing is not reaching anybody should be told,
 particularly now that `send` returns a sentence saying exactly why.
 
-**The sample shell: 16 passed, 2 failed, and both for one understood reason.**
-Tests 13 and 18 assert that typing reaches the SERVER. Under this design that
-needs the room to be reachable — a client that is reaching nobody keeps a
-draft instead, deliberately. `solo()`, the fake Liveblocks room, is *"a room
-with nobody else in it"*: it never acknowledges an update, so its provider
-reports `synchronizing` for ever, so `speaks` is false, so every store becomes
-a draft and the file never changes.
+**The sample shell: 16 passed, 2 failed, and the cause is now proven rather
+than suspected.** Tests 13 and 18 turn on the shared document holding the
+file. `solo()`, the fake room, answers as a genuinely EMPTY one — which was
+right while the CLIENT filled a room from the file, and is wrong now that the
+host does, on the real collaboration server that `solo` knows nothing about.
 
-**The tests are asserting a property the test double cannot provide.** Fixing
-it means making `solo()` acknowledge — reply to `updateYDoc` with the room's
-new state vector, which is what a provider waits for. One attempt at that
-looped (echoing the update back made the sender send again) and a second hung;
-it wants someone who will read the Liveblocks wire protocol rather than infer
-it.
+**Swapping `solo()` for `clientAs(ADA)` makes them pass** — verified, test 18
+in three seconds on its own. It is not the default because eighteen tests each
+opening a real room takes minutes rather than seconds and the suite times out.
+The switch is one line in `Sample.test.svelte`.
 
-Three real bugs were found and fixed on the way, none of which was the whole:
+Two ways to finish it, both straightforward:
 
-- **The tests typed like a program.** `model.applyEdits` carries no provenance,
-  and with no focus there is nothing to attribute it to, so `UserEdits`
-  ignored it — correctly. A peer's edit arriving through the binding looks
-  exactly the same, and counting those as this person's work would have every
-  member of a room storing every other member's typing. The tests now focus
-  the editor and let it route the keystroke, which is what a person does.
-- **`storing()` returned nothing when the room was holding.** Under drafts
-  there IS a transaction to name — the draft's — and it is exactly what a
-  snapshot needs, because the server can rebuild it.
-- **`dirty` stayed set after a draft.** It means "exists nowhere else yet",
-  and a draft is somewhere else.
+- Let the Sample suite use a real room and give it the time (raise the
+  `--silence` window and the per-test waits, as the collaboration suite does).
+- Or teach `solo()` to hold content the test puts there, so a test can say
+  "given a room holding this file" without a network. That is the "given /
+  when / then" shape and it is fully deterministic.
+
+**What the connection needs is already there.** `Provider` is this codebase's
+own type, and two of its members — whether this client is holding changes, and
+waiting until it is not — are about a NETWORK, not a document. No room, real
+or fake, answers those on demand. So `Workspace.svelte` now takes an
+`entering` prop, and `drivable()` supplies one whose connection the test
+answers for:
+
+```ts
+const room = drivable();
+room.reaching(false);   // now this client is holding work nobody else has
+```
+
+**And it earned its keep immediately.** Driving the connection exposed a real
+bug in the product, not the double: a room hears the workspace's stream from
+the moment it exists, and a write landing before it is attached is recorded as
+missed. Opening was exactly that window, and nothing closed it — so a room
+that missed anything while opening stayed behind FOR EVER, refused to write
+the file back, and turned every save into a draft silently. `Rooms.open` now
+catches up after attaching.
 
 **The cold-open cost is measured, not guessed:** first settle 1.7–2.3s,
 repeat 11–28ms. Three sequential calls to the collaboration server — create

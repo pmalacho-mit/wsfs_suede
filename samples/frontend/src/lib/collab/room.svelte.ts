@@ -637,6 +637,18 @@ export class Rooms {
     room.base = await this.settle(entry);
     room.opening = "attaching";
     await room.attach();
+    /**
+     * Catching up on whatever arrived while it was opening.
+     *
+     * A room hears the workspace's stream from the moment it exists, and a
+     * write that lands before it is attached is recorded as missed and acted
+     * on later -- deliberately, because a room reaching nobody must not
+     * repair itself. Opening is exactly that window, and nothing else closes
+     * it: without this the room stays behind for ever, refuses to write the
+     * file back, and every save quietly becomes a draft.
+     */
+    room.opening = "catching up";
+    await room.catchUp();
     room.ready = true;
     room.opening = "storing what nobody stored";
     await room.storeWhatNobodyStored();
