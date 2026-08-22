@@ -27,6 +27,8 @@ import {
 export type Provider = {
   readonly synced: boolean;
   once: (event: "synced", handler: () => void) => void;
+  /** Calls back whenever `ahead` may have changed. Returns an unsubscribe. */
+  watch: (changed: () => void) => () => void;
   /**
    * Whether this client is holding changes the server has not confirmed.
    *
@@ -88,6 +90,26 @@ export type Persist = (
   entry: string,
   doc: Y.Doc,
 ) => { loaded: Promise<void>; stop: () => Promise<void> };
+
+/**
+ * Why a room is not writing its file back, when it is not.
+ *
+ * One statement of the rule, read by the thing that decides and by the thing
+ * that tells the person -- the decision and its explanation drifting apart is
+ * how a user ends up looking at a banner that is no longer true.
+ */
+export type Trouble = {
+  /** What to tell the person at the keyboard. */
+  says: string;
+  /**
+   * Whether this passes on its own.
+   *
+   * True for everything that is a connection: the work is kept, and it
+   * becomes the file when the room comes back. False when the file stopped
+   * being this room's text, which nothing here undoes.
+   */
+  passing: boolean;
+};
 
 /** What ended a room that was showing text. */
 export type Replacement = {
@@ -205,10 +227,11 @@ export class Room {
    * was away is ONE gap between what it holds and what the file says, and the
    * server closes a gap of any size in one go.
    */
-  #missed = false;
+  #missed = $state(false);
 
   #provider: Provider | undefined;
   #leave: (() => void) | undefined;
+  #unwatch: (() => void) | undefined;
   #stopKeeping: (() => Promise<void>) | undefined;
 
   /**
@@ -255,9 +278,27 @@ export class Room {
    * in flight, and nothing good follows from that -- see `rooms.speaking`.
    */
   get speaks(): boolean {
-    if (this.replaced !== undefined) return false;
-    if (this.#ahead) return false;
-    return rooms.speaking({ attached: this.attached, behind: this.#missed });
+    return this.trouble === undefined;
+  }
+
+  /**
+   * What stands between this room and the file, if anything does.
+   *
+   * Reactive, because a person typing into a document that is reaching
+   * nobody should be told so -- and because the alternative to one answer is
+   * two, one for the rule and one for the banner, drifting apart.
+   */
+  get trouble(): Trouble | undefined {
+    if (this.replaced !== undefined)
+      return { says: "this file is not text any more", passing: false };
+    if (this.#ahead)
+      return { says: "still handing over what you typed", passing: true };
+    if (rooms.speaking({ attached: this.attached, behind: this.#missed }))
+      return undefined;
+    return {
+      says: this.attached ? "catching up" : "not reaching anybody",
+      passing: true,
+    };
   }
 
   /**
@@ -267,9 +308,7 @@ export class Room {
    * content is still in flight, and carry it into their document -- and then
    * this client's own copy would arrive and say it a second time.
    */
-  get #ahead(): boolean {
-    return this.#provider?.ahead() ?? false;
-  }
+  #ahead = $state(false);
 
   /**
    * The stream says this entry's content moved.
@@ -337,6 +376,11 @@ export class Room {
     await this.store(path);
   }
 
+  /** Resolves once everything typed here has reached the room. */
+  async handedOver(): Promise<void> {
+    await this.#provider?.handedOver();
+  }
+
   /** Have the server bring this room up to whatever the file now says. */
   async catchUp(): Promise<void> {
     this.base = await this.held.host.settle(this.entry);
@@ -351,9 +395,8 @@ export class Room {
    * it did not, which is what stops its own text being carried back in.
    */
   send(path: string): Sending {
-    if (this.replaced !== undefined)
-      return this.#kept("the file stopped being this room's text");
-    if (!this.speaks) return this.#kept(this.#whyNot);
+    const trouble = this.trouble;
+    if (trouble !== undefined) return this.#kept(trouble.says);
 
     const { transaction, settled } = this.held.workspace.write(
       path,
@@ -425,11 +468,6 @@ export class Room {
     await this.held.workspace.cleared(gone);
   }
 
-  get #whyNot(): string {
-    if (this.#ahead) return "the room has not finished handing over what it holds";
-    return this.attached ? "the room owes a catch-up" : "the room is not reaching anybody";
-  }
-
   /**
    * Waits for what this client is holding to reach the server, then stores.
    *
@@ -497,6 +535,8 @@ export class Room {
     const { provider, leave } = this.held.enter(this.entry, this.doc);
     this.#provider = provider;
     this.#leave = leave;
+    this.#ahead = provider.ahead();
+    this.#unwatch = provider.watch(() => (this.#ahead = provider.ahead()));
     try {
       await this.#syncing(provider);
     } catch (reason) {
@@ -525,8 +565,11 @@ export class Room {
    * them syncs -- which is exactly what an unnoticed lapse looks like.
    */
   detach() {
+    this.#unwatch?.();
     this.#provider?.destroy();
     this.#leave?.();
+    this.#unwatch = undefined;
+    this.#ahead = false;
     this.#provider = undefined;
     this.#leave = undefined;
     this.#attaching = undefined;

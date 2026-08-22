@@ -43,6 +43,7 @@ Every row is either covered by a browser scenario or named here as uncovered.
 | invariant 7 — detaching never discards | closing a file and opening it again | 17 |
 | J1–J9 | the draft lifecycle | 6, and `tests/drafts.py` |
 | K1–K6 | writes that were never in an editor | 3, 8, 12 |
+| being told you are out of touch | `Room.trouble` names why the room cannot write | 6 |
 
 And **B3 from the reachable side** — a client that can reach the host but not
 the collaboration server — is scenario 16, which was not in the original
@@ -254,10 +255,6 @@ is a refusal.
 **The sample database is `tmpfs`** and wipes on every `sample-db` restart. That
 is deliberate, and now much less dangerous than it was, because the schema is
 brought up to date at startup rather than silently disagreeing.
-
-**`Room.attached` and `Room.replaced` are `$state` so a banner can exist, and
-none does.** A user whose typing is not reaching anybody should be told,
-particularly now that `send` returns a sentence saying exactly why.
 
 **The sample shell: 16 passed, 2 failed, and the cause is now proven rather
 than suspected.** Tests 13 and 18 turn on the shared document holding the

@@ -150,6 +150,7 @@ export const solo = (): Client => {
 export const drivable = (liveblocks: Client = solo()) => {
   let reaching = true;
   let waiting: (() => void)[] = [];
+  let watchers: (() => void)[] = [];
 
   const entering = ((entry, doc) => {
     const entered = liveblocks.enterRoom(entry);
@@ -161,6 +162,10 @@ export const drivable = (liveblocks: Client = solo()) => {
           reaching
             ? Promise.resolve()
             : new Promise<void>((done) => waiting.push(done)),
+        watch: (changed: () => void) => {
+          watchers.push(changed);
+          return () => (watchers = watchers.filter((one) => one !== changed));
+        },
       }),
       leave: () => entered.leave(),
     };
@@ -171,6 +176,7 @@ export const drivable = (liveblocks: Client = solo()) => {
     /** Whether this client's work is reaching anybody else right now. */
     reaching: (now: boolean) => {
       reaching = now;
+      for (const changed of watchers) changed();
       if (!now) return;
       const held = waiting;
       waiting = [];

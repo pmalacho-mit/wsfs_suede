@@ -461,6 +461,20 @@
       /** Taken while nobody else could possibly have this text. */
       await client.take(entry);
 
+      /**
+       * And the person is told. Typing into a document that is reaching
+       * nobody is safe -- it is kept, and it goes when the room comes back --
+       * but somebody who is not told assumes their work is where everybody
+       * else's is.
+       */
+      await until(
+        "the room to say it is out of touch",
+        () => client.trouble(entry) !== undefined,
+        5_000,
+      );
+      harness.expect(client.trouble(entry)?.passing).toBe(true);
+      harness.expect(client.trouble(entry)?.says).toBe("not reaching anybody");
+
       const held = await client.store(entry);
       if (!held.held)
         throw new Error(
@@ -1011,6 +1025,12 @@
       await client.open(entry);
       await until("the room to carry the file", () => client.text(entry).includes("start"));
       client.type(entry, client.text(entry) + "shared but never stored\n");
+      /**
+       * Announced only once the room actually has it. Announcing on the
+       * keystroke would let the other tab open before the update landed, and
+       * then which rung the work had reached would depend on the network.
+       */
+      await client.handedOver(entry);
       await announce(step(id, "nobody", "typed"));
 
       /** Nobody stores it. Ada's tab simply goes. */
@@ -1020,28 +1040,28 @@
       pocket.note = "typed it and left";
     } else {
       await awaiting(step(id, "nobody", "typed"));
-      await client.open(entry);
-      await until("the typing to arrive", () =>
-        client.text(entry).includes("shared but never stored"),
-      );
-      /** Still only in the room: the file has not been told. */
-      harness.expect(await client.reads(entry)).toBe("start\n");
-      await announce(step(id, "nobody", "seen"));
-      await awaiting(step(id, "nobody", "gone"));
 
-      /** A fresh open, which is where it gets rescued. */
-      const later = await joined(harness);
-      await later.open(entry);
+      /** Sharing writes nothing, so the file still says what it always said. */
+      harness.expect(await client.reads(entry)).toBe("start\n");
+
+      /**
+       * Opening is the rescue. Whoever opens the file next is the one who can
+       * still see the work, so they are the one who stores it -- it happens
+       * during the open, not at some later save.
+       */
+      await client.open(entry);
+      harness.expect(client.text(entry)).toContain("shared but never stored");
       const said = await untilAsked(
         "the file to be told at last",
-        () => later.reads(entry),
+        () => client.reads(entry),
         (text) => text.includes("shared but never stored"),
       );
-      harness.expect(said).toContain("shared but never stored");
       pocket.text = said;
       pocket.note = "stored by whoever opened it next";
-      await later.take(entry);
-      await later.rebuildable();
+      await announce(step(id, "nobody", "seen"));
+      await awaiting(step(id, "nobody", "gone"));
+      await client.take(entry);
+      await client.rebuildable();
     }
   }}
 >

@@ -171,6 +171,7 @@ export const enteringWith = (liveblocks: LiveblocksClient) =>
       provider: Object.assign(provider, {
         ahead: () => provider.getStatus() === "synchronizing",
         handedOver: () => handedOver(liveblocks, provider),
+        watch: (changed: () => void) => liveblocks.events.syncStatus.subscribe(changed),
       }),
       leave: () => entered.leave(),
     };
@@ -279,6 +280,16 @@ export class Collaborator {
   /** Whether this room may answer for the file, and write it back. */
   attached(entry: string): boolean {
     return this.rooms.get(entry)?.attached === true;
+  }
+
+  /** Resolves once what was typed into this file has reached its room. */
+  async handedOver(entry: string): Promise<void> {
+    await this.rooms.get(entry)?.handedOver();
+  }
+
+  /** What this file's room would tell the person at the keyboard, if anything. */
+  trouble(entry: string) {
+    return this.rooms.get(entry)?.trouble;
   }
 
   speaks(entry: string): boolean {

@@ -73,6 +73,12 @@
   {/if}
   <Preview path={params.opened.path} held={binary} />
 {:else if params.opened.sharedText}
+  {@const trouble = params.opened.sharedText.shared?.trouble}
+  {#if trouble}
+    <p class="note out-of-touch" class:passing={trouble.passing}>
+      {trouble.says} — what you type is kept, and goes when it can.
+    </p>
+  {/if}
   <div class="text" class:runnable>
     <!-- `props` is everything the editor was configured with and the file is
          the one thing that differs per panel. Spreading is what makes
@@ -93,6 +99,15 @@
 {/if}
 
 <style>
+  /*
+   * Said rather than hidden. Typing into a document that is reaching nobody
+   * is safe -- it is kept, and it goes when the room comes back -- but a
+   * person who is not told assumes their work is where everybody else's is.
+   */
+  .out-of-touch {
+    border-left: 3px solid var(--pierre-warning, #c8a020);
+  }
+
   .text {
     display: grid;
     grid-template-rows: 1fr;

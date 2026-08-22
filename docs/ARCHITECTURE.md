@@ -460,6 +460,21 @@ hash → immediate ack (retry-safe by construction). Download: raw bytes with
 | Store hash mismatch / too large | Surface; do not retry blindly (the bytes are wrong or oversized, not the network) |
 | Content fetch offline, cold cache | Clean filesystem error (deadline-bounded), never a wedge |
 
+### 7.1 Saying so
+
+`Room.trouble` is reactive `$state` and names, in one sentence, whatever stops
+the room writing the file back: *this file is not text any more* (not passing —
+what you were editing is gone), *still handing over what you typed*, *not
+reaching anybody*, *catching up*. `undefined` means the room speaks.
+
+The passing three are the same condition `send` refuses on, so the sentence a
+user reads and the sentence recorded on the draft are one string from one
+place. The rule itself is `rooms.speaking` in the release package — the
+banner does not restate it.
+
+Typing while out of touch is safe: it is kept, and it goes when the room comes
+back. Being told is not a warning, it is the difference between that and
+assuming your work is where everybody else's is.
 
 ---
 
@@ -563,10 +578,6 @@ reach nobody either loses its typing or has it delivered twice).
   their predecessor, so a long offline session stores only what was typed
   since. Supersession within one client's own lineage, and dedup by digest,
   are the two bounded wins nobody has taken.
-- **An affordance for being out of touch.** `Room.attached` and
-  `Room.replaced` are reactive so a banner can exist, and none does. A user
-  whose typing is reaching nobody should be told; `send` already returns the
-  sentence saying why.
 - **Migrations that are not additive.** `widen` adds columns the code
   declares and refuses everything else — a column the code no longer declares
   is left alone, and one that is NOT NULL with no plain default stops the
