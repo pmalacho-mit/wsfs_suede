@@ -395,10 +395,29 @@ brought up to date at startup rather than silently disagreeing.
 none does.** A user whose typing is not reaching anybody should be told,
 particularly now that `send` returns a sentence saying exactly why.
 
-**The sample shell.** `--component Sample --browser chromium` was 15 passed, 3
-failed when it was last run in full, all three plausibly one cause: `solo()`,
-the fake Liveblocks room, is written against internals its own docstring warns
-may move. Worth checking before trusting anything it says.
+**The sample shell: 16 passed, 2 failed.** Both failures are the same wiring --
+typing does not reach `dirty`, so nothing autosaves, so the other client never
+sees it. `Workspace.svelte` is the consumer a user actually touches, and this
+is the last piece of it without working coverage.
+
+The third failure is gone: rooms now open in the sample shell, which
+server-side seeding fixed.
+
+**What has been ruled out**, so the next person does not repeat it:
+
+- The wrapped `props` DO reach the editor — `FileView.svelte` spreads
+  `sharedText.props`, so `onEditor` runs and `UserEdits` is built.
+- `UserEdits` is now ATTACHED to the shared text rather than rebuilt when the
+  room arrives. Rebuilding registered its model listener behind the binding's,
+  so every keystroke arrived while the binding's Yjs transaction was open and
+  was classified as somebody else's. That was a real bug and is fixed; it was
+  not the whole of this one.
+- `solo()`, the fake room, now relays updates between the providers in a page
+  rather than dropping them. A room with nobody in it is the right fake for one
+  editor and the wrong one for a test that opens two.
+
+What is left to check is whether `edited` fires at all, and whether the
+`dirty` the test reads is the same `dirty` `SharedTextFile` sets.
 
 ## What to pick up
 

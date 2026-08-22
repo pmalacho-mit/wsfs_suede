@@ -170,7 +170,20 @@
           if (this.#disposed) return;
           this.shared = room;
           this.file.sourceSync = room.text;
-          if (this.editor) this.#watching(this.editor);
+          /**
+           * ATTACHED, NOT REBUILT, and the difference is autosave working.
+           *
+           * Setting `sourceSync` is what binds the editor to the shared text,
+           * and the binding listens for model changes to copy them into the
+           * document. Building a new `UserEdits` here would register its own
+           * listener BEHIND that one -- so by the time it saw a keystroke,
+           * the binding's Yjs transaction would be open, and every edit the
+           * person made would look like somebody else's arriving.
+           *
+           * Nothing would break loudly. The file would simply never go dirty
+           * and never autosave.
+           */
+          this.userEdits?.attach(room.text);
         })
         /**
          * A room that never syncs leaves the editor on the content the

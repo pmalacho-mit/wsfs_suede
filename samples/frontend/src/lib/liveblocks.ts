@@ -82,8 +82,28 @@ const room = (id: string) => {
         }),
       ),
 
-    /** Nobody to send it to. */
-    updateYDoc: (_update: string, _guid?: string) => undefined,
+    /**
+     * Everyone else in this page, which is who "the others" are here.
+     *
+     * Not a no-op, and it used to be. A room with nobody in it is the right
+     * fake for one editor on one screen, and the wrong one the moment a test
+     * opens two -- they would each hold a document nothing carried between
+     * them, and the suite would be asserting that collaboration works while
+     * demonstrating only that it compiles.
+     *
+     * Said back to every subscriber including the sender, which costs
+     * nothing: a Yjs update carries its own identities and merges once.
+     */
+    updateYDoc: (update: string, guid?: string) =>
+      queueMicrotask(() =>
+        ydoc.say({
+          type: ServerMsgCode.UPDATE_YDOC,
+          update,
+          stateVector: null,
+          guid,
+          v2: false,
+        }),
+      ),
   };
 
   // After the provider has subscribed, so it hears this rather than missing it.
