@@ -1244,3 +1244,60 @@
     <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
+
+<Sweater
+  name="gives back what a closed file was holding when it is opened again"
+  body={async (harness) => {
+    /**
+     * Invariant 7: detaching never discards. Closing a file is not a
+     * decision about the work in it -- only deleting is -- so unstored
+     * typing has to survive the room being put down and picked up.
+     *
+     * Closed while reaching nobody, so nobody else is holding it either and
+     * the machine is genuinely the only copy.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "closed", "kept\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("kept"));
+
+      client.goOffline(entry);
+      client.type(entry, client.text(entry) + "typed then closed\n");
+      const showing = client.text(entry);
+      await client.close(entry);
+
+      await client.open(entry);
+      await until("the file to be handed back", () =>
+        client.text(entry).includes("typed then closed"),
+      );
+      harness.expect(client.text(entry)).toBe(showing);
+      pocket.text = client.text(entry);
+      pocket.note = "closed and reopened, nothing lost";
+
+      await until("the room to speak", () => client.speaks(entry));
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`would not store: ${stored.why}`);
+      await announce(step(id, "closed", "stored"));
+    } else {
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("kept"));
+      await awaiting(step(id, "closed", "stored"));
+      await until("ada's typing to arrive", () =>
+        client.text(entry).includes("typed then closed"),
+      );
+      harness.expect(client.text(entry).split("typed then closed").length - 1).toBe(1);
+      pocket.text = client.text(entry);
+      pocket.note = "saw it once";
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>

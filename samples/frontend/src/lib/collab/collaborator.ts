@@ -263,6 +263,11 @@ export class Collaborator {
     return path;
   }
 
+  /** Stop holding this file, without discarding what it was holding. */
+  close(entry: string): Promise<void> {
+    return this.rooms.close(entry);
+  }
+
   async open(entry: string): Promise<void> {
     await this.rooms.open(entry);
   }

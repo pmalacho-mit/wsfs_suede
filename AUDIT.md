@@ -6,6 +6,10 @@ measurements rather than reasoning where measuring was possible.
 
 Everything below was run against the sample stack on 2026-08-22.
 
+**Seventeen browser scenarios**, each run as its own paired chromium+firefox
+run; `./tests/run.sh` 245; `npx vitest run` 102; live 11; `npm run check` 0
+errors across 1822 files.
+
 ---
 
 ## 1. The scenarios
@@ -36,6 +40,7 @@ Every row is either covered by a browser scenario or named here as uncovered.
 | H1 | renamed while open | 15 |
 | H2 | deleted while open | 12 |
 | H3 | became binary | 8 |
+| invariant 7 — detaching never discards | closing a file and opening it again | 17 |
 | J1–J9 | the draft lifecycle | 6, and `tests/drafts.py` |
 | K1–K6 | writes that were never in an editor | 3, 8, 12 |
 
@@ -62,6 +67,12 @@ Three, and none of them can lose or duplicate work.
 - **F3** — a client with a document writing without joining the room. The
   design requires it not to; nothing enforces it. Worth a guard, not just a
   convention.
+- **The client half of invariant 6.** A token the server never issued is
+  refused with the right reason and that is tested; the loop re-enters when
+  nudged and that is tested; the line joining them — `workspace.ts` nudging on
+  that reason — has no test, because there is no fake transport to make a
+  server say it. That is the one seam in the sync core with tests on both
+  sides and none in the middle.
 
 ### Where the design is genuinely weak
 
