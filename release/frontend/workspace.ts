@@ -10,7 +10,6 @@ import * as changes from "./changes";
 import * as confirmed from "./confirmed";
 import { cache, type Content, type Payload } from "./content";
 import {
-  kept,
   settledHere,
   UNSOUND,
   type Body,
@@ -148,16 +147,17 @@ export const connect = (options: Options): Workspace => {
   let index = paths.index(shown.view);
 
   /**
-   * Drafts this client has seen land.
+   * Transactions the server recorded without applying them.
    *
-   * A draft is on the server and rebuildable from it, but it is never any
-   * entry's version -- so the confirmed map, which is what `unsettled` reads,
-   * has no way to know about it and would call it unreachable for ever.
+   * A refusal and a draft both leave a row that names what was ASKED, and
+   * both are rebuildable from it -- but neither is ever an entry's version,
+   * so the confirmed map that `unsettled` reads has no way to know about
+   * them and would call them unreachable for ever.
    *
    * Held in memory only. A reload loses it, which understates what the server
    * can rebuild rather than overstating it.
    */
-  const drafts = new Set<Transaction>();
+  const recorded = new Set<Transaction>();
 
   const content: Content = cache((entry, version) =>
     transport.content(workspace, entry, version),
@@ -228,6 +228,7 @@ export const connect = (options: Options): Workspace => {
     recomputed();
     const response = await transport.submit(workspace, request);
     if (settledHere(response)) {
+      recorded.add(request.transaction);
       if (response.rejected && response.reason === UNSOUND) sync.nudge();
       bytes.forget(queue.evict([request.transaction]));
       recomputed();
@@ -298,7 +299,7 @@ export const connect = (options: Options): Workspace => {
         payload,
         mime,
       );
-      if (kept(answer)) drafts.add(transaction);
+      if (settledHere(answer)) recorded.add(transaction);
       return answer;
     })();
     return { transaction, settled };
@@ -425,11 +426,11 @@ export const connect = (options: Options): Workspace => {
      * was showing, so a token standing in the confirmed map is exactly the
      * question "has the server told me about this", asked completely.
      *
-     * Plus the drafts, which the confirmed map cannot answer for: kept rather
-     * than applied, so never an entry's version, and rebuildable all the same.
+     * Plus what was recorded without being applied -- refusals and drafts.
+     * Neither is ever an entry's version, and the server can rebuild both.
      */
     unsettled: (transactions) => {
-      const confirmed = new Set<Transaction>(drafts);
+      const confirmed = new Set<Transaction>(recorded);
       for (const entry of map.values()) {
         confirmed.add(entry.name_version);
         confirmed.add(entry.parent_version);

@@ -29,6 +29,19 @@ Rung 3 depends on the room not being evicted.
 **Work at rung 2 and no higher depends on a single laptop.** That is the
 irreducible exposure, and no server design removes it.
 
+### The second question every scenario has to answer
+
+Each row below says what happens to the FILE. That is half of it. The other
+half is **"can this client still be handed what it was looking at?"** — every
+snapshot it took, resolvable by the server once a connection exists.
+
+The two fail independently. A file can converge perfectly while a snapshot
+naming work that never left one machine is unresolvable for ever, and the user
+meets that as *the assistant cannot see my screen*. Taking a snapshot
+therefore puts what is on screen on the server first — as content when the
+room is reachable, as a draft when it is not — so the property is true by
+construction rather than by luck.
+
 ### The two channels, which fail independently
 
 | channel | carries | used for |

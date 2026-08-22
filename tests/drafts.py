@@ -131,3 +131,41 @@ async def test_a_draft_from_one_client_is_invisible_to_another(api: Api, other: 
     kept(await api.write(entry, born, "before\nkept back\n", draft=True))
 
     assert (await other.content(entry)).json()["content"] == "before\n"
+
+
+async def rebuilt(api: Api, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    response = await api.http.post(
+        f"/wsfs/workspaces/{api.workspace}/reconstruction",
+        json={"entries": entries},
+        headers={"X-User-Email": api.user},
+    )
+    assert response.status_code == 200, response.text
+    return {answer["id"]: answer for answer in response.json()["entries"]}
+
+
+async def test_a_snapshot_naming_a_draft_is_rebuilt_from_the_server(api: Api):
+    """The reason drafts exist.
+
+    A user typing while their room is unreachable, who then asks a question
+    about what is on their screen: the snapshot names work nobody else has,
+    and the server must still be able to hand it back.
+    """
+    entry, born = await a_file(api)
+    holding = api.transaction()
+    kept(await api.write(entry, born, "before\nonly mine\n", transaction=holding, draft=True))
+
+    answers = await rebuilt(
+        api,
+        [
+            {
+                "id": entry,
+                "name_version": born,
+                "parent_version": born,
+                "deleted_version": born,
+                "content_version": holding,
+            }
+        ],
+    )
+
+    assert answers[entry]["unresolved"] == []
+    assert answers[entry]["content"]["content"] == "before\nonly mine\n"

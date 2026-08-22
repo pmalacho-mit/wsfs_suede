@@ -232,6 +232,95 @@ export class Collaborator {
    * is called, where it lives, whether it is gone, and what is in it -- and a
    * snapshot naming all four can be rebuilt into the filesystem as it stood.
    */
+  /**
+   * Every snapshot this client took, and what it was showing at the time.
+   *
+   * `showing` is null when this client had no room for the entry: it was not
+   * showing the text at all, so there is nothing to compare a rebuild
+   * against -- but the snapshot still has to resolve.
+   */
+  readonly took: { versions: contract.Versions; showing: string | null }[] = [];
+
+  /**
+   * What this client is showing, named so the server can rebuild it.
+   *
+   * STORING FIRST IS THE POINT. A snapshot of text that exists nowhere else
+   * names a version nobody can resolve, and the whole use of a snapshot is
+   * being handed to something that will read it somewhere else. Whether the
+   * text lands as the file's content or as a draft is the ordinary rule --
+   * either way the server has it afterwards.
+   */
+  async take(entry: string): Promise<contract.Versions> {
+    const open = this.rooms.get(entry) !== undefined;
+    const showing = open ? this.text(entry) : null;
+    const versions = { ...this.snapshot(entry), ...(await this.#putSomewhere(entry)) };
+    this.took.push({ versions, showing });
+    return versions;
+  }
+
+  /**
+   * The version the text on screen went to the server as, if it had to go.
+   *
+   * Nothing to add when this client has no room for the entry: it is showing
+   * what the server already holds, so the entry's own tokens name it.
+   */
+  async #putSomewhere(entry: string): Promise<{ content_version?: string }> {
+    if (this.rooms.get(entry) === undefined) return {};
+    const answer = await this.store(entry);
+    if (!answer.held) return { content_version: answer.transaction };
+    return answer.draft === null ? {} : { content_version: answer.draft };
+  }
+
+  /**
+   * Every snapshot taken this session, asked of the server.
+   *
+   * The question is not "did the file end up right" -- it is whether what
+   * this client was LOOKING AT can still be handed to somebody else, which is
+   * a different thing and the one a client typing on its own can quietly
+   * lose.
+   */
+  async rebuildable(): Promise<void> {
+    await this.#reachable(this.took.map(({ versions }) => versions));
+    for (const [at, { versions, showing }] of this.took.entries())
+      await this.#rebuiltAs(at, versions, showing);
+  }
+
+  /**
+   * One request per snapshot, and that is not incidental.
+   *
+   * A reconstruction answers once per ENTRY, so two snapshots of the same
+   * file taken at different moments come back as one answer -- and comparing
+   * the later one against it silently passes or silently lies.
+   */
+  async #rebuiltAs(
+    at: number,
+    versions: contract.Versions,
+    showing: string | null,
+  ): Promise<void> {
+    const [answer] = await this.rebuild([versions]);
+    if (answer === undefined) throw new Error(`snapshot ${at} came back with nothing`);
+    if (answer.unresolved.length > 0)
+      throw new Error(`snapshot ${at} unresolved: ${JSON.stringify(answer.unresolved)}`);
+    if (showing === null) return;
+    const said = answer.content?.type === "text" ? answer.content.content : undefined;
+    if (said !== showing)
+      throw new Error(
+        `snapshot ${at} at ${versions.content_version} rebuilt as ` +
+          `${JSON.stringify(said)}, not what was shown ${JSON.stringify(showing)}`,
+      );
+  }
+
+  async #reachable(taken: readonly contract.Versions[]): Promise<void> {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const waiting = this.unsettled(taken);
+      if (waiting.length === 0) return;
+      if (Date.now() > deadline)
+        throw new Error(`never reached the server: ${JSON.stringify(waiting)}`);
+      await new Promise((carry) => setTimeout(carry, 100));
+    }
+  }
+
   snapshot(entry: string): contract.Versions {
     const held = this.workspace.entries().get(entry);
     if (held === undefined) throw new Error(`${entry} is not in this workspace`);

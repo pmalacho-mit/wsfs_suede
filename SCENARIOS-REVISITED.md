@@ -133,6 +133,22 @@ user did not make. The same rule applies to a file becoming binary.
 | J8 | the machine that made an uncleared draft never comes back | only the server can report this. The client's local draft list dies with the machine, so **the server owns the cleared flag** | **obvious** |
 | J9 | client drafts, then the debounce fires again with no change | deduped by digest; no row written | **obvious** |
 
+### Every scenario asks whether the snapshot survives
+
+`SCENARIOS.md` now carries this too, but it belongs here because drafts are
+what make it answerable: a snapshot names what was on screen, and what was on
+screen may exist nowhere but one laptop. Taking a snapshot puts it on the
+server first — content if the room is reachable, a draft if not.
+
+Two things that turned out to be true of the SERVER side of this, found by
+asking the question rather than by reasoning about it:
+
+- A **refused** write is recorded and rebuildable, exactly as a draft is.
+  Anything the server wrote down can be handed back, whatever it decided about
+  it.
+- A reconstruction answers **once per entry**, so two snapshots of one file
+  taken at different moments are two requests, not one.
+
 ### The clearing condition
 
 > A draft is created because this client's updates had not reached the room.

@@ -166,6 +166,15 @@
           `afterType=${JSON.stringify(afterType)} final=${JSON.stringify(pocket.text)}`,
       );
     harness.expect(count("ada was here")).toBe(1);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -207,6 +216,15 @@
           `base=${client.base(entry)} token=${client.token(entry)} ` +
           `text=${JSON.stringify(pocket.text)}`,
       );
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -254,6 +272,15 @@
       pocket.note = "wrote around the room";
     }
     pocket.text = client.text(entry);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -298,6 +325,15 @@
 
     /** Converged, and each of them said it once. */
     harness.expect(client.text(entry).split("shared").length - 1).toBe(1);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -350,6 +386,15 @@
     harness.expect(count("ada kept typing")).toBe(1);
     harness.expect(count("grace carried on")).toBe(1);
     harness.expect(count("base")).toBe(1);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -390,6 +435,8 @@
     if (playing("ada")) {
       client.goOffline(entry);
       client.type(entry, client.text(entry) + "ada while away\n");
+      /** Taken while nobody else could possibly have this text. */
+      await client.take(entry);
 
       const held = await client.store(entry);
       if (!held.held)
@@ -443,6 +490,15 @@
       `base=${client.base(entry)} token=${client.token(entry)} ` +
       `text=${JSON.stringify(pocket.text)}`;
     if (said !== 1) throw new Error(`the line is not there exactly once -- ${detail}`);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -474,6 +530,8 @@
      */
     client.goOffline(entry);
     client.type(entry, client.text(entry) + `${me()} was alone\n`);
+    /** Both of them holding text the other cannot have. */
+    await client.take(entry);
     await announce(step(id, "bothlapse", `alone-${me()}`));
     await awaiting(step(id, "bothlapse", `alone-${other()}`));
 
@@ -514,6 +572,15 @@
       `text=${JSON.stringify(client.text(entry))}`;
     if (still("ada was alone") !== 1 || still("grace was alone") !== 1)
       throw new Error(`somebody was said twice -- ${detail}`);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -574,6 +641,15 @@
       pocket.note = "wrote bytes over it";
     }
     pocket.text = client.text(entry);
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}
@@ -674,6 +750,15 @@
       pocket.note = "moved the file on";
       pocket.text = client.text(entry);
     }
+
+    /**
+     * And the other half of every scenario: can this client still be handed
+     * what it was looking at? A file that ends up right is not the whole of
+     * it -- a snapshot naming work that never left this machine is one
+     * nothing else can resolve.
+     */
+    await client.take(entry);
+    await client.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}

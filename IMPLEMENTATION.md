@@ -381,6 +381,44 @@ retried"*, which stops being a problem rather than getting a fix.
 
 `speaking` survives, as the rule that decides draft from current.
 
+## Every test asks two questions, not one
+
+**"Did the file end up right?" is half of it.** The other half is *"can this
+client still be handed what it was looking at?"* — and they fail
+independently. A file can converge perfectly while a snapshot naming work that
+never left one machine is unresolvable for ever, which is the failure a user
+notices as *the assistant cannot see my screen*.
+
+Every browser scenario now ends by asking both, and the offline ones take a
+snapshot **while the room is unreachable**, which is where the property
+actually bites.
+
+### Made true by construction, not asserted
+
+`Collaborator.take` stores what is on screen before naming it — as the file's
+content if the room is reachable, as a draft if it is not. A snapshot of text
+that exists nowhere else names a version nobody can resolve, so the taking is
+what makes it resolvable. That is the flow exactly:
+
+```
+take a snapshot → are the changes synchronized?
+                    no  → keep a draft, name that
+                    yes → write it, name that
+```
+
+### Three things this found immediately
+
+- **A refused write is on the server and rebuildable from it**, and `unsettled`
+  did not know. Same class as the draft gap: neither a refusal nor a draft is
+  ever an entry's version, so the confirmed map cannot answer for either.
+- **A client with no room for an entry is not showing its text**, so there is
+  nothing to compare a rebuild against — but the snapshot must still resolve.
+  Conflating "showed nothing" with "showed empty" made two scenarios fail for
+  the wrong reason.
+- **A reconstruction answers once per ENTRY.** Two snapshots of one file taken
+  at different moments come back as a single answer, so comparing the later
+  one against it silently lies. One request per snapshot.
+
 ## How we will know the whole thing works
 
 Not by the steps passing individually, but by these holding together:
@@ -388,6 +426,9 @@ Not by the steps passing individually, but by these holding together:
 1. **No edit is ever applied twice.** Every scenario asserts its text appears
    exactly once. This is the invariant to be ruthless about — doubling reads as
    corruption in a way that a delay or a stale view never does.
+0. **Every snapshot taken in a session can still be rebuilt by the server**,
+   including ones taken while the client could reach nobody. Asked by every
+   scenario, because it fails independently of everything else on this list.
 2. **No store is ever refused.** Everything lands somewhere.
 3. **Nothing typed is ever unrecoverable**, including through a crash, a
    deletion, a file turning binary, and a machine that never comes back.
