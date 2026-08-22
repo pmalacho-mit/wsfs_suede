@@ -197,4 +197,24 @@ describeLive("a workspace against a live backend", () => {
     );
     expect(workspace.unsettled([transaction])).toEqual([]);
   });
+
+  /**
+   * A draft is on the server and rebuildable from it, which is the whole
+   * reason it exists -- a snapshot naming one has to be portable, or the
+   * assistant cannot be shown what the user is actually looking at.
+   *
+   * It is never any entry's version, though, so the confirmed map alone
+   * would call it unsettled for ever.
+   */
+  it("counts a draft that reached the server as settled", async () => {
+    const { transaction: born, settled: created } = workspace.create("kept.py", "x");
+    await created;
+    await settledWhen(workspace, () => workspace.unsettled([born]).length === 0);
+
+    const { transaction, settled } = workspace.keep("kept.py", "x typed alone");
+    expect(workspace.unsettled([transaction])).toEqual([transaction]);
+
+    await settled;
+    expect(workspace.unsettled([transaction])).toEqual([]);
+  });
 });

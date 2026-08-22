@@ -189,10 +189,26 @@ A draft is now excluded from `accepted` while remaining a valid `predecessor`,
 which is exactly the distinction those two things were always for: one is *what
 the file is at*, the other is *what to diff against for storage*.
 
-**A draft has to be awaited.** `send` answers synchronously, so the draft's
-write was still in flight when the caller read it back — a 404 that looked like
-the draft had not been recorded at all. `store` awaits it; `send` still does
-not, and says so.
+**A landed draft was still reported as unreachable.** `unsettled` decides
+whether a snapshot can be rebuilt on the server by looking for its tokens in
+the confirmed map — and a draft is kept rather than applied, so it is never any
+entry's version and would have been called unreachable for ever. That is
+exactly the snapshot drafts exist to make portable, so the assistant would have
+been told it could not be shown what the user was looking at.
+
+The workspace now remembers the drafts it has seen land, and `unsettled`
+counts them. In memory only: a reload understates what the server can rebuild
+rather than overstating it, which is the safe direction, and step 5 is where it
+gets persisted.
+
+### One thing recorded here that turned out to be wrong
+
+An earlier version of this section said *"a draft has to be awaited"*. It does
+not. `send` answers synchronously and hands back the transaction, which is what
+a snapshot needs and all it needs. `store` waits because `store` IS the
+submit-and-wait method — it does the same for an ordinary write — not because
+drafts are special. The 404 that prompted the claim was a test reading the draft
+back immediately, not a property of the design.
 
 **Confirm.** Nine backend tests in `tests/drafts.py`; scenario 6 in the browser
 now asserts the whole contract — the store is held, the draft reads back equal
