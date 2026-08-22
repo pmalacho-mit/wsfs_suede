@@ -1050,3 +1050,130 @@
     <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
+
+<Sweater
+  name="merges work from a session that ended before the file moved on"
+  body={async (harness) => {
+    /**
+     * `SCENARIOS.md` D2, and the decision recorded against it: old local work
+     * ALWAYS merges, with no threshold. The version before the merge is
+     * stored, so the state it merged into is recoverable -- silent merging is
+     * never destructive, only occasionally surprising, and the way back
+     * exists.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "later", "shared\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("shared"));
+
+      /** Ada types where nobody can see her, and her session ends. */
+      client.goOffline(entry);
+      client.type(entry, client.text(entry) + "ada that morning\n");
+      await client.dispose();
+      await announce(step(id, "later", "gone"));
+
+      /** Grace has the whole file to herself, and moves it on. */
+      await awaiting(step(id, "later", "moved"));
+
+      /** Ada comes back much later, onto a file that is not what she left. */
+      const returning = await joined(harness);
+      await returning.open(entry);
+      await until("both mornings to be in one file", () =>
+        returning.text(entry).includes("ada that morning") &&
+        returning.text(entry).includes("grace that afternoon"),
+      );
+
+      const said = (needle: string) => returning.text(entry).split(needle).length - 1;
+      harness.expect(said("ada that morning")).toBe(1);
+      harness.expect(said("grace that afternoon")).toBe(1);
+      pocket.text = returning.text(entry);
+      pocket.note = "merged, each once";
+
+      /** The state before her work returned is still there to go back to. */
+      const before = returning.token(entry);
+      if (before == null) throw new Error("nothing to go back to");
+      harness.expect(await returning.reads(entry, before)).toContain("grace that afternoon");
+      await returning.take(entry);
+      await returning.rebuildable();
+    } else {
+      await awaiting(step(id, "later", "gone"));
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("shared"));
+      await until("the room to speak", () => client.speaks(entry));
+      client.type(entry, client.text(entry) + "grace that afternoon\n");
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`would not store: ${stored.why}`);
+      await announce(step(id, "later", "moved"));
+      pocket.note = "had it to herself";
+      await client.take(entry);
+      await client.rebuildable();
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="keeps the room when the file is renamed underneath it"
+  body={async (harness) => {
+    /**
+     * `SCENARIOS.md` H1. Rooms are keyed by entry id, not by path, so a
+     * rename is nothing to them -- which is worth a test precisely because it
+     * is the kind of thing that quietly stops being true.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "renamed", "before the rename\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () =>
+      client.text(entry).includes("before the rename"),
+    );
+    await announce(step(id, "renamed", `open-${me()}`));
+    await awaiting(step(id, "renamed", `open-${other()}`));
+
+    if (playing("grace")) {
+      await client.workspace.move("renamed.py", "renamed-again.py").settled;
+      await announce(step(id, "renamed", "moved"));
+    } else {
+      await awaiting(step(id, "renamed", "moved"));
+      await until("the new name to arrive", () =>
+        client.workspace.index().paths().includes("renamed-again.py"),
+      );
+
+      /** Still the same room, still able to write the file back. */
+      await until("the room to speak", () => client.speaks(entry));
+      client.type(entry, client.text(entry) + "typed after the rename\n");
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`the rename took the room: ${stored.why}`);
+      pocket.note = "same room, new name";
+      pocket.text = client.text(entry);
+      await announce(step(id, "renamed", "stored"));
+    }
+
+    if (playing("grace")) {
+      await awaiting(step(id, "renamed", "stored"));
+      await until("the typing to arrive", () =>
+        client.text(entry).includes("typed after the rename"),
+      );
+      harness.expect(client.text(entry).split("typed after the rename").length - 1).toBe(1);
+      pocket.text = client.text(entry);
+      pocket.note = "saw it under the new name";
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>

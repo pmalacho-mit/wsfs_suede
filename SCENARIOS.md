@@ -311,28 +311,45 @@ makes deletion unreliable; option 3 makes deletion depend on who is looking.
 
 # Where the current design stands
 
-| scenario | handled today? |
+| scenario | covered by |
 |---|---|
-| A1–A4 | yes — covered by scenarios 1 and 4 in the browser suite |
-| B1 | rule exists (a detached room may not store) but C1 option 3 does not |
-| B2 | guarded by a 600ms timer rather than by asking; **should be an exact check** |
-| B3 | yes |
-| B4–B5, E2–E3, E6 | **no — requires local persistence, which is not installed** |
-| C1–C2 | yes — scenarios 5 and 7 pass |
-| D1 | yes |
-| D2 | **no — no threshold, no draft affordance; it silently auto-merges** |
-| D3 | **no — nothing stores on open** |
-| E5 | untested |
-| F1, F4 | yes — scenarios 3 and 8 |
-| F2 | **no — each client repairs independently** |
-| G1–G5 | partially; no room registry, no server-side seeding |
-| H1, H3 | yes |
-| H2 | untested |
+| A1–A4 | 1, 4 |
+| B1, B2 | 6 |
+| B3 — server lost, room kept | **not covered** — hard to simulate in-browser without a proxy switch |
+| B4, B5 | 10 |
+| C1, C2 | 5, 7 |
+| D1 | 2 |
+| D2 — the morning/afternoon merge | 14 |
+| D3 — shared but never stored | 13 |
+| D4 | 5, 7, 14 |
+| D5 | unavoidable, by definition |
+| D6 | 12 |
+| E1–E4 | 10 |
+| E5 — two tabs | 11 |
+| E6 — reloading is a way out of being ahead | 10 |
+| F1, F2 | 3 |
+| F3 | required by design: a client with a document joins the room before writing |
+| F4 | 8 |
+| F5 — a snapshot restored over an open file | **not covered** |
+| G1–G5 | the keeper's tests, and every scenario's first open |
+| H1 — renamed while open | 15 |
+| H2 — deleted while open | 12 |
+| H3 — became binary | 8 |
+| H4 — restored while open | **not covered**, same as F5 |
 
-The three gaps that are about **losing or duplicating work**, in priority
-order: F2 (independent repairs can double content), B4/E2 (no local
-persistence, so a crash loses work), D3 (shared work nobody stored).
-Everything else is a matter of polish or of surprise rather than of damage.
+And the second question, asked by every scenario: **every snapshot taken can
+still be rebuilt by the server**, including ones taken while the client could
+reach nobody.
+
+**All three gaps that were about losing or duplicating work are closed.** F2
+— independent repairs doubling content — went when the server took over
+carrying text in. B4/E2 — a crash losing work — went with local persistence.
+D3 — shared work nobody stored — is stored by whoever opens the file next.
+
+What is left uncovered is three scenarios, and none of them can lose or
+duplicate anything: a client that loses the server but keeps the room (B3),
+and a restore landing on an open file (F5/H4). Both are worth a test; neither
+is a hole in the design.
 
 **Update, fourth session.** The intermittency that made several of these hard
 to read was a single bug, and it was in neither the stream nor the room: a

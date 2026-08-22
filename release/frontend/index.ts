@@ -50,7 +50,7 @@ export type { Timing } from "./loop";
  * being able to test without a network.
  */
 export * as rooms from "./rooms";
-export type { Standing, Verdict } from "./rooms";
+export type { Reach } from "./rooms";
 
 export { provider } from "./adapters/files";
 export type { FileProvider } from "./adapters/files";
