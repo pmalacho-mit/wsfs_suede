@@ -1,13 +1,27 @@
 # Where the collaboration work is, and what to pick up
 
-Written across three sessions. The second ended with a large amount unverified,
-because the docker runtime wedged before any of it could be run in a browser.
-**The third session ran all of it.** The wedge turned out to have a mechanical
-cause and is fixed; the four original scenarios still pass against the extracted
-protocol; and the run found one real bug, which is written up as finding 5.
+Written across four sessions. The design is settled and built; every scenario
+in `SCENARIOS.md` is either covered by a test or named here as uncovered, and
+the two that are uncovered cannot lose or duplicate anything.
 
-What is left unverified is now small and named, in *What is not verified*, and
-the honest summary of the rest is the table in *Verified results*.
+**Read `SCENARIOS.md` first** if you want to know what the system is supposed
+to do, `SCENARIOS-REVISITED.md` for the decisions taken against it,
+`IMPLEMENTATION.md` for how each step went, and this for where things stand.
+
+### Where it stands
+
+| suite | |
+|---|---|
+| browser scenarios, two browsers | **16 of 16** |
+| `./tests/run.sh` | **247** |
+| `npx vitest run` | 101 |
+| live, against a real backend | 11 |
+| `npm run check` | 1822 files, 0 errors |
+
+Every scenario asks two questions, not one: **did the file end up right**, and
+**can this client still be handed what it was looking at**. They fail
+independently, and the second one is the failure a user meets as *the assistant
+cannot see my screen*.
 
 ---
 
@@ -113,176 +127,110 @@ the table below was produced this way.
 
 ---
 
-## What was built
+## What the design is now
 
-### Backend — `samples/backend/app.py`
+Four documents, and this is the one that says where things stand. `SCENARIOS.md`
+enumerates every state two clients and a server can be in;
+`SCENARIOS-REVISITED.md` records the decisions taken against it;
+`IMPLEMENTATION.md` is the work, step by step, including what each step turned
+up.
 
-Two new routes on the sample host (not on `release/`):
+### Three rules everything rests on
 
-- **`GET /liveblocks/token?rooms=...`** — mints a per-user Liveblocks token
-  server-side from `LIVEBLOCKS_SECRET_KEY`. The secret never reaches a browser.
-  Wired through `samples/compose.yml`, whose value is the placeholder the
-  developer's proxy swaps on the way out.
-- **`PUT|GET /rendezvous/{key}`, `DELETE /rendezvous`** — test scaffolding.
-  Set-if-absent; first proposal wins and everybody gets it. This is the only
-  channel the two browsers use to agree on anything, because every other channel
-  between them is the thing under test. Entries age out after 600s; `DELETE`
-  makes it deterministic and the suite calls it before each run.
+1. **Content that came out of an editor moves as a Yjs update, never as text.**
+   Typing text into a document creates NEW characters, so the same work
+   arriving twice survives twice. Updates carry identity and merge once. Only
+   content that was never in an editor — a kernel's output, an upload, a
+   restore — is diffed in, and that is safe precisely because no second copy
+   of it exists anywhere.
+2. **The server is the only writer of a room's `base`, and the only party that
+   carries text into a room.** Clients type and store; they never reconcile.
+3. **A client whose text has reached nobody does not store it as the file.** It
+   keeps it as a draft instead — durable, addressable, and asserting nothing
+   about what anybody is looking at.
 
-`vite.config.ts` proxies both.
+### The four rungs a keystroke climbs
 
-**Verified:** token endpoint returns a real 779-byte JWT through the proxy, from
-the host and from inside the backend container.
+| rung | where | survives | visible to |
+|---|---|---|---|
+| typed | browser memory | nothing | nobody |
+| kept | `y-indexeddb` | tab close, crash, reboot | nobody |
+| shared | the Liveblocks room | this client leaving | the room |
+| stored | a version in wsfs | everything | everyone, forever |
 
-### Frontend — `samples/frontend/src/lib/collab/`
+### Backend — `samples/backend/`
 
-- **`collaboration.ts`** — which browser this is (read off the report driver's
-  `?reportServer=<url>/<browser>` param), which part it plays, and the
-  rendezvous primitives. Chromium plays Ada, Firefox plays Grace. Two stable
-  users only, for the MAU cap.
-- **`room.svelte.ts`** — **the protocol itself, and the thing to read first.**
-  One `Room` per file: the shared document, the provider under it, `Standing`
-  kept in the document, the seeding election, confirming a verdict against the
-  file, and the repair. `Rooms` is the per-workspace registry, with ONE stream
-  subscription feeding every room.
-- **`collaborator.ts`** — now a thin harness over `Rooms`: an identity to
-  connect as, a network that can be taken away and given back, and the
-  snapshot/reconstruction round trip. It no longer contains a protocol of its
-  own.
-- **`Reach.test.svelte`** — can a browser reach Liveblocks at all. Kept separate
-  so that hop fails loudly and by itself rather than as nine timeouts.
-- **`Shared.test.svelte`** — the scenarios.
+- **`rooms.py`** — what a room owes its file, as a pure decision: seed, rebase,
+  carry, or nothing. No network, so all of it is tested directly.
+- **`keeper.py`** — the same decision, executed. One `asyncio` lock per entry,
+  which is what settles the seeding race the browsers used to run among
+  themselves and could not win.
+- **`hosting.py`** — Liveblocks over plain `httpx`, as the token mint already
+  reaches it. Not through the published SDK: it asserts the shape of the secret
+  before sending anything, and this host is handed a placeholder its egress
+  proxy swaps on the way out.
+- **`POST /rooms/{entry}`** fills a room from the file; **`POST
+  /rooms/{entry}/updates`** puts a client's own update into the room for it.
 
-**The second session's central move was extracting `room.svelte.ts`.** Before
-it there were two implementations of the protocol: the one the suite proved and
-a second, subtly different one inside `Workspace.svelte` — and the second was
-the only one a user ever touched. They are now the same code, so the
-two-browser suite proves what ships.
+### Backend — `release/backend/`
 
-### Frontend — `Workspace.svelte`, wired at last
+- **Drafts** live in the refusal store, with reason `NOT_SHARED`. One table for
+  everything submitted and not adopted, so reconstruction resolves a draft with
+  no new code — which is the whole point of them.
+- **`cleared`**, owned by the server, and `GET /workspaces/{id}/drafts` for what
+  is still only where it was typed.
+- **`migrate.py`** — adds columns the code declares and the database lacks,
+  nullable then filled then constrained, and refuses the rest.
 
-`SharedTextFile` is now built on a `Room`. What that changed:
+### Frontend
 
-- **Bound only after the document has arrived.** It used to assign
-  `file.sourceSync` on the Liveblocks room saying `"connected"`, which is the
-  SOCKET being up — a strictly earlier moment than the Yjs provider having the
-  document. `MonacoBinding` makes the model say whatever the `Y.Text` says the
-  instant it is constructed, so binding an unsynchronised document does not
-  show an empty file, **it makes one**, and the next store writes that over the
-  real content. `Rooms.open` does not resolve until synced *and* reconciled.
-- **`put` refuses until the room is ready.** The `ready` check that was
-  commented out in the door (with a note saying add it back if the design needs
-  it) is back. It was right; what was missing was something that could answer
-  it, and `Room.ready` — synced AND reconciled — is that.
-- **`FileOverride.replaced` has a consumer.** Bytes over an open text file are
-  TAKEN by the door, because taking them is the only way to learn the token the
-  bytes landed at, which is what the room has to be told. The write still
-  lands; the room stands down; `FileView` swaps the editor for the preview and
-  says what happened.
-- **`store` can answer that it did not.** See finding 4. A held write leaves
-  the file `dirty`, which is exactly true.
-- **Typing is wired to storing.** `dirty` was never set to `true` anywhere and
-  `typingDebouncer` was armed nowhere, so nothing autosaved. `UserEdits.edited`
-  now sets `dirty` and enqueues a debounced store — and it is `UserEdits`
-  rather than `onDidChangeModelContent` precisely so a peer's keystroke
-  arriving through y-monaco is not stored as this person's work.
-
-### Release — `release/frontend/`
-
-- **`rooms.ts`** — a fourth finding recorded in the docstring, and `speaking`
-  added beside `settled`.
-- **`workspace.ts`** — `at(entry, version)`: what one file held at one version.
-  A reconciling consumer needs two of these at once, both older than anything
-  it is showing, and `read` only answers for a file as it stands. Without it
-  the component would have needed a transport plumbed through ten call sites.
-- **`contract.ts`** — `Versions`, `Reconstructed`, `ReconstructionRequest`,
-  `ReconstructionResponse` named, so the reconstruction round trip is typed
-  from the generated schema rather than by hand.
-
-### What the third session changed
-
-Small, and all of it in service of running what was already there.
-
-- **`room.svelte.ts`** — `#settling`, and `reattach` waiting before it
-  reconciles. Finding 5. `send` grew a third `why`.
-- **`sweater-vest-suede/report/index.ts`** — browsers are prepared **serially**.
-  This is the docker wedge fix, and it is one line plus the reason for it.
-- **`Shared.test.svelte`** — `until` takes an optional `seen()` and puts what it
-  actually observed into the timeout message. Both intermittent scenarios were
-  unreadable without it: "waited 30000ms for the stream to carry the store" says
-  only that a condition stayed false, and `saw token=… wanted=…` is what turned
-  that into a finding. Scenario 6's two final assertions now throw with the
-  verdict log and the text attached, for the same reason.
+- **`room.svelte.ts`** — the provider, local persistence, the rule about when
+  this client may write the file back, and the one thing only a reader can find
+  out: that the file stopped being text. Everything else went.
+- **`rooms.ts`** in the release is now one rule, `speaking`. What it used to
+  hold is described in its own docstring.
+- **`workspace.ts`** — `keep` beside `write`, and `unsettled` answering for
+  everything the server has recorded rather than only what each entry is at now.
 
 ## Verified results
 
-All of the following was run in the third session, against the stack described
-at the top of this file.
+Each scenario is run as its own paired chromium+firefox run — see *Run the
+scenarios one at a time*, which is also how the cascade in a full run is
+avoided.
 
-### The two-browser suite
-
-Each scenario run as its own paired chromium+firefox run, per *Run the scenarios
-one at a time*. Both browsers must pass for a row to be green.
-
-| # | scenario | result |
-|---|----------|--------|
-| 1 | converges when both type into one open file | **pass** |
-| 2 | shows a late joiner what was typed before they opened it | **pass** |
-| 3 | notices when somebody writes around the room | **pass** |
-| 4 | does not call it a conflict when both store from the same room | **pass** |
-| 5 | merges an unnoticed lapse without doubling what was typed during it | **pass** |
-| 6 | holds a store while the room is not reaching anybody | **pass** — 0/4 before finding 5 was fixed, 6/7 after |
-| 7 | both lapse at once, both type, and both come back | **pass** |
-| 8 | a write that is not text takes the file away from the room | **pass** |
-| 9 | rebuilds what a client was looking at after the file has moved on | **pass** |
-
-**The four original scenarios pass against the extracted protocol.** That was
-the first question the second session left open, and the answer is that
-`room.svelte.ts` is not a regression.
-
-**Scenarios 5 and 7 pass, which is the offline-merge design working.** A member
-can lose the room, type, and come back — alone or at the same time as the other
-— and each line arrives exactly once.
-
-**Scenario 6 is finding 4 observed rather than reasoned.** Ada detaches, types,
-and *is* refused the store; she comes back and the store lands; `ada while away`
-appears exactly once and no repair is recorded. It also found finding 5 on the
-way — see below.
-
-**All nine pass, in both browsers.** Scenarios 8 and 9 were intermittent (4/6
-and 3/6) until the fourth session found what they had in common; see *The view
-could be rewound by its own queued create* below. Each has since run 10 of 10.
-
-### Everything else
-
-- `./tests/run.sh` — **193 passed** in 97s.
-- `npx vitest run` — **113 passed, 16 skipped**.
-- `cd samples/frontend && npm run check` — **1821 files, 0 errors**, 20 warnings,
-  all pre-existing and none in the collaboration code.
-- `npm run test:browser -- --component Reach` — **2 passed** in chromium and
-  **2 passed** in firefox, separately. A browser container mints a token through
-  the proxy and opens a websocket to a real Liveblocks room.
-- `GET /liveblocks/token` returns a real JWT from the host, with
-  `X-User-Email` — which is **required**, and a request without it is a 422.
-- `npm run test:browser -- --component Sample --browser chromium` —
-  **15 passed, 3 failed**. See *The sample shell has three failures* below.
-
-## What is not verified
-
-Short now, and named.
-
-- **`Workspace.svelte` in front of a real Liveblocks room.** Everything under
-  *Workspace.svelte, wired at last* is exercised by `Sample`, which uses the
-  `solo()` fake room — and in the third session three of those tests fail. The
-  component has still never been driven against a real provider by anything
-  other than a person.
-- **The retry-a-held-store gap**, which is still unimplemented rather than
-  unverified. See *Known problems*.
-- **`Runner.test.svelte`**, recorded two sessions ago as mid-edit. `npm run
-  check` reports 0 errors across 1821 files, so it is either fixed or outside
-  the check's scope; still worth one look.
+| # | scenario |
+|---|---|
+| 1 | converges when both type into one open file |
+| 2 | shows a late joiner what was typed before they opened it |
+| 3 | notices when somebody writes around the room |
+| 4 | does not call it a conflict when both store from the same room |
+| 5 | merges an unnoticed lapse without doubling what was typed during it |
+| 6 | holds a store while the room is not reaching anybody |
+| 7 | both lapse at once, both type, and both come back |
+| 8 | a write that is not text takes the file away from the room |
+| 9 | rebuilds what a client was looking at after the file has moved on |
+| 10 | keeps what was typed when the tab holding it goes away |
+| 11 | treats two tabs of one browser as two clients |
+| 12 | keeps what was on screen when the file is deleted underneath it |
+| 13 | stores work that reached the room and never reached the file |
+| 14 | merges work from a session that ended before the file moved on |
+| 15 | keeps the room when the file is renamed underneath it |
+| 16 | reaches the others through the host when the room cannot be reached |
 
 ## Six findings
+
+**Read these as history with one live rule in them.** Findings 1, 2, 3 and 6
+are about machinery that no longer exists: the client-side verdicts, the
+bookkeeping about whose write was whose, and the repair-by-diff they drove. All
+of it went when the server took over carrying text into rooms. They are kept
+because each one is a way of getting this wrong that looked reasonable at the
+time, and because finding 6 is the reason to expect them to come back in new
+clothes.
+
+**Findings 4 and 5 are still rules.** A client that cannot reach the others
+must not store as the file, coming or going. What changed is the consequence:
+the work is kept as a draft and handed to the host, so being unable to reach
+the room costs the direct route and nothing else.
 
 None of the first three would have shown up in one browser. The fourth would
 not have shown up in one *session*. The fifth would not have shown up without
@@ -414,178 +362,61 @@ new code is going.
 
 ## Known problems
 
-**The view could be rewound by its own queued create — FIXED.** This was
-recorded here as *"the stream sometimes does not carry a write"*, which was a
-guess from the symptom and was wrong. No event was ever lost.
+**Two scenarios have no test.** Neither can lose or duplicate anything.
 
-A queued create leaves the outbox when the STREAM carries it, not when the
-response acknowledges it -- deliberate, so an entry is never in neither place.
-That leaves a window in which the server has confirmed the create AND writes
-after it while the create is still queued locally. `effective.of` laid that
-queued create back over the entry with `proposed()`, which sets ALL FOUR of an
-entry's versions to the create's own transaction. Right for an entry that
-exists nowhere else; a rewind for one the server has moved on. Only the stream
-drains the outbox, so it stayed rewound rather than righting itself.
+- **B3 from the client's side** — a client that loses the SERVER and keeps the
+  room. Hard to simulate in a browser without a switch on the transport. The
+  other direction (host reachable, room not) is scenario 16.
+- **F5 / H4** — a snapshot restored over a file somebody has open. It is a
+  server-origin write, so it takes the same path as a kernel's output, which
+  scenario 3 covers; the restore case itself is untested.
 
-`proposed`'s docstring already said *"a queued create has no confirmed entry to
-lay over"*. That was a precondition and nothing checked it. It does now, and
-`tests/frontend/view.test.ts` holds a deterministic reproduction.
+**The `recorded` set is in memory.** It is what lets `unsettled` answer for
+drafts, refusals and superseded writes, and a reload loses it — which
+understates what the server can rebuild rather than overstating it. It belongs
+with the outbox when that is persisted.
 
-**Two intermittent failures with unrelated symptoms turned out to be one bug.**
-Scenario 9 was a token that would not advance; scenario 8 was a room never told
-its file had turned binary -- because it asked for its entry's version, got the
-create's, and computed the wrong gap. Worth remembering as the normal shape of
-this rather than a coincidence.
+**Drafts are kept forever and are not deduplicated.** `predecessor` chains a
+run of one client's drafts so storage holds only what was typed since, which
+bounds a long offline session. Same-client supersession and digest dedup are
+not built.
 
-**The sample shell has three failures.** `--component Sample --browser chromium`
-is 15 passed, 3 failed:
+**A migration that is not additive still needs a person.** `widen` adds
+columns and refuses everything else — a column the code no longer declares is
+left alone, and a NOT NULL column with no plain default raises at startup
+rather than inventing what the old rows held. That is the right refusal, but it
+is a refusal.
 
-- *test 10* — `the shell creates a file the way a person does, and says nothing
-  in the console` fails because something logs `room <id> did not open`. That is
-  `Workspace.svelte`'s own catch, so **a room genuinely failed to open**, and it
-  failed fast rather than timing out — which points at the provider constructor
-  throwing rather than a sync that never came.
-- *test 13* — `an open buffer is what a reader gets, and what reaches the
-  server` times out waiting for the other client to have the typing.
-- *test 18* — `a snapshot resolves what the user has not stored, in one pass`
-  times out waiting for the file to go dirty. **This is the test the second
-  session flagged as unknown, and the answer is that it still fails.**
+**The sample database is `tmpfs`** and wipes on every `sample-db` restart. That
+is deliberate, and now much less dangerous than it was, because the schema is
+brought up to date at startup rather than silently disagreeing.
 
-`solo()` in `samples/frontend/src/lib/liveblocks.ts` is the first suspect and
-its own docstring names this outcome: it is written against `kInternal` and the
-ydoc message shape, neither of which Liveblocks considers public, and it warns
-that an upgrade will look like "a constructor throwing or a file that never
-opens". Worth checking before anything else, because if `solo()` is broken then
-all three failures have one cause and none of them is about `Workspace.svelte`.
+**`Room.attached` and `Room.replaced` are `$state` so a banner can exist, and
+none does.** A user whose typing is not reaching anybody should be told,
+particularly now that `send` returns a sentence saying exactly why.
 
-Against that: `UserEdits` sets `dirty` from `onDidChangeModelContent` and does
-not need a shared text to do it, so test 18 is not *obviously* downstream of a
-missing room. Do not assume the single cause without checking that one.
-
-**The suite is flaky in a full run, and much less so one scenario at a time.**
-4 of 7 full runs in the first session were fully green. Running scenarios
-singly (see *Run the scenarios one at a time*) removes the cascade below
-entirely and leaves only the stream problem above. Two distinct shapes:
-
-- *Cascade.* The browsers run these in the same order, so scenario N pairs with
-  scenario N. One test hanging desynchronises the pair and the partner times out
-  on a barrier one test later. Read the first failure, not the loudest.
-- *Unexplained.* `converges when both type into one open file` sometimes ends
-  with every line twice — captured evidence:
-  `"start\nada was here\ngrace was here\nada was here\ngrace was here\n"`, with
-  the two browsers not yet agreeing at assertion time. **It passes 4/4 in
-  isolation and only fails in the full run**, so it is interference, not the
-  scenario.
-
-  **A specific hypothesis, and the instrument for it.** `Sweater.svelte` reloads
-  the page by itself — `tryReload()`, guarded only by a `reload-after-test-change`
-  URL param, fired when `testHasChanged(props, index)` sees a negative index,
-  which happens when more `onMount` subtractions land than there were additions.
-  A reload re-runs every scenario **on rooms that already hold the first run's
-  text**, and each browser would then append its line a second time. That
-  produces exactly the captured string, in exactly that interleaved order.
-
-  The counter that was here before could not have seen it: `bodies` lived in the
-  *instance* script, so a reloaded page starts it again at zero and reports
-  `bodies=1` either way. It is now at **module** scope alongside `loads`, a
-  `sessionStorage` counter that survives a reload, and both are stamped into the
-  failure message by `provenance()`. **`loads>1` in a failure message confirms
-  the hypothesis outright.** Leave the instrumentation until it is understood.
-
-**`Room.ready` is not consulted by everything that should.** `put` waits on it;
-the editor binds on it. But a room that goes on to be *replaced* or to fall out
-of touch has no reactive consumer other than `FileView`'s preview swap — there
-is no "you are offline" affordance anywhere, and `Room.attached` is `$state`
-purely so that one can be added.
-
-**A held store is never retried.** `store` answering `{ held: true }` leaves the
-file `dirty`, correctly, but nothing re-arms the debouncer — so the work waits
-for the next keystroke rather than for the room to come back. The clean fix is
-an effect on `Room.speaks` that flushes when it turns true; it wants
-`$effect.root` because `SharedTextFile` is a plain class, which is why it is not
-done here.
-
-**The migration gap — CLOSED for the case that kept biting.** `create_all`
-creates missing tables and does not add columns to tables that already exist.
-It bit twice: `workspace_id` on the refused tables, then `cleared` on the same
-ones, both times as a 500 in the middle of somebody's work.
-
-`release/backend/migrate.py` now closes the safe half. `widen` adds columns the
-code declares and the database lacks, **nullable first, then filled, then
-constrained** -- adding a NOT NULL column to a table with rows in it fails
-outright, and adding one with a DEFAULT silently rewrites every existing row.
-It runs at startup and says what it added.
-
-What it refuses to do is the rest. A column the code no longer declares is left
-alone, because it may hold the only copy of something and dropping it to make
-the schema match is a data decision nobody asked for. A NOT NULL column with no
-plain default raises `Unfillable` at startup rather than inventing what the old
-rows held -- a refusal to start, which is where that failure belongs.
-
-The original wording follows, because the shape of the problem is worth
-keeping: When `workspace_id` was added to the
-`wsfs_refused_*` tables, the long-running sample database still had the old
-shape and every refused transaction 500'd with `column "workspace_id" of
-relation "wsfs_refused_deletions" does not exist`. Recreating `sample-db` fixed
-it because it is tmpfs. **There is no migration story at all**, and the next
-schema change will do this again somewhere that cannot just be wiped.
-
-**`samples/frontend/src/lib/Runner.test.svelte`** was recorded last session as
-mid-edit and not compiling (`Type '{}' is missing … kernelPool, shared`).
-`npm run check` now reports **0 errors across 1821 files**, so either it was
-fixed in between or it is outside the check's scope — worth one look rather
-than trusting this note.
-
----
+**The sample shell.** `--component Sample --browser chromium` was 15 passed, 3
+failed when it was last run in full, all three plausibly one cause: `solo()`,
+the fake Liveblocks room, is written against internals its own docstring warns
+may move. Worth checking before trusting anything it says.
 
 ## What to pick up
 
-In order. The first two are about the file being right; the rest is about not
-frustrating anybody.
+**The two untested scenarios above**, which is the smallest honest gap.
 
-**1. Find out why a write sometimes never arrives as a stream event.** See *The
-stream sometimes does not carry a write*. This is the only open problem where
-the user loses something real: a client can hold a file it believes is stored,
-or miss that a file stopped being text, and nothing anywhere retries or
-notices. Everything else on this list is a delay or an affordance. Start from
-`confirmed.ts` and the subscription in `Rooms`, and note that the storing
-client's own write going missing rules out a good deal.
+**The sample shell's three failures**, since `Workspace.svelte` is the consumer
+a user actually touches and its collaboration path has no automated coverage
+until they pass.
 
-**2. Replace `CONVERGING` with an acknowledgement.** `room.svelte.ts`. It is
-now load-bearing in **two** places — seeding, and `#settling` from finding 5 —
-and both are asking the provider the same question it has no API for: *has this
-document been round the room yet?* 600ms is a guess that happens to work on a
-fast network between two containers on one machine. It is the single change
-that would most improve how this behaves for a real user on a real connection,
-because it is the only place where being slow turns into being wrong.
+**An affordance for being out of touch.** Everything needed is already
+reactive; nothing renders it.
 
-**3. Fix the sample shell's three failures**, and find out first whether
-`solo()` is the single cause. See *The sample shell has three failures*. Until
-this is green, `Workspace.svelte` — the only one of the two consumers a user
-ever touches — has no automated coverage of its collaboration path at all.
+**Persist the outbox and the `recorded` set**, at which point the two-tab rule
+starts to matter for real: *nothing may assume an entry in the outbox was
+written by the tab that finds it.*
 
-**4. Retry a held store.** Unchanged and still the clearest user-facing gap: a
-store refused because the room was out of touch leaves the file `dirty`,
-correctly, but nothing re-arms the debouncer, so the work waits for the next
-keystroke rather than for the room to come back. With finding 5 there is now a
-second reason to be held — settling — which makes this more visible, not less.
-The clean fix is an effect on `Room.speaks` that flushes when it turns true; it
-wants `$effect.root` because `SharedTextFile` is a plain class.
-
-**5. Give being out of touch an affordance.** `Room.attached` and
-`Room.replaced` are `$state` precisely so a banner can exist, and none does.
-A user whose typing is not going anywhere should be told, particularly now that
-there are three distinct reasons a store can be held and `send` already
-returns the right sentence for each.
-
-**6. `y-indexeddb`.** Not installed, not wired. It is for surviving a *tab
-close*, which is a different thing from the network lapse the offline scenarios
-simulate. When it lands there are **two** `synced` events, and "the document is
-empty" is only a fact after both — so `Room.attach` grows a second thing to
-wait for, and `Rooms.open` is the only place that needs to change.
-
-**7. A migration story.** Unchanged from two sessions ago and still nothing;
-see *The migration gap*.
+**Draft retention.** They are forever by design. Supersession within one
+client's own lineage and digest dedup are the two bounded wins.
 
 ## Costs
 
