@@ -178,6 +178,21 @@ export class Collaborator {
     return undefined;
   }
 
+  /**
+   * Work the server has been told about and nobody has said got out.
+   *
+   * The one question a client cannot answer for itself: the case worth
+   * reporting is a machine that never came back.
+   */
+  async stranded(): Promise<string[]> {
+    const answer = await fetch(`${BACKEND}/workspaces/${this.workspaceId}/drafts`, {
+      headers: { "X-User-Email": this.email },
+    });
+    if (!answer.ok) throw new Error(`stranded: ${answer.status}`);
+    const { drafts } = (await answer.json()) as { drafts: { transaction: string }[] };
+    return drafts.map(({ transaction }) => transaction);
+  }
+
   /** What the server says this entry holds, now or at one version. */
   async reads(entry: string, version?: string): Promise<string> {
     const held =

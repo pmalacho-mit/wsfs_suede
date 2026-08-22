@@ -39,6 +39,7 @@ from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 from . import reconstruct, refusals, service
 from .blobs import Blobs
 from .contract import (
+    Clearing,
     Create,
     InitializeRequest,
     InitializeResponse,
@@ -47,6 +48,8 @@ from .contract import (
     Refusal,
     Rejected,
     Rejection,
+    Stranded,
+    StrandedDrafts,
     StreamEvent,
     Submitted,
     TextContentResponse,
@@ -648,6 +651,37 @@ def create_router(
                     backend, session, workspace_id, entry_id, content
                 ),
             )
+
+    @router.get("/workspaces/{workspace_id}/drafts")
+    async def stranded_drafts(
+        workspace_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> StrandedDrafts:
+        """Work that is still only where it was typed.
+
+        Uncleared drafts, which is the one question a client cannot answer for
+        itself: the case worth reporting is the machine that never came back,
+        and its own record of what it was holding went with it.
+        """
+        async with database.session() as session:
+            return StrandedDrafts(drafts=await refusals.stranded(
+                session, backend.models, workspace_id
+            ))
+
+    @router.post("/workspaces/{workspace_id}/drafts/cleared", status_code=204)
+    async def clear_drafts(
+        workspace_id: Annotated[UUID, APIPath()],
+        body: Clearing,
+        _: UUID = Depends(authorize),
+    ) -> None:
+        """These drafts' work has since reached everybody else.
+
+        Cleared, not deleted. The row is still what that client had, and a
+        snapshot may still name it.
+        """
+        async with database.session() as session:
+            await refusals.clear(session, backend.models, workspace_id, body.transactions)
+            await session.commit()
 
     @router.post("/workspaces/{workspace_id}/reconstruction")
     async def reconstruction(

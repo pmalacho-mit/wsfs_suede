@@ -414,6 +414,31 @@ class ReconstructionRequest(BaseModel):
     entries: list[Versions]
 
 
+class Clearing(BaseModel):
+    """Drafts whose work has since reached everybody else."""
+
+    transactions: list[UUID]
+
+
+class Stranded(BaseModel):
+    """A draft whose work is still only where it was typed."""
+
+    transaction: UUID
+    entry: UUID
+    user_id: UUID
+    at: datetime
+
+
+class StrandedDrafts(BaseModel):
+    """What one client had and nobody else ever got.
+
+    The question drafts exist to answer. A machine that never comes back
+    cannot report its own, which is why the flag is the server's.
+    """
+
+    drafts: list[Stranded]
+
+
 class Reconstructed(BaseModel):
     """What those transactions said -- whichever way each of them went.
 

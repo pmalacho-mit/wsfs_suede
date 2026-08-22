@@ -108,6 +108,14 @@ export type Workspace = {
     content: string | Uint8Array,
     mime?: string,
   ) => Submitting;
+  /**
+   * These drafts' work has since reached everybody else.
+   *
+   * Told to the server rather than remembered here: the case worth reporting
+   * is a machine that never came back, and a note kept only on that machine
+   * goes with it.
+   */
+  cleared: (transactions: Transaction[]) => Promise<void>;
   create: (
     path: paths.Path,
     content: string | Uint8Array,
@@ -370,6 +378,8 @@ export const connect = (options: Options): Workspace => {
         ? created(path, payload, mime)
         : written(entry, payload, mime);
     },
+
+    cleared: (transactions) => transport.cleared(workspace, transactions),
 
     keep: (entry, payload, mime = TEXT) => {
       const held = shown.view.get(entry);

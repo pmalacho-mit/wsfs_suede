@@ -12,6 +12,7 @@ import type {
   Snapshot,
   StreamEvent,
   Submitted,
+  Transaction,
   Version,
 } from "./contract";
 
@@ -36,6 +37,7 @@ export type Transport = {
     bytes: Uint8Array,
     mime: string,
   ) => Promise<void>;
+  cleared: (workspace: Id, transactions: Transaction[]) => Promise<void>;
   follow: (workspace: Id, token: string, reading: Reading) => Subscription;
 };
 
@@ -120,6 +122,10 @@ export const http = (base: string, authorize: Authorized): Transport => {
       json<Response>(
         await posted(`${workspaces(workspace)}/transactions`, request),
       ),
+
+    cleared: async (workspace, transactions) => {
+      await posted(`${workspaces(workspace)}/drafts/cleared`, { transactions });
+    },
 
     content: async (workspace, entry, version) => {
       const query = version === undefined ? "" : `?content=${version}`;

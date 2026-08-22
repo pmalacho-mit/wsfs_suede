@@ -374,3 +374,65 @@ async def record(submission: Any, request: Submitted, reason: str, *logs: type) 
         )
         if row is not None:
             submission.session.add(row)
+
+
+async def clear(
+    session: AsyncSession, models: Models, workspace_id: UUID, transactions: list[UUID]
+) -> None:
+    """Mark these drafts as work that has since reached everybody else.
+
+    Cleared rather than deleted: the row is still the record of what that
+    client had, and a snapshot may still name it.
+    """
+    if not transactions:
+        return
+    for kept in models.refused_content:
+        rows = (
+            await session.exec(
+                select(kept).where(
+                    col(kept.workspace_id) == workspace_id,
+                    col(kept.transaction).in_(transactions),
+                    col(kept.reason) == Refusal.NOT_SHARED,
+                )
+            )
+        ).all()
+        for row in rows:
+            row.cleared = True
+            session.add(row)
+
+
+async def stranded(
+    session: AsyncSession, models: Models, workspace_id: UUID
+) -> list[Any]:
+    """Drafts nobody has said got out, newest first.
+
+    Only drafts. A refusal shares the table and means the opposite thing --
+    the system declining rather than a user's work waiting -- and showing the
+    two as one would be telling somebody their work is stuck when it was
+    simply superseded.
+    """
+    from .contract import Stranded
+
+    waiting: list[Any] = []
+    for kept in models.refused_content:
+        rows = (
+            await session.exec(
+                select(kept)
+                .where(
+                    col(kept.workspace_id) == workspace_id,
+                    col(kept.reason) == Refusal.NOT_SHARED,
+                    col(kept.cleared) == False,  # noqa: E712 -- SQL, not Python
+                )
+                .order_by(desc(col(kept.timestamp)))
+            )
+        ).all()
+        waiting.extend(
+            Stranded(
+                transaction=row.transaction,
+                entry=row.entry_id,
+                user_id=row.user_id,
+                at=row.timestamp,
+            )
+            for row in rows
+        )
+    return waiting

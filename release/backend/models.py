@@ -258,6 +258,19 @@ class RefusedRow(WithID, WithTime, IsAbstractClass):
     utc_offset: int | None = Field(default=None, nullable=True)
     """The client's minutes east of UTC, as on `TransactionRow`."""
 
+    cleared: bool = Field(default=False, nullable=False, index=True)
+    """Whether the work in this row has since reached everybody else.
+
+    Only ever set on a DRAFT, and it is what separates two rows that are
+    identical in storage and opposite in meaning. A draft was made because one
+    client's text had reached nobody; it is cleared when that text has since
+    gone out. Uncleared and old means the work exists here and nowhere else.
+
+    OWNED BY THE SERVER, not by the client that made the draft. The case worth
+    reporting is the one where that machine never comes back, and a flag kept
+    only on the machine dies with it.
+    """
+
 
 class RefusedNameRow(RefusedRow, NamePayload, IsAbstractClass):
     pass

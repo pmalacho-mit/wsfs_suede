@@ -215,13 +215,33 @@ now asserts the whole contract — the store is held, the draft reads back equal
 to what was typed, the file does NOT contain it, and after coming back the real
 store lands with the line appearing exactly once.
 
-### Not done
+### The second half — DONE
 
-The `cleared` flag, and the report of stranded drafts, are not built. Nothing
-depends on them for correctness — an uncleared draft is a redundant row, not a
-wrong one — but *"has my work ever actually got out"* is the question drafts
-exist to answer, and it cannot be asked yet. Same-client supersession and digest
-dedup are also unbuilt; `predecessor` bounds the storage in the meantime.
+**`cleared`, owned by the server.** A draft starts uncleared and is cleared
+when the work in it has since reached everybody else — the same predicate that
+made it, flipped. Cleared rather than deleted: the row is still the record of
+what that client had, and a snapshot may still name it.
+
+**Only drafts made because the room was reaching nobody are cleared.** A draft
+made because the file stopped being this room's text — bytes over it, or a
+deletion — is work that never got out and never will, and marking it cleared
+would hide the one thing worth reporting.
+
+**`GET /workspaces/{id}/drafts` reports what is still only where it was
+typed.** Uncleared drafts, never refusals: same table, opposite meanings, and
+showing them as one would tell somebody their work was stuck when it had
+simply been superseded.
+
+Same-client supersession and digest dedup are still unbuilt; `predecessor`
+bounds the storage of a long offline session in the meantime.
+
+### The migration gap bit again, exactly where the notes said it would
+
+Adding `cleared` to an existing table did nothing — `create_all` creates
+missing tables and does not add columns. Every draft write then 500'd with
+`column "cleared" of relation "wsfs_refused_text_content" does not exist`.
+Recreating the tmpfs database fixed it, as it did last time. **There is still
+no migration story**, and this is now the second schema change to hit it.
 
 ---
 

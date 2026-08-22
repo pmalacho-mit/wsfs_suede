@@ -93,6 +93,29 @@
     }
   };
 
+  /**
+   * The same wait, for something only the server can answer.
+   *
+   * Separate from `until` rather than folded into it: one polls state this
+   * client already holds, the other asks somebody. Conflating them hides a
+   * round trip inside what looks like a local check.
+   */
+  const untilAsked = async (
+    what: string,
+    ask: () => Promise<string>,
+    holds: (said: string) => boolean,
+    within = 30_000,
+  ): Promise<string> => {
+    const deadline = Date.now() + within;
+    for (;;) {
+      const said = await ask();
+      if (holds(said)) return said;
+      if (Date.now() > deadline)
+        throw new Error(`waited ${within}ms for ${what} -- saw ${JSON.stringify(said)}`);
+      await new Promise((carry) => setTimeout(carry, 200));
+    }
+  };
+
   /** A collaborator wired to the shared workspace, torn down with the test. */
   const joined = async (harness: any) => {
     const id = await workspace();
@@ -460,6 +483,17 @@
 
       await client.comeBack(entry);
       await until("the room to speak again", () => client.speaks(entry));
+
+      /**
+       * And the draft is cleared once the work has gone out: the same
+       * predicate that made it, flipped. Uncleared and old is the one thing
+       * worth reporting, so it must not stay set once the work is shared.
+       */
+      await untilAsked(
+        "the drafts to be cleared once the work got out",
+        async () => JSON.stringify(await client.stranded()),
+        (waiting) => waiting === "[]",
+      );
 
       /** And now it may -- the others are holding the same text by then. */
       const stored = await client.store(entry);
@@ -949,6 +983,65 @@
       await client.workspace.remove("deleted.py").settled;
       await announce(step(id, "deleted", "gone"));
       pocket.note = "deleted it";
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="stores work that reached the room and never reached the file"
+  body={async (harness) => {
+    /**
+     * `SCENARIOS.md` D3. Typing that was SHARED but never stored sits at the
+     * room's rung and no further -- safe while the room is alive, gone when
+     * it is evicted. Whoever opens the file next is the one who can still see
+     * it, so they are the one who stores it.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "nobody", "start\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("start"));
+      client.type(entry, client.text(entry) + "shared but never stored\n");
+      await announce(step(id, "nobody", "typed"));
+
+      /** Nobody stores it. Ada's tab simply goes. */
+      await awaiting(step(id, "nobody", "seen"));
+      await client.dispose();
+      await announce(step(id, "nobody", "gone"));
+      pocket.note = "typed it and left";
+    } else {
+      await awaiting(step(id, "nobody", "typed"));
+      await client.open(entry);
+      await until("the typing to arrive", () =>
+        client.text(entry).includes("shared but never stored"),
+      );
+      /** Still only in the room: the file has not been told. */
+      harness.expect(await client.reads(entry)).toBe("start\n");
+      await announce(step(id, "nobody", "seen"));
+      await awaiting(step(id, "nobody", "gone"));
+
+      /** A fresh open, which is where it gets rescued. */
+      const later = await joined(harness);
+      await later.open(entry);
+      const said = await untilAsked(
+        "the file to be told at last",
+        () => later.reads(entry),
+        (text) => text.includes("shared but never stored"),
+      );
+      harness.expect(said).toContain("shared but never stored");
+      pocket.text = said;
+      pocket.note = "stored by whoever opened it next";
+      await later.take(entry);
+      await later.rebuildable();
     }
   }}
 >

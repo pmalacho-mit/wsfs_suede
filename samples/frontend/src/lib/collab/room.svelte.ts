@@ -45,7 +45,7 @@ export type Enter = (
   doc: Y.Doc,
 ) => { provider: Provider; leave: () => void };
 
-/** Asking the server to make this entry's room exist and say what the file says. */
+/** Asking the host to make this entry's room exist and say what the file says. */
 export type Settle = (entry: string) => Promise<void>;
 
 /**
@@ -174,7 +174,17 @@ export class Room {
 
   #provider: Provider | undefined;
   #leave: (() => void) | undefined;
-  #stopKeeping: (() => void) | undefined;
+  #stopKeeping: (() => Promise<void>) | undefined;
+
+  /**
+   * Drafts made because this room was reaching nobody.
+   *
+   * Held until the work in them has gone out, which is the same predicate
+   * that made them, flipped. NOT the drafts made because the file stopped
+   * being this room's text -- that work never got out and never will, and
+   * saying otherwise would hide the one thing worth reporting.
+   */
+  #waiting: contract.Transaction[] = [];
   /**
    * The attach in flight, so that a second caller waits for the first.
    *
@@ -267,6 +277,27 @@ export class Room {
     await loaded;
   }
 
+  /**
+   * Store work that reached the room and never reached the file.
+   *
+   * The last session's typing can sit at the room's rung and no further: it
+   * was shared, so nobody lost it while the room was alive, and then everyone
+   * closed before a store landed. It survives only until the room is evicted.
+   *
+   * Whoever opens the file next is the one who can still see it, so they are
+   * the one who stores it. Free when there is nothing to do, which is almost
+   * always.
+   */
+  async storeWhatNobodyStored(): Promise<void> {
+    if (!this.speaks) return;
+    const path = this.held.path(this.entry);
+    if (path === undefined) return;
+    const stored = await this.held.workspace.read(path);
+    if (stored?.kind !== "text") return;
+    if (stored.text === this.text.toString()) return;
+    await this.store(path);
+  }
+
   /** Have the server bring this room up to whatever the file now says. */
   async catchUp(): Promise<void> {
     await this.held.settle(this.entry);
@@ -314,7 +345,22 @@ export class Room {
       this.entry,
       this.text.toString(),
     );
+    if (this.replaced === undefined) this.#waiting.push(transaction);
     return { held: true, why, draft: transaction, settled };
+  }
+
+  /**
+   * The work these drafts hold has reached everybody else.
+   *
+   * Told to the server rather than remembered here: the case worth reporting
+   * is a machine that never comes back, and a note kept only on that machine
+   * goes with it.
+   */
+  async #handedOn(): Promise<void> {
+    if (this.#waiting.length === 0) return;
+    const gone = this.#waiting;
+    this.#waiting = [];
+    await this.held.workspace.cleared(gone);
   }
 
   get #whyNot(): string {
@@ -443,6 +489,7 @@ export class Room {
   async reattach(): Promise<void> {
     await this.attach();
     await this.#provider?.handedOver();
+    await this.#handedOn();
     await this.catchUp();
   }
 
@@ -497,6 +544,12 @@ export class Rooms {
     return this.workspace.entries().get(entry)?.content_version ?? null;
   }
 
+  /** Where this entry lives, for the calls that name a file by its path. */
+  path(entry: string): string | undefined {
+    const index = this.workspace.index();
+    return index.paths().find((path) => index.at(path)?.id === entry);
+  }
+
   get(entry: string): Room | undefined {
     return this.held.get(entry);
   }
@@ -526,6 +579,7 @@ export class Rooms {
     await this.settle(entry);
     await room.attach();
     room.ready = true;
+    await room.storeWhatNobodyStored();
     return room;
   }
 

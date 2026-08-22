@@ -169,3 +169,84 @@ async def test_a_snapshot_naming_a_draft_is_rebuilt_from_the_server(api: Api):
 
     assert answers[entry]["unresolved"] == []
     assert answers[entry]["content"]["content"] == "before\nonly mine\n"
+
+
+def cleared_flags(session: Session, transaction: str) -> list[bool]:
+    rows = session.exec(
+        select(MODELS.refused_text).where(col(MODELS.refused_text.transaction) == transaction)
+    ).all()
+    return [row.cleared for row in rows]
+
+
+async def clear(api: Api, transactions: list[str]) -> httpx.Response:
+    return await api.http.post(
+        f"/wsfs/workspaces/{api.workspace}/drafts/cleared",
+        json={"transactions": transactions},
+        headers={"X-User-Email": api.user},
+    )
+
+
+async def stranded(api: Api) -> list[dict[str, Any]]:
+    response = await api.http.get(
+        f"/wsfs/workspaces/{api.workspace}/drafts",
+        headers={"X-User-Email": api.user},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["drafts"]
+
+
+async def test_a_draft_starts_out_uncleared(api: Api, session: Session):
+    entry, born = await a_file(api)
+    holding = api.transaction()
+    kept(await api.write(entry, born, "before\nmine\n", transaction=holding, draft=True))
+
+    assert cleared_flags(session, holding) == [False]
+
+
+async def test_a_draft_is_cleared_when_the_work_has_gone_out(api: Api, session: Session):
+    entry, born = await a_file(api)
+    holding = api.transaction()
+    kept(await api.write(entry, born, "before\nmine\n", transaction=holding, draft=True))
+
+    assert (await clear(api, [holding])).status_code == 204
+    assert cleared_flags(session, holding) == [True]
+
+
+async def test_clearing_a_draft_does_not_take_it_away(api: Api):
+    """It is still the record of what that client had, and a snapshot may
+    still name it."""
+    entry, born = await a_file(api)
+    holding = api.transaction()
+    kept(await api.write(entry, born, "before\nmine\n", transaction=holding, draft=True))
+    await clear(api, [holding])
+
+    assert (await api.content(entry, holding)).json()["content"] == "before\nmine\n"
+
+
+async def test_an_uncleared_draft_is_reported_as_still_only_here(api: Api):
+    entry, born = await a_file(api)
+    holding = api.transaction()
+    kept(await api.write(entry, born, "before\nmine\n", transaction=holding, draft=True))
+
+    waiting = await stranded(api)
+    assert [one["transaction"] for one in waiting] == [holding]
+    assert waiting[0]["entry"] == entry
+
+
+async def test_a_cleared_draft_is_not_reported(api: Api):
+    entry, born = await a_file(api)
+    holding = api.transaction()
+    kept(await api.write(entry, born, "before\nmine\n", transaction=holding, draft=True))
+    await clear(api, [holding])
+
+    assert await stranded(api) == []
+
+
+async def test_a_refusal_is_never_reported_as_a_stranded_draft(api: Api):
+    """A refusal is the system declining, not a user's work waiting to get
+    out. Same table, and they must never be shown as the same thing."""
+    entry, born = await a_file(api)
+    acknowledged(await api.write(entry, born, "before\nlanded\n"))
+    refused(await api.write(entry, born, "before\nlost\n"))
+
+    assert await stranded(api) == []
