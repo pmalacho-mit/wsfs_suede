@@ -416,8 +416,22 @@ server-side seeding fixed.
   rather than dropping them. A room with nobody in it is the right fake for one
   editor and the wrong one for a test that opens two.
 
-What is left to check is whether `edited` fires at all, and whether the
-`dirty` the test reads is the same `dirty` `SharedTextFile` sets.
+**The lead worth following.** `UserEdits` decides a change is somebody else's
+by asking whether a Yjs transaction is in flight on the document. That works
+only if its own `onDidChangeModelContent` listener runs BEFORE the binding's --
+because a local keystroke and a remote update both end up inside a transaction,
+and the stack cannot tell them apart. Monaco runs listeners in registration
+order, so the answer depends on whether the editor mounted before or after the
+room opened. Rooms open faster now that the server fills them, which is very
+likely why this shows up here.
+
+If that is it, the fix is not to reorder anything: it is to discriminate on the
+transaction's ORIGIN rather than on there being one. y-monaco uses the binding
+as the origin when it writes a local edit into the document, and the provider's
+when it applies a remote one. `UserEdits` should ignore only the second.
+
+That wants reading y-monaco to confirm what origin it actually passes, which is
+why it is written down here rather than guessed at.
 
 ## What to pick up
 
