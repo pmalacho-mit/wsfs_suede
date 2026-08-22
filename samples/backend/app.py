@@ -19,7 +19,7 @@ import os
 import time
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as APIPath
 from sqlmodel import Field, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -172,6 +172,15 @@ def create_sample_app(
             session.add(project)
             await session.commit()
             return {"id": str(project.id)}
+
+    @app.post("/rooms/{entry_id}/updates", status_code=204)
+    async def hand_over(entry_id: UUID, request: Request) -> None:
+        """Put a client's own document update into the room for it.
+
+        The one thing a client cannot do for itself when it can reach this
+        server and not the collaboration one.
+        """
+        await _rooms().hand_over(str(entry_id), await request.body())
 
     @app.post("/rooms/{entry_id}", status_code=204)
     async def ensure_room(entry_id: UUID) -> None:

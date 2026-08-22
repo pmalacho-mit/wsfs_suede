@@ -35,6 +35,7 @@ import {
   type Persist,
   type Replacement,
   type Room,
+  type HandOver,
   type Settle,
   type Stored,
 } from "./room.svelte";
@@ -118,6 +119,15 @@ export const persisting: Persist = (entry, doc) => {
   };
 };
 
+export const handingOver: HandOver = async (entry, update) => {
+  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/updates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: update as BodyInit,
+  });
+  if (!answer.ok) throw new Error(`handing over ${entry}: ${answer.status}`);
+};
+
 export const enteringWith = (liveblocks: LiveblocksClient) =>
   ((entry, doc) => {
     const entered = liveblocks.enterRoom(entry);
@@ -162,6 +172,7 @@ export class Collaborator {
       this.workspace,
       enteringWith(this.liveblocks),
       settling,
+      handingOver,
       persisting,
     );
   }

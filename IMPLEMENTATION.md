@@ -341,18 +341,28 @@ nothing stored and nothing shared, a fresh client opens the same file and the
 machine hands the work back — then it reaches Grace exactly once and the
 snapshot still rebuilds. Ten of ten in both browsers.
 
-### Not done
+### Reaching the others without a room — DONE
 
-Replay at load — sending the outbox and dirty document updates to the server on
-the initial workspace request — is not built. It matters for one case the
-provider does not cover: a client that can reach the SERVER but not Liveblocks,
-whose work would otherwise sit locally until the room is reachable again. The
-work is durable either way, which is why this is a refinement rather than the
-point.
+The case the provider cannot cover: a client that can reach THIS host and not
+the collaboration server. Its work is durable as a draft either way, but
+nobody else could see it until that connection came back, which can be a long
+time and is not a good enough reason.
 
-The `recorded` set that makes drafts and refusals count as rebuildable is still
-in memory, so it does not survive a reload. It belongs with the outbox when
-that is persisted.
+`POST /rooms/{entry}/updates` takes the client's own document update and the
+host puts it in the room. **Forwarded, not interpreted** — the update carries
+its own identities, so it merges exactly once however many routes it arrives
+by, including that client's own connection when it returns. Scenario 16 sends
+it both ways deliberately and asserts it is said once.
+
+So losing the collaboration server costs the direct route to everybody else,
+not everybody else.
+
+### Still in memory
+
+The `recorded` set that makes drafts, refusals and superseded writes count as
+rebuildable does not survive a reload. It understates what the server can
+rebuild rather than overstating it, which is the safe direction. It belongs
+with the outbox when that is persisted.
 
 ---
 

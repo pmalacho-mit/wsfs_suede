@@ -50,6 +50,22 @@ class Keeper:
             await self._created_once(entry)
             await self._settle(entry)
 
+    async def hand_over(self, entry: str, update: bytes) -> None:
+        """Put one client's own update into the room on its behalf.
+
+        For a client that can reach THIS server but not the collaboration one.
+        Its work would otherwise sit on its machine until that connection came
+        back, which can be a long time and is not a good enough reason for
+        nobody else to see it.
+
+        Forwarded rather than interpreted. The update carries its own
+        identities, so it merges exactly once however many routes it arrives
+        by -- including the client's own connection when that returns.
+        """
+        async with self._alone_with(entry):
+            await self._created_once(entry)
+            await self._liveblocks.send(entry, update)
+
     def _alone_with(self, entry: str) -> asyncio.Lock:
         """One entry at a time, and only against itself.
 

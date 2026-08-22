@@ -237,3 +237,26 @@ async def test_a_change_that_arrives_while_the_keeper_decides_is_not_carried_twi
 
     assert liveblocks.text("entry") == "hello\nfrom a script\n"
     assert liveblocks.base("entry") == WROTE
+
+
+async def test_a_client_that_cannot_reach_the_room_is_carried_into_it(api_free=None):
+    """The server puts one client's own update into the room for it.
+
+    Forwarded, not interpreted: the update carries its own identities, so it
+    merges exactly once however many routes it arrives by -- including that
+    client's own connection when it comes back.
+    """
+    liveblocks = FakeLiveblocks()
+    keeper = keeping(liveblocks, FakeFiles(Held("hello\n", BORN)))
+    await keeper.ensure("entry")
+
+    alone = Doc()
+    alone["content"] = Text()
+    alone.apply_update(liveblocks.documents["entry"])
+    alone["content"] += "typed with no room\n"
+    mine = alone.get_update()
+
+    await keeper.hand_over("entry", mine)
+    await keeper.hand_over("entry", mine)
+
+    assert liveblocks.text("entry") == "hello\ntyped with no room\n"

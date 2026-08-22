@@ -15,7 +15,7 @@
     type Sending,
     type Stored,
   } from "$lib/collab/room.svelte";
-  import { enteringWith, persisting, settling } from "$lib/collab/collaborator";
+  import { enteringWith, handingOver, persisting, settling } from "$lib/collab/collaborator";
   import type { editor } from "monaco-editor";
   import { UserEdits } from "./edits";
   import { cleaner } from "./utils";
@@ -453,7 +453,7 @@
      * case `rooms.opening` exists to cover, and would leave every file that
      * was ever closed and reopened quietly behind.
      */
-    const rooms = new Rooms(workspace, enteringWith(liveblocks), settling, persisting);
+    const rooms = new Rooms(workspace, enteringWith(liveblocks), settling, handingOver, persisting);
 
     const openInProgress = new Set<Id>();
     const openFiles = new Map<Id, OpenFile>();

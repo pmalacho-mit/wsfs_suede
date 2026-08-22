@@ -1177,3 +1177,70 @@
     <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
+
+<Sweater
+  name="reaches the others through the host when the room cannot be reached"
+  body={async (harness) => {
+    /**
+     * `SCENARIOS.md` B3, from the other side. Losing the collaboration server
+     * should cost the direct route to everybody else, not everybody else.
+     *
+     * Ada can reach this host and not the room. Her work is kept as a draft
+     * so it cannot be lost, AND handed to the host to put in the room, so
+     * Grace sees it while Ada is still cut off. It goes as an update, not as
+     * text, so when Ada's own connection returns and delivers it again it
+     * merges rather than doubling.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "relay", "shared\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () => client.text(entry).includes("shared"));
+    await announce(step(id, "relay", `open-${me()}`));
+    await awaiting(step(id, "relay", `open-${other()}`));
+
+    if (playing("ada")) {
+      client.goOffline(entry);
+      client.type(entry, client.text(entry) + "sent the long way round\n");
+
+      /** Held from the file, kept as a draft, and handed to the host. */
+      const held = await client.store(entry);
+      harness.expect(held.held).toBe(true);
+      await announce(step(id, "relay", "handed"));
+
+      await awaiting(step(id, "relay", "seen"));
+      await client.comeBack(entry);
+      await until("her own connection to deliver it too", () => client.speaks(entry));
+
+      /** Arrived twice, by two routes, and said once. */
+      harness.expect(
+        client.text(entry).split("sent the long way round").length - 1,
+      ).toBe(1);
+      pocket.text = client.text(entry);
+      pocket.note = "reached them without a room";
+      await client.take(entry);
+      await client.rebuildable();
+    } else {
+      await awaiting(step(id, "relay", "handed"));
+      await until("ada's work to arrive without her", () =>
+        client.text(entry).includes("sent the long way round"),
+      );
+      harness.expect(
+        client.text(entry).split("sent the long way round").length - 1,
+      ).toBe(1);
+      pocket.text = client.text(entry);
+      pocket.note = "saw it while she was cut off";
+      await announce(step(id, "relay", "seen"));
+      await client.take(entry);
+      await client.rebuildable();
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>

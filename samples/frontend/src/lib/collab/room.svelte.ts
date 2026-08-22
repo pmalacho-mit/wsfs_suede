@@ -49,6 +49,16 @@ export type Enter = (
 export type Settle = (entry: string) => Promise<void>;
 
 /**
+ * Asking the host to put this client's own update into the room for it.
+ *
+ * The one thing a client cannot do for itself when it can reach the host and
+ * not the collaboration server. Its work would otherwise sit on its machine
+ * until that connection came back, which is not a good enough reason for
+ * nobody else to see it.
+ */
+export type HandOver = (entry: string, update: Uint8Array) => Promise<void>;
+
+/**
  * Keeping this document on THIS MACHINE, so a tab closing does not lose it.
  *
  * The rung below the room. Work reaches here the moment it is typed, before
@@ -345,8 +355,24 @@ export class Room {
       this.entry,
       this.text.toString(),
     );
-    if (this.replaced === undefined) this.#waiting.push(transaction);
+    if (this.replaced === undefined) {
+      this.#waiting.push(transaction);
+      void this.#carriedByTheHost();
+    }
     return { held: true, why, draft: transaction, settled };
+  }
+
+  /**
+   * Ask the host to put what this document holds into the room.
+   *
+   * Losing the collaboration server should not mean losing collaboration --
+   * only losing the direct route to it. Sent as an update rather than as
+   * text, so it merges exactly once however many ways it arrives, including
+   * this client's own connection when that comes back.
+   */
+  async #carriedByTheHost(): Promise<void> {
+    if (this.replaced !== undefined) return;
+    await this.held.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
   }
 
   /**
@@ -525,6 +551,7 @@ export class Rooms {
     readonly workspace: Workspace,
     readonly enter: Enter,
     readonly settle: Settle,
+    readonly handOver: HandOver,
     readonly persist: Persist,
   ) {
     this.#watching = workspace.watch((changes) => {
