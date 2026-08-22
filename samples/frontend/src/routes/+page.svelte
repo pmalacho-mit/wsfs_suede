@@ -2,12 +2,18 @@
   import { onDestroy } from "svelte";
 
   import Workspace from "$lib/Workspace.svelte";
+  import WorkspaceFrame from "$lib/shell/WorkspaceFrame.svelte";
   import { solo } from "$lib/liveblocks";
   import { connect, http, inMemory, type Workspace as Client } from "$wsfs";
   import { createClient } from "@liveblocks/client";
 
   const USER = "ada@example.com";
   const BACKEND = "/wsfs";
+
+  /** What this page is looking at. A real host reads it off the route. */
+  const TITLE = "Workspace Example";
+  const EVENT = "Example";
+  const COURSE = "Example";
 
   /** The sample's stand-in for a session. A real host sends a cookie. */
   const asUser = (email: string) => async () => ({ "X-User-Email": email });
@@ -48,33 +54,16 @@
   onDestroy(() => workspace?.stop());
 </script>
 
-<!-- The shell fills whatever it is given, so the page is what says "all of
+<!-- The frame fills whatever it is given, so the page is what says "all of
      it" -- a test gives it a card-sized box instead. -->
-<div class="page">
-  {#if failure}
-    <p class="failure">{failure}</p>
-  {:else if workspace}
-    <Workspace {workspace} {liveblocks} />
-  {:else}
-    <p class="waiting">Opening a workspace…</p>
-  {/if}
+<div class="h-dvh w-full">
+  <WorkspaceFrame title={TITLE} event={EVENT} course={COURSE}>
+    {#if failure}
+      <p class="text-destructive p-4 text-sm">{failure}</p>
+    {:else if workspace}
+      <Workspace {workspace} {liveblocks} />
+    {:else}
+      <p class="text-muted-foreground p-4 text-sm">Opening a workspace…</p>
+    {/if}
+  </WorkspaceFrame>
 </div>
-
-<style>
-  .page {
-    height: 100dvh;
-    width: 100%;
-  }
-  :global(body) {
-    margin: 0;
-  }
-  .failure,
-  .waiting {
-    font: 0.9rem/1.5 ui-sans-serif, system-ui, sans-serif;
-    padding: 1rem;
-    color: var(--wsfs-muted, #6b7280);
-  }
-  .failure {
-    color: #b91c1c;
-  }
-</style>

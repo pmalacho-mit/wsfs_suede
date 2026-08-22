@@ -1,4 +1,5 @@
 import { sveltekit } from "@sveltejs/kit/vite";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, type UserConfig } from "vite";
 import { applyConfig as applyMonacoConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
 import { applyConfig as applyKernelConfig } from "../../wsfs_suede.python-web-kernel-suede/config/vite.js";
@@ -15,7 +16,7 @@ const CHECKOUT = new URL("../../", import.meta.url).pathname;
  * looks like a file that will not open.
  */
 const config = defineConfig({
-  plugins: [sveltekit()],
+  plugins: [tailwindcss(), sveltekit()],
   server: {
     // Reachable from outside this container, because the browser that runs
     // `npm run test:browser` is in one of its own: `--forward` publishes this

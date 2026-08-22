@@ -306,9 +306,25 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import type { Change, Submitting, Workspace } from "$wsfs";
+  import { themes } from "wsfs_suede.pierre-trees-svelte-suede/themes";
+  import { appearance } from "$lib/appearance.svelte";
   import { pointAsRect } from "./utils";
 
   let { model }: Props = $props();
+
+  /**
+   * The tree's palette, which is a fetch rather than a class: its themes are
+   * split out of the bundle, so the shell paints its own way for the frame or
+   * two before this arrives.
+   */
+  let dress = $state("");
+
+  $effect(() => {
+    const name = appearance.treeTheme;
+    let live = true;
+    void themes.css(name).then((css) => live && (dress = css));
+    return () => (live = false);
+  });
 
   const { workspace, mapping, tree } = $derived(model);
   const submissions = trackOwnSubmissions();
@@ -591,7 +607,7 @@
   oncontextmenu={asked}
   role="presentation"
 >
-  <Tree.Component model={tree} style="height: 100%">
+  <Tree.Component model={tree} style="height: 100%; {dress}">
     {#snippet contextMenu(item, opened)}
       <ContextMenu.Component
         context={opened}

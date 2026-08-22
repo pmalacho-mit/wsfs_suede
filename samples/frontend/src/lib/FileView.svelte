@@ -10,7 +10,7 @@
 
   import { Editor } from "wsfs_suede.python-monaco-suede";
   import Preview from "$lib/Preview.svelte";
-  import Runner from "$lib/Runner.svelte";
+  import Runner, { type Outcome } from "$lib/Runner.svelte";
   import type { Workspace } from "$wsfs";
   import type { KernelPool, OpenFile } from "./Workspace.svelte";
   import type { Payload } from "../../../../release/frontend/content";
@@ -20,6 +20,7 @@
     opened: OpenFile;
     workspace: Workspace;
     kernelPool: KernelPool;
+    onFinished: (outcome: Outcome) => void;
   };
 
   let { params }: IDockviewPanelProps<Params> = $props();
@@ -67,11 +68,12 @@
       <Runner
         kernelPool={params.kernelPool}
         shared={params.opened.sharedText}
+        onFinished={params.onFinished}
       />
     {/if}
   </div>
 {:else}
-  <p class="note">Opening {params.opened.path}…</p>
+  <p class="text-muted-foreground p-4 text-sm">Opening {params.opened.path}…</p>
 {/if}
 
 <style>
@@ -83,13 +85,5 @@
   }
   .text.runnable {
     grid-template-rows: 1fr minmax(7rem, 30%);
-  }
-  .note {
-    font:
-      0.85rem/1.6 ui-sans-serif,
-      system-ui,
-      sans-serif;
-    color: var(--wsfs-muted, #6b7280);
-    padding: 1rem;
   }
 </style>

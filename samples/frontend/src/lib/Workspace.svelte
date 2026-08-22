@@ -1,7 +1,7 @@
 <script lang="ts" module>
   import { createClient, type Status } from "@liveblocks/client";
   import {
-    getYjsProviderForRoom,
+    //getYjsProviderForRoom,
     type LiveblocksYjsProvider,
   } from "@liveblocks/yjs";
   import * as Y from "yjs";
@@ -16,13 +16,25 @@
     type Workspace,
   } from "$wsfs";
   import type { editor } from "monaco-editor";
-  import { UserEdits } from "./edits";
+  import { UserEdits, type UserEdit } from "./edits";
   import { cleaner } from "./utils";
 
   type LiveblocksClient = ReturnType<typeof createClient>;
   type LiveblocksRoom = ReturnType<LiveblocksClient["enterRoom"]>;
 
   export type NonModelEditorProps = Omit<Editor.Props, "file">;
+
+  /**
+   * Everything an open file's editor is wired with.
+   *
+   * `onUserEdit` is separated from the editor's own props because it is not
+   * one: it is answered by `UserEdits`, which only exists once there is an
+   * editor to watch, and it names the person at the keyboard rather than
+   * every change the model reports.
+   */
+  export type EditorHooks = NonModelEditorProps & {
+    onUserEdit?: (edit: UserEdit) => void;
+  };
 
   const typingDebouncer = new MappedDebouncer({
     idleMs: 500,
@@ -32,7 +44,7 @@
   export class OpenFile {
     readonly id: Id;
     readonly liveblocks: LiveblocksClient;
-    readonly editorProps: NonModelEditorProps;
+    readonly editorProps: EditorHooks;
     readonly workspace: Workspace;
 
     sharedText = $state<SharedTextFile>();
@@ -41,7 +53,7 @@
     constructor(
       { id, path }: FileTreeModel.Entry,
       liveblocks: LiveblocksClient,
-      editorProps: NonModelEditorProps,
+      editorProps: EditorHooks,
       workspace: Workspace,
     ) {
       this.id = id;
@@ -99,7 +111,10 @@
     readonly parent: PsuedoParent;
     readonly doc: Y.Doc;
     readonly room: LiveblocksRoom;
-    readonly provider: LiveblocksYjsProvider;
+    /**
+     * changes to get things working just for UI demo purposes
+     */
+    //readonly provider: LiveblocksYjsProvider;
     readonly props: NonModelEditorProps;
     readonly initialContent: string;
 
@@ -124,38 +139,50 @@
       path: string,
       content: string,
       liveblocks: LiveblocksClient,
-      props: Omit<Editor.Props, "file">,
+      props: EditorHooks,
       workspace: Workspace,
     ) {
       this.id = id;
       this.initialContent = content;
       this.workspace = workspace;
       this.room = liveblocks.enterRoom(id);
-      this.provider = getYjsProviderForRoom(this.room.room);
-      this.doc = this.provider.getYDoc();
+      /**
+       * changes to get things working just for UI demo purposes
+       */
+      //this.provider = getYjsProviderForRoom(this.room.room);
+      this.doc = new Y.Doc(); // this.provider.getYDoc();
       this.parent = new PsuedoParent(holderOf(path));
       this.file = new Editor.Model({
         name: nameOf(path),
         parent: this.parent,
         source: content,
       });
-      this.cleanup.add(
-        this.room.room.subscribe("status", (status) => {
-          this.status = status;
-          if (status !== "connected" || this.file.sourceSync) return;
-          this.file.sourceSync = this.doc.getText("content");
-          this.userEdits?.dispose();
-          if (this.editor)
-            this.userEdits = new UserEdits(this.editor, this.file.sourceSync);
-        }),
-      );
+      /**
+       * changes to get things working just for UI demo purposes
+       */
+      this.doc.getText(id);
+
+      // this.cleanup.add(
+      //   this.room.room.subscribe("status", (status) => {
+      //     this.status = status;
+      //     if (status !== "connected" || this.file.sourceSync) return;
+      //     this.file.sourceSync = this.doc.getText("content");
+      //     this.userEdits?.dispose();
+      //     if (this.editor)
+      //       this.userEdits = new UserEdits(this.editor, this.file.sourceSync);
+      //   }),
+      // );
+      const { onUserEdit, ...editorProps } = props;
       this.props = {
-        ...props,
+        ...editorProps,
         onEditor: (editor) => {
           this.editor = editor;
-          const disposable = props.onEditor?.(editor);
+          const disposable = editorProps.onEditor?.(editor);
           this.userEdits?.dispose();
           const userEdits = new UserEdits(this.editor, this.file.sourceSync);
+          // Not unsubscribed on its own: disposing a `UserEdits` clears its
+          // listeners, and this one outlives nothing else.
+          if (onUserEdit) userEdits.subscribe({ edited: onUserEdit });
           this.userEdits = userEdits;
           return {
             dispose: () => {
@@ -224,7 +251,7 @@
       this.cleanup();
       this.userEdits?.dispose();
       this.room.leave();
-      this.provider.destroy();
+      //this.provider.destroy();
       this.doc.destroy();
     }
   }
@@ -317,7 +344,14 @@
   import { Kernel } from "wsfs_suede.python-web-kernel-suede";
   import { WarmPool } from "./pool";
   import fs from "wsfs_suede.python-web-kernel-suede/fs";
+  import FileTextIcon from "@lucide/svelte/icons/file-text";
+  import FolderTreeIcon from "@lucide/svelte/icons/folder-tree";
   import { InView } from "./inview.svelte";
+  import PanelHeading from "./shell/PanelHeading.svelte";
+  import Assistant from "./assistant/Assistant.svelte";
+  import { Conversation } from "./assistant/conversation.svelte";
+  import { Nudge } from "./assistant/nudge";
+  import type { Outcome } from "./Runner.svelte";
 
   let {
     workspace,
@@ -336,6 +370,17 @@
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
+
+  const conversation = new Conversation();
+  const nudge = new Nudge();
+
+  /**
+   * What the assistant is asked on the person's behalf when they take the
+   * offer of help. It quotes the failure, because "help me" on its own says
+   * less than the traceback already on screen does.
+   */
+  const stuckOn = ({ because }: Extract<Outcome, { ok: false }>) =>
+    `My last run ended in an error:\n\n\`\`\`\n${because}\n\`\`\`\n\nCan you help me work out why?`;
 
   const snippets = { explorer, dock, assistant };
   const tabs = { file: FileView };
@@ -429,7 +474,7 @@
       ),
       api.addSnippetPanel(
         "assistant",
-        { snapshot },
+        { snapshot, conversation },
         {
           size: 340,
           minimumWidth: 200,
@@ -486,7 +531,22 @@
         }),
     });
 
-    const editorProps: NonModelEditorProps = { onEditor };
+    /** The paths the person can see, which is what a question carries. */
+    const inViewPaths = () => snapshot().visible.map(({ path }) => path);
+
+    /**
+     * A run that ended badly is the only reason to offer help, and typing
+     * again is the only reason needed to withdraw it.
+     */
+    const finished = (outcome: Outcome) => {
+      if (outcome.ok) return nudge.withdraw();
+      nudge.offer(() => conversation.ask(stuckOn(outcome), inViewPaths()));
+    };
+
+    const editorProps: EditorHooks = {
+      onEditor,
+      onUserEdit: () => nudge.withdraw(),
+    };
 
     cleanup.add(
       () => openFiles.forEach((open) => open.sharedText?.dispose()),
@@ -518,7 +578,7 @@
             openFiles.set(id, opened);
             await tabsAPI.addComponentPanel(
               "file",
-              { opened, kernelPool, workspace },
+              { opened, kernelPool, workspace, onFinished: finished },
               { id, title },
             );
           } finally {
@@ -544,14 +604,21 @@
     );
   };
 
-  onDestroy(cleanup);
+  onDestroy(() => {
+    cleanup();
+    conversation.dispose();
+    nudge.withdraw();
+  });
 </script>
 
 {#snippet explorer({
   params: { model },
 }: PanelProps<"grid", { model: FileTreeModel }>)}
-  <section class="explorer" data-region="explorer">
-    <h2>Explorer</h2>
+  <section
+    class="bg-sidebar grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] border-r"
+    data-region="explorer"
+  >
+    <PanelHeading label="Explorer" icon={FolderTreeIcon} />
     <FileTree {model} />
   </section>
 {/snippet}
@@ -562,37 +629,43 @@
   "grid",
   { onready: (api: ViewAPI<"dock", typeof tabs>) => void }
 >)}
-  <div class="documents" data-region="documents">
+  <div class="h-full min-h-0 w-full min-w-0" data-region="documents">
     <DockView
       theme={appearance.theme}
       components={tabs}
+      watermark={{ snippet: nothingOpen }}
       onReady={({ api }) => onready(api)}
     />
   </div>
 {/snippet}
 
-{#snippet assistant({
-  params: { snapshot },
-}: PanelProps<"grid", { snapshot: () => Snapshot }>)}
-  <section class="assistant" data-region="assistant">
-    <h2>AI Chat</h2>
-    <!-- Not the assistant, but what the assistant will be handed: whatever
-         the user can see when they send a message. Rendered because a live
-         answer is easier to trust when you can watch it change. -->
-    <p class="note">What I would be given:</p>
-    <ul data-region="in-view">
-      {#each snapshot().visible as held (held.entry)}
-        <li data-path={held.path} data-dirty={held.dirty}>
-          {held.path}{held.dirty ? " •" : ""}
-        </li>
-      {:else}
-        <li class="note">nothing open</li>
-      {/each}
-    </ul>
-  </section>
+{#snippet nothingOpen()}
+  <div
+    class="bg-background text-muted-foreground grid h-full w-full place-items-center gap-2 text-sm"
+    data-region="nothing-open"
+  >
+    <div class="flex flex-col items-center gap-2">
+      <FileTextIcon class="size-6" />
+      Open a file from the explorer.
+    </div>
+  </div>
 {/snippet}
 
-<div class="shell {chrome}" data-region="shell">
+{#snippet assistant({
+  params: { snapshot, conversation },
+}: PanelProps<
+  "grid",
+  { snapshot: () => Snapshot; conversation: Conversation }
+>)}
+  <div class="h-full min-h-0 border-l">
+    <Assistant
+      {conversation}
+      attached={snapshot().visible.map(({ path }) => path)}
+    />
+  </div>
+{/snippet}
+
+<div class="bg-background h-full min-h-0 w-full {chrome}" data-region="shell">
   <GridView
     {snippets}
     orientation={Orientation.HORIZONTAL}
@@ -600,99 +673,3 @@
     onReady={({ api }) => onAPI(api)}
   />
 </div>
-
-<style>
-  .shell {
-    height: 100%;
-    width: 100%;
-    min-height: 0;
-    background: var(--wsfs-ground, #f7f7f9);
-  }
-
-  :global(:root) {
-    --wsfs-ground: #f7f7f9;
-    --wsfs-raised: #ffffff;
-    --wsfs-sunken: #fbfbfd;
-    --wsfs-line: #e5e7eb;
-    --wsfs-muted: #6b7280;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme="light"])) {
-      --wsfs-ground: #131316;
-      --wsfs-raised: #1a1a1f;
-      --wsfs-sunken: #17171b;
-      --wsfs-line: #2a2a31;
-      --wsfs-muted: #9ca3af;
-    }
-  }
-
-  .explorer {
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
-    height: 100%;
-    min-height: 0;
-    background: var(--wsfs-sunken, #fbfbfd);
-    border-right: 1px solid var(--wsfs-line, #e5e7eb);
-  }
-
-  .explorer h2 {
-    margin: 0;
-    padding: 0.6rem 0.75rem 0.5rem;
-    font:
-      600 0.68rem/1 ui-sans-serif,
-      system-ui,
-      sans-serif;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--wsfs-muted, #6b7280);
-  }
-
-  .documents {
-    height: 100%;
-    width: 100%;
-    min-width: 0;
-    min-height: 0;
-  }
-
-  .assistant {
-    display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    height: 100%;
-    min-height: 0;
-    background: var(--wsfs-sunken, #fbfbfd);
-    border-left: 1px solid var(--wsfs-line, #e5e7eb);
-  }
-
-  .assistant ul {
-    margin: 0;
-    padding: 0 0.75rem;
-    list-style: none;
-    font:
-      0.8rem/1.8 ui-monospace,
-      monospace;
-    color: var(--wsfs-muted, #6b7280);
-  }
-
-  .assistant h2 {
-    margin: 0;
-    padding: 0.6rem 0.75rem 0.5rem;
-    font:
-      600 0.68rem/1 ui-sans-serif,
-      system-ui,
-      sans-serif;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--wsfs-muted, #6b7280);
-  }
-
-  .assistant p {
-    margin: 0;
-    padding: 0.75rem;
-    font:
-      0.85rem/1.6 ui-sans-serif,
-      system-ui,
-      sans-serif;
-    color: var(--wsfs-muted, #6b7280);
-  }
-</style>
