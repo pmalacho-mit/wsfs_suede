@@ -505,8 +505,25 @@ an effect on `Room.speaks` that flushes when it turns true; it wants
 `$effect.root` because `SharedTextFile` is a plain class, which is why it is not
 done here.
 
-**The migration gap.** `create_all` creates missing tables; it does not add
-columns to tables that already exist. When `workspace_id` was added to the
+**The migration gap — CLOSED for the case that kept biting.** `create_all`
+creates missing tables and does not add columns to tables that already exist.
+It bit twice: `workspace_id` on the refused tables, then `cleared` on the same
+ones, both times as a 500 in the middle of somebody's work.
+
+`release/backend/migrate.py` now closes the safe half. `widen` adds columns the
+code declares and the database lacks, **nullable first, then filled, then
+constrained** -- adding a NOT NULL column to a table with rows in it fails
+outright, and adding one with a DEFAULT silently rewrites every existing row.
+It runs at startup and says what it added.
+
+What it refuses to do is the rest. A column the code no longer declares is left
+alone, because it may hold the only copy of something and dropping it to make
+the schema match is a data decision nobody asked for. A NOT NULL column with no
+plain default raises `Unfillable` at startup rather than inventing what the old
+rows held -- a refusal to start, which is where that failure belongs.
+
+The original wording follows, because the shape of the problem is worth
+keeping: When `workspace_id` was added to the
 `wsfs_refused_*` tables, the long-running sample database still had the old
 shape and every refused transaction 500'd with `column "workspace_id" of
 relation "wsfs_refused_deletions" does not exist`. Recreating `sample-db` fixed
