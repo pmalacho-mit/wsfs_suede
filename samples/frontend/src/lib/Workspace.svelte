@@ -13,9 +13,15 @@
     Rooms,
     type Room,
     type Sending,
-    type Stored,
+    type Written,
   } from "$lib/collab/room.svelte";
-  import { enteringWith, handingOver, persisting, settling } from "$lib/collab/collaborator";
+  import {
+    enteringWith,
+    handingOver,
+    persisting,
+    settling,
+    storedFromRoom,
+  } from "$lib/collab/collaborator";
   import type { editor } from "monaco-editor";
   import { UserEdits } from "./edits";
   import { cleaner } from "./utils";
@@ -116,6 +122,9 @@
      */
     shared = $state<Room>();
 
+    /** The room being opened, before `shared` is answered for. */
+    opening = $state<Room>();
+
     readonly cleanup = cleaner();
 
     editor = $state<editor.IStandaloneCodeEditor>();
@@ -164,6 +173,7 @@
        * moment than the Yjs provider having the document.
        */
       this.rooms = rooms;
+      this.opening = rooms.get(id);
       void rooms
         .open(id)
         .then((room) => {
@@ -249,7 +259,7 @@
      * assume a transaction came back, which is why this says which happened
      * rather than returning an id that might be a lie.
      */
-    store(): Promise<Stored> {
+    store(): Promise<Written> {
       const sent = this.send();
       if (sent.held) return Promise.resolve(sent);
       return sent.settled.then((answer) => ({
@@ -273,20 +283,22 @@
           ? { held: true, why: "the room is not open yet", draft: null, settled: null }
           : room.send(file.path);
       /**
-       * Cleared only when the write actually went.
+       * Cleared once the text has left this machine, whichever way it left.
        *
-       * A HELD WRITE LEAVES THIS DIRTY, and that is the whole point of saying
-       * so: `dirty` means "what the user is looking at exists nowhere else
-       * yet", which is exactly what is still true when a room out of touch
-       * declines to publish it. Clearing here regardless -- which is what this
-       * did before rooms could decline -- would show a saved file that had
-       * never been saved.
+       * `dirty` means "what the user is looking at exists nowhere else yet",
+       * and a draft is somewhere else: on the server, rebuildable, nameable
+       * by a snapshot. A room that is reaching nobody still cannot make it
+       * the FILE -- that waits for the room to come back -- but the work is
+       * no longer only here, and saying it is would be showing unsaved work
+       * that had in fact been saved.
+       *
+       * Only text that went nowhere at all leaves this set.
        *
        * Clearing FIRST, before the answer, is still deliberate: a keystroke
        * landing while the write is in flight has to leave this dirty again,
        * and it will.
        */
-      if (!sent.held) {
+      if (!sent.held || sent.draft !== null) {
         typingDebouncer.clear(id);
         this.dirty = false;
       }
@@ -294,9 +306,20 @@
     }
 
     /** The transaction a snapshot can name for this file, if there is one. */
+    /**
+     * The version this file's text was put on the server as, whichever way.
+     *
+     * A HELD WRITE STILL NAMES SOMETHING. The room may not write the file
+     * back -- it is reaching nobody, or the file stopped being its text --
+     * but the text is kept as a draft, and the draft's transaction is exactly
+     * what a snapshot needs: the server can rebuild it, so what the user was
+     * looking at can still be handed to somebody else.
+     *
+     * Undefined only when there was no text to put anywhere.
+     */
     storing(): string | undefined {
       const sent = this.send();
-      return sent.held ? undefined : sent.transaction;
+      return sent.held ? (sent.draft ?? undefined) : sent.transaction;
     }
 
     /**
@@ -370,6 +393,12 @@
      * of that option.
      */
     dirty: boolean;
+    /** How far opening this file's room has got. Diagnostic. */
+    stage: string;
+    /** Whether this file's editor is being watched for the user's own edits. */
+    watching: boolean;
+    /** Whether this file's room may write it back right now. Diagnostic. */
+    speaks: boolean;
     /**
      * The transaction this snapshot submitted for it, if it submitted one.
      *
@@ -466,7 +495,7 @@
      * case `rooms.opening` exists to cover, and would leave every file that
      * was ever closed and reopened quietly behind.
      */
-    const rooms = new Rooms(workspace, enteringWith(liveblocks), settling, handingOver, persisting);
+    const rooms = new Rooms(workspace, enteringWith(liveblocks), settling, storedFromRoom, handingOver, persisting);
 
     const openInProgress = new Set<Id>();
     const openFiles = new Map<Id, OpenFile>();
@@ -492,10 +521,13 @@
           /**
            * The transaction is known SYNCHRONOUSLY or not at all. A snapshot
            * describes the moment it was asked for, so waiting on the write
-           * would describe a later one -- and a room that is holding its
-           * writes has no transaction to name at any point. Such an entry
-           * stays `dirty` in the snapshot, which is the honest answer: what
-           * the user is looking at exists nowhere else yet.
+           * would describe a later one.
+           *
+           * A room that is holding its writes still names one: the draft the
+           * text went into. That is the whole point of drafts -- the server
+           * can rebuild it, so a snapshot naming it is as portable as one
+           * naming a version. Only text that went nowhere at all leaves an
+           * entry dirty here.
            */
           const transaction = shared.storing();
           if (transaction !== undefined) stored.set(entry, transaction);
@@ -524,6 +556,9 @@
           open: open !== undefined,
           visible: showing.has(entry.id),
           dirty: open?.sharedText?.dirty === true,
+          stage: open?.sharedText?.rooms?.get(entry.id)?.opening ?? "no room",
+          watching: open?.sharedText?.userEdits !== undefined,
+          speaks: open?.sharedText?.rooms?.get(entry.id)?.speaks === true,
           ...(stored.has(entry.id) ? { stored: stored.get(entry.id) } : {}),
         });
       }

@@ -46,8 +46,6 @@ class FakeLiveblocks:
         self.sent.append(room)
         doc = Doc()
         doc["content"] = Text()
-        doc["standing"] = Map()
-        doc["produced"] = Map()
         if self.documents.get(room):
             doc.apply_update(self.documents[room])
         doc.apply_update(update)
@@ -58,12 +56,6 @@ class FakeLiveblocks:
         doc["content"] = Text()
         doc.apply_update(self.documents[room])
         return str(doc["content"])
-
-    def base(self, room: str) -> str | None:
-        doc = Doc()
-        doc["standing"] = Map()
-        doc.apply_update(self.documents[room])
-        return doc["standing"].get("base")
 
 
 class FakeFiles:
@@ -90,7 +82,6 @@ async def test_a_room_is_created_and_filled_from_the_file():
 
     assert liveblocks.created == ["entry"]
     assert liveblocks.text("entry") == "hello\n"
-    assert liveblocks.base("entry") == BORN
 
 
 async def test_a_room_already_standing_where_the_file_stands_is_left_alone():
@@ -114,7 +105,6 @@ async def test_a_room_left_behind_has_the_change_carried_into_it():
     await keeper.ensure("entry")
 
     assert liveblocks.text("entry") == "hello\nfrom a script\n"
-    assert liveblocks.base("entry") == WROTE
 
 
 async def test_unstored_typing_survives_a_change_being_carried_in():
@@ -187,26 +177,27 @@ async def test_a_file_that_is_not_text_is_left_without_a_room_to_fill():
     assert liveblocks.sent == []
 
 
-async def test_a_write_the_room_made_itself_is_not_carried_back_into_it():
+async def test_a_write_a_member_made_costs_nothing_to_settle():
+    """The saving the whole design turns on.
+
+    A client saves; every other client with that file open asks this host to
+    settle the room. If answering meant reading the collaboration server, one
+    person typing would cost a round trip per collaborator per save.
+    """
     liveblocks = FakeLiveblocks()
     files = FakeFiles(Held("hello\n", BORN))
     keeper = keeping(liveblocks, files)
     await keeper.ensure("entry")
 
-    typed = Doc()
-    typed["content"] = Text()
-    typed["produced"] = Map()
-    typed.apply_update(liveblocks.documents["entry"])
-    typed["content"] += "mine\n"
-    typed["produced"][WROTE] = True
-    await liveblocks.send("entry", typed.get_update())
-
     files.held = Held("hello\nmine\n", WROTE)
-    files.history = {BORN: "hello\n"}
-    await keeper.ensure("entry")
+    await keeper.stored("entry", WROTE)
+    reads = liveblocks.reads
 
-    assert liveblocks.text("entry") == "hello\nmine\n"
-    assert liveblocks.base("entry") == WROTE
+    for _ in range(50):
+        await keeper.ensure("entry")
+
+    assert liveblocks.reads == reads
+    assert liveblocks.sent == ["entry"]
 
 
 async def test_a_change_that_arrives_while_the_keeper_decides_is_not_carried_twice():
@@ -236,7 +227,6 @@ async def test_a_change_that_arrives_while_the_keeper_decides_is_not_carried_twi
     await keeper.ensure("entry")
 
     assert liveblocks.text("entry") == "hello\nfrom a script\n"
-    assert liveblocks.base("entry") == WROTE
 
 
 async def test_a_client_that_cannot_reach_the_room_is_carried_into_it(api_free=None):

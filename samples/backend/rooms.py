@@ -16,18 +16,22 @@ from fast_diff_match_patch import diff
 from pycrdt import Doc, Map, Text
 
 CONTENT = "content"
-STANDING = "standing"
-PRODUCED = "produced"
-BASE = "base"
 
 
 @dataclass(frozen=True)
 class Standing:
-    """A room, as its own document reports it."""
+    """A room: what its document holds, and what this host remembers of it.
+
+    THE TEXT COMES FROM THE ROOM AND THE BASE DOES NOT. Keeping the base in
+    the document would be honest and ruinous: advancing it is a write, so
+    every store by anybody would cost a round trip to the collaboration
+    server for every client that heard about it. It is bookkeeping, this host
+    is the only thing that writes it, and this host has a much cheaper place
+    to put it.
+    """
 
     text: str
     base: str | None
-    produced: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -87,15 +91,6 @@ def standing_where_the_file_stands(room: Standing, file: Held) -> bool:
     return room.base == file.version
 
 
-def made_it_itself(room: Standing, file: Held) -> bool:
-    """The room is where this write came from.
-
-    Carrying such a write in would insert text the room already holds, and a
-    CRDT merges two inserts rather than noticing they say the same thing.
-    """
-    return file.version in room.produced
-
-
 def already_says_it(room: Standing, file: Held) -> bool:
     """The same conclusion for a write whose bookkeeping has not arrived yet.
 
@@ -110,7 +105,7 @@ def plan(room: Standing, file: Held) -> Plan:
         return Seed(text=file.text, version=file.version)
     if standing_where_the_file_stands(room, file):
         return Settled()
-    if made_it_itself(room, file) or already_says_it(room, file):
+    if already_says_it(room, file):
         return Rebase(version=file.version)
     assert room.base is not None
     return Carry(since=room.base, version=file.version)
@@ -122,38 +117,23 @@ def plan(room: Standing, file: Held) -> Plan:
 def _opened(update: bytes) -> Doc:
     doc = Doc()
     doc[CONTENT] = Text()
-    doc[STANDING] = Map()
-    doc[PRODUCED] = Map()
     if update:
         doc.apply_update(update)
     return doc
 
 
-def standing_of(update: bytes) -> Standing:
-    doc = _opened(update)
-    return Standing(
-        text=str(doc[CONTENT]),
-        base=doc[STANDING].get(BASE),
-        produced=frozenset(doc[PRODUCED].keys()),
-    )
+def standing_of(update: bytes, base: str | None) -> Standing:
+    """What the room holds, put together with what this host remembers."""
+    return Standing(text=str(_opened(update)[CONTENT]), base=base)
 
 
-def seeded(text: str, version: str) -> bytes:
+def seeded(text: str) -> bytes:
     doc = _opened(b"")
     doc[CONTENT] += text
-    doc[STANDING][BASE] = version
     return doc.get_update()
 
 
-def rebased(live: bytes, version: str) -> bytes:
-    """The room already says it; only the version it stands at has moved."""
-    doc = _opened(live)
-    was = doc.get_state()
-    doc[STANDING][BASE] = version
-    return doc.get_update(was)
-
-
-def carried(live: bytes, change: Change, version: str) -> bytes:
+def carried(live: bytes, change: Change) -> bytes:
     """An update taking the room from what it holds to what the file now says.
 
     Built on the room's LIVE state, because a Yjs update computed against a
@@ -162,7 +142,6 @@ def carried(live: bytes, change: Change, version: str) -> bytes:
     doc = _opened(live)
     was = doc.get_state()
     _carry(doc[CONTENT], change)
-    doc[STANDING][BASE] = version
     return doc.get_update(was)
 
 

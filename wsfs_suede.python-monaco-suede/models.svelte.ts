@@ -6,6 +6,7 @@ export class EditableFile {
   readonly: boolean;
   source: string;
   sourceSync?: ConstructorParameters<typeof MonacoBinding>[0];
+  syncBinding?: MonacoBinding;
 
   constructor({
     name,
@@ -21,5 +22,6 @@ export class EditableFile {
     this.source = $state(source);
     this.readonly = $state(readonly);
     this.sourceSync = $state(sourceSync);
+    this.syncBinding = $state(undefined);
   }
 }

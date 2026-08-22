@@ -182,8 +182,18 @@ def create_sample_app(
         """
         await _rooms().hand_over(str(entry_id), await request.body())
 
-    @app.post("/rooms/{entry_id}", status_code=204)
-    async def ensure_room(entry_id: UUID) -> None:
+    @app.post("/rooms/{entry_id}/stored", status_code=204)
+    async def room_stored(entry_id: UUID, body: dict[str, str]) -> None:
+        """A member of this room wrote the file.
+
+        Told rather than discovered. The room already holds the text, so the
+        only thing that changed is where this host believes it stands -- and
+        knowing that is what makes every other client's settle free.
+        """
+        await _rooms().stored(str(entry_id), body["version"])
+
+    @app.post("/rooms/{entry_id}")
+    async def ensure_room(entry_id: UUID) -> dict[str, str | None]:
         """Make this entry's shared room exist and say what the file says.
 
         Idempotent, and the only way a room is ever filled: the browsers used
@@ -191,7 +201,7 @@ def create_sample_app(
         settle because a document that has not synced looks exactly like an
         empty one.
         """
-        await _rooms().ensure(str(entry_id))
+        return {"base": await _rooms().ensure(str(entry_id))}
 
     def _rooms():
         secret = os.environ.get("LIVEBLOCKS_SECRET_KEY")

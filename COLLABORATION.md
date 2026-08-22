@@ -395,43 +395,41 @@ brought up to date at startup rather than silently disagreeing.
 none does.** A user whose typing is not reaching anybody should be told,
 particularly now that `send` returns a sentence saying exactly why.
 
-**The sample shell: 16 passed, 2 failed.** Both failures are the same wiring --
-typing does not reach `dirty`, so nothing autosaves, so the other client never
-sees it. `Workspace.svelte` is the consumer a user actually touches, and this
-is the last piece of it without working coverage.
+**The sample shell: 16 passed, 2 failed, and both for one understood reason.**
+Tests 13 and 18 assert that typing reaches the SERVER. Under this design that
+needs the room to be reachable — a client that is reaching nobody keeps a
+draft instead, deliberately. `solo()`, the fake Liveblocks room, is *"a room
+with nobody else in it"*: it never acknowledges an update, so its provider
+reports `synchronizing` for ever, so `speaks` is false, so every store becomes
+a draft and the file never changes.
 
-The third failure is gone: rooms now open in the sample shell, which
-server-side seeding fixed.
+**The tests are asserting a property the test double cannot provide.** Fixing
+it means making `solo()` acknowledge — reply to `updateYDoc` with the room's
+new state vector, which is what a provider waits for. One attempt at that
+looped (echoing the update back made the sender send again) and a second hung;
+it wants someone who will read the Liveblocks wire protocol rather than infer
+it.
 
-**What has been ruled out**, so the next person does not repeat it:
+Three real bugs were found and fixed on the way, none of which was the whole:
 
-- The wrapped `props` DO reach the editor — `FileView.svelte` spreads
-  `sharedText.props`, so `onEditor` runs and `UserEdits` is built.
-- `UserEdits` is now ATTACHED to the shared text rather than rebuilt when the
-  room arrives. Rebuilding registered its model listener behind the binding's,
-  so every keystroke arrived while the binding's Yjs transaction was open and
-  was classified as somebody else's. That was a real bug and is fixed; it was
-  not the whole of this one.
-- `solo()`, the fake room, now relays updates between the providers in a page
-  rather than dropping them. A room with nobody in it is the right fake for one
-  editor and the wrong one for a test that opens two.
+- **The tests typed like a program.** `model.applyEdits` carries no provenance,
+  and with no focus there is nothing to attribute it to, so `UserEdits`
+  ignored it — correctly. A peer's edit arriving through the binding looks
+  exactly the same, and counting those as this person's work would have every
+  member of a room storing every other member's typing. The tests now focus
+  the editor and let it route the keystroke, which is what a person does.
+- **`storing()` returned nothing when the room was holding.** Under drafts
+  there IS a transaction to name — the draft's — and it is exactly what a
+  snapshot needs, because the server can rebuild it.
+- **`dirty` stayed set after a draft.** It means "exists nowhere else yet",
+  and a draft is somewhere else.
 
-**The lead worth following.** `UserEdits` decides a change is somebody else's
-by asking whether a Yjs transaction is in flight on the document. That works
-only if its own `onDidChangeModelContent` listener runs BEFORE the binding's --
-because a local keystroke and a remote update both end up inside a transaction,
-and the stack cannot tell them apart. Monaco runs listeners in registration
-order, so the answer depends on whether the editor mounted before or after the
-room opened. Rooms open faster now that the server fills them, which is very
-likely why this shows up here.
-
-If that is it, the fix is not to reorder anything: it is to discriminate on the
-transaction's ORIGIN rather than on there being one. y-monaco uses the binding
-as the origin when it writes a local edit into the document, and the provider's
-when it applies a remote one. `UserEdits` should ignore only the second.
-
-That wants reading y-monaco to confirm what origin it actually passes, which is
-why it is written down here rather than guessed at.
+**The cold-open cost is measured, not guessed:** first settle 1.7–2.3s,
+repeat 11–28ms. Three sequential calls to the collaboration server — create
+the room, read it, fill it — and `create` is required, verified by trying
+without it (`ROOM_NOT_FOUND`). It is once per file ever. The right place to
+pay it is when the file is CREATED rather than when it is first opened, which
+is not built.
 
 ## What to pick up
 

@@ -72,6 +72,8 @@ class WsfsFiles:
     async def now(self, entry: str) -> Held | None:
         async with self._backend.database.session() as session:
             held = await self._held(session, UUID(entry))
+            if held is None:
+                return None
             if not self._is_text(held):
                 return None
             return Held(text=await self._text_of(session, held), version=str(held.id))
@@ -79,14 +81,15 @@ class WsfsFiles:
     async def at(self, entry: str, version: str) -> str:
         async with self._backend.database.session() as session:
             held = await self._held(session, UUID(entry), UUID(version))
-            if not self._is_text(held):
+            if held is None or not self._is_text(held):
                 return ""
             return await self._text_of(session, held)
 
     async def _held(self, session: AsyncSession, entry: UUID, version: UUID | None = None):
-        return await resolve_content(
-            self._backend, session, await self._workspace_of(session, entry), entry, version
-        )
+        workspace = await self._workspace_of(session, entry)
+        if workspace is None:
+            return None
+        return await resolve_content(self._backend, session, workspace, entry, version)
 
     def _is_text(self, held: object) -> bool:
         return isinstance(held, self._backend.models.text_content)
@@ -94,13 +97,17 @@ class WsfsFiles:
     async def _text_of(self, session: AsyncSession, held) -> str:
         return await self._backend.schema.text.at(session, held.entry_id, held.position)
 
-    async def _workspace_of(self, session: AsyncSession, entry: UUID) -> UUID:
-        """An entry belongs to exactly one workspace, so nobody need be told."""
+    async def _workspace_of(self, session: AsyncSession, entry: UUID) -> UUID | None:
+        """An entry belongs to exactly one workspace, so nobody need be told.
+
+        None when the server has never heard of it, which is ordinary rather
+        than exceptional: a client shows a file the moment it is asked for and
+        opens its room straight away, so the room can be asked about before
+        the create it belongs to has landed.
+        """
         rows = self._backend.models.entry
         found = (await session.exec(select(rows).where(col(rows.id) == entry))).first()
-        if found is None:
-            raise LookupError(f"no such entry: {entry}")
-        return found.workspace_id
+        return None if found is None else found.workspace_id
 
 
 def keeper_over(backend: Backend, secret: str) -> Keeper:

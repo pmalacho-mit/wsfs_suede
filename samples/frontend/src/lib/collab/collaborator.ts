@@ -37,11 +37,12 @@ import {
   type Room,
   type HandOver,
   type Settle,
-  type Stored,
+  type Stored as ToldStored,
+  type Written,
 } from "./room.svelte";
 
 export { become } from "./room.svelte";
-export type { Replacement, Stored } from "./room.svelte";
+export type { Replacement, Written } from "./room.svelte";
 
 type LiveblocksClient = ReturnType<typeof createClient>;
 
@@ -78,6 +79,23 @@ export const clientAs = (email: string): LiveblocksClient =>
 export const settling: Settle = async (entry) => {
   const answer = await fetch(`/rooms/${encodeURIComponent(entry)}`, { method: "POST" });
   if (!answer.ok) throw new Error(`settling ${entry}: ${answer.status}`);
+  return ((await answer.json()) as { base: string | null }).base;
+};
+
+/**
+ * Telling the host a member of this room wrote the file.
+ *
+ * Cheap on purpose, and it is what makes everybody else's settle free: the
+ * room already holds the text, so the host only has to be told where the file
+ * now stands rather than go and look.
+ */
+export const storedFromRoom: ToldStored = async (entry, version) => {
+  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/stored`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version }),
+  });
+  if (!answer.ok) throw new Error(`stored ${entry}: ${answer.status}`);
 };
 
 const synchronized = (provider: LiveblocksYjsProvider) =>
@@ -172,6 +190,7 @@ export class Collaborator {
       this.workspace,
       enteringWith(this.liveblocks),
       settling,
+      storedFromRoom,
       handingOver,
       persisting,
     );
@@ -255,7 +274,7 @@ export class Collaborator {
     become(this.#room(entry).text, next);
   }
 
-  store(entry: string): Promise<Stored> {
+  store(entry: string): Promise<Written> {
     return this.#room(entry).store(this.#path(entry));
   }
 

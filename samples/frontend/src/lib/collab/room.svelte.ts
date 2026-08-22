@@ -45,8 +45,17 @@ export type Enter = (
   doc: Y.Doc,
 ) => { provider: Provider; leave: () => void };
 
-/** Asking the host to make this entry's room exist and say what the file says. */
-export type Settle = (entry: string) => Promise<void>;
+/**
+ * Asking the host to make this entry's room exist and say what the file says.
+ *
+ * Answers where the room now stands, which the host keeps rather than the
+ * document: putting it in the document would mean a write to the
+ * collaboration server every time anybody saved, for every client that heard.
+ */
+export type Settle = (entry: string) => Promise<string | null>;
+
+/** Telling the host that a member of this room wrote the file. */
+export type Stored = (entry: string, version: string) => Promise<void>;
 
 /**
  * Asking the host to put this client's own update into the room for it.
@@ -118,14 +127,11 @@ export type Sending =
     };
 
 /** The same write, once the server has ruled on it. */
-export type Stored =
+export type Written =
   | Held
   | { held: false; transaction: contract.Transaction; rejected: boolean };
 
 const CONTENT = "content";
-const STANDING = "standing";
-const PRODUCED = "produced";
-const BASE = "base";
 
 /**
  * Make a shared text say `next`, changing as little as possible.
@@ -174,6 +180,15 @@ export class Room {
   attached = $state(false);
 
   /**
+   * How far opening this room has got.
+   *
+   * Opening is four waits in a row and any of them can be the one that never
+   * finishes. Without this, all four look identical from outside: a promise
+   * that has not settled and a file that never binds.
+   */
+  opening = $state("not started");
+
+  /**
    * Heard something while detached, and has not caught up since.
    *
    * Nothing more is remembered, deliberately: whatever happened while the room
@@ -213,10 +228,14 @@ export class Room {
     return this.doc.getText(CONTENT);
   }
 
-  /** The version this room's text descends from, as the server stamped it. */
-  get base(): string | null {
-    return (this.doc.getMap(STANDING).get(BASE) as string | undefined) ?? null;
-  }
+  /**
+   * The version this room's text descends from, as the host last said.
+   *
+   * Held here rather than in the document. It is bookkeeping, the host is the
+   * only thing that decides it, and a document is an expensive place to keep
+   * anything that changes every time somebody saves.
+   */
+  base = $state<string | null>(null);
 
   /**
    * Whether this room may answer for the file, and write it back.
@@ -310,7 +329,7 @@ export class Room {
 
   /** Have the server bring this room up to whatever the file now says. */
   async catchUp(): Promise<void> {
-    await this.held.settle(this.entry);
+    this.base = await this.held.settle(this.entry);
     this.#missed = false;
   }
 
@@ -330,14 +349,21 @@ export class Room {
       path,
       this.text.toString(),
     );
-    this.#claim(transaction);
+
     /**
      * Taken back here rather than by whoever awaits, so that a caller which
      * never awaits at all still leaves the bookkeeping straight. A refusal
      * never became content, so nothing about the room's base changed.
      */
+    /**
+     * Told, not discovered. The room already holds this text, so the host
+     * only has to be told where the file now stands -- and every other client
+     * that hears about this write then costs nothing to answer.
+     */
     void settled.then((answer) => {
-      if (answer.rejected) this.#disown(transaction);
+      if (answer.rejected) return;
+      this.base = transaction;
+      void this.held.stored(this.entry, transaction);
     });
     return { held: false, transaction, settled };
   }
@@ -394,14 +420,6 @@ export class Room {
     return this.attached ? "the room owes a catch-up" : "the room is not reaching anybody";
   }
 
-  #claim(transaction: contract.Transaction) {
-    this.doc.getMap(PRODUCED).set(transaction, true);
-  }
-
-  #disown(transaction: contract.Transaction) {
-    this.doc.getMap(PRODUCED).delete(transaction);
-  }
-
   /**
    * Waits for what this client is holding to reach the server, then stores.
    *
@@ -412,7 +430,7 @@ export class Room {
    * refusing -- `send` is the one that refuses, and by then there is nothing
    * left to wait for.
    */
-  async store(path: string): Promise<Stored> {
+  async store(path: string): Promise<Written> {
     if (this.attached) await this.#provider?.handedOver();
     const sent = this.send(path);
     if (sent.held) {
@@ -551,11 +569,22 @@ export class Rooms {
     readonly workspace: Workspace,
     readonly enter: Enter,
     readonly settle: Settle,
+    readonly stored: Stored,
     readonly handOver: HandOver,
     readonly persist: Persist,
   ) {
     this.#watching = workspace.watch((changes) => {
       for (const change of changes) {
+        /**
+         * A create counts too. A client shows a file the moment it is asked
+         * for and opens its room straight away, so the room can exist before
+         * the server has heard of the entry -- and the host cannot fill a
+         * room from a file it does not have yet.
+         */
+        if (change.kind === "appeared") {
+          void this.held.get(change.entry)?.catchUp();
+          continue;
+        }
         if (change.kind === "removed") {
           void this.held.get(change.entry)?.standDown(change.by, null);
           continue;
@@ -602,11 +631,16 @@ export class Rooms {
   async open(entry: string): Promise<Room> {
     const room = this.held.get(entry) ?? new Room(entry, this);
     this.held.set(entry, room);
+    room.opening = "recalling";
     await room.recall();
-    await this.settle(entry);
+    room.opening = "settling";
+    room.base = await this.settle(entry);
+    room.opening = "attaching";
     await room.attach();
     room.ready = true;
+    room.opening = "storing what nobody stored";
     await room.storeWhatNobodyStored();
+    room.opening = "open";
     return room;
   }
 

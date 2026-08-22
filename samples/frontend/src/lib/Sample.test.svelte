@@ -42,6 +42,43 @@
   /** One room's worth of collaboration, with nobody else in it. */
   const collaboration = solo();
 
+  /**
+   * Type the way a person does, which is the only kind of edit that counts.
+   *
+   * `model.applyEdits` is what a PROGRAM does: it carries no provenance, and
+   * with no focus either there is nothing to attribute it to. `UserEdits`
+   * ignores it deliberately -- a peer's edit arriving through the binding
+   * looks exactly the same, and treating those as this person's work would
+   * have every member of a room storing every other member's typing.
+   *
+   * So the test has to be a person: focus the editor, put the caret where the
+   * text goes, and let the editor route it.
+   */
+  const typeInto = (editor: any, text: string) => {
+    const model = editor.getModel()!;
+    const line = model.getLineCount();
+    editor.focus();
+    editor.setPosition({ lineNumber: line, column: model.getLineMaxColumn(line) });
+    editor.trigger("keyboard", "type", { text });
+  };
+
+  /**
+   * Wait for a file's room to be open before asserting anything about
+   * sharing.
+   *
+   * Opening one is not free the first time: the host has to create the room
+   * with the collaboration server, ask what it holds, and fill it, which is
+   * three round trips and takes a second or two. Typing before that is
+   * typing into a document nothing is carrying yet.
+   */
+  const shared = async (take: any, path: string) =>
+    await until(
+      `${path} to be shared`,
+      () => take().entries.find((one: any) => one.path === path)?.stage === "open",
+      () => JSON.stringify(take().entries.find((one: any) => one.path === path)),
+      20_000,
+    );
+
   class Pocket {
     root = $state<HTMLElement>();
     workspace = $state<Client>();
@@ -659,12 +696,7 @@
       () => pocket.editor!.getModel()?.getValue() === "before",
       () => JSON.stringify(pocket.editor!.getModel()?.getValue()),
     );
-    const model = pocket.editor!.getModel()!;
-    const line = model.getLineCount();
-    const column = model.getLineMaxColumn(line);
-    model.applyEdits([
-      { range: { startLineNumber: line, startColumn: column, endLineNumber: line, endColumn: column }, text: " after" },
-    ]);
+    typeInto(pocket.editor!, " after");
 
     // Nothing writes the shared text back to the workspace except the file
     // itself, on a debounce -- so this is the assertion that the editor is
@@ -974,21 +1006,17 @@
     harness.expect(before.dirty).toBe(false);
     harness.expect(before.stored).toBeUndefined();
 
-    const model = pocket.editor!.getModel()!;
-    const line = model.getLineCount();
-    model.applyEdits([
-      {
-        range: {
-          startLineNumber: line,
-          startColumn: model.getLineMaxColumn(line),
-          endLineNumber: line,
-          endColumn: model.getLineMaxColumn(line),
-        },
-        text: " more",
-      },
-    ]);
+    await shared(pocket.take, "draft.py");
+    typeInto(pocket.editor!, " more");
 
-    await until("it went dirty", () => take().entries.some((held: any) => held.dirty));
+    await until(
+      "it went dirty",
+      () => take().entries.some((held: any) => held.dirty),
+      () =>
+        JSON.stringify(
+          take().entries.find((one: any) => one.path === "draft.py"),
+        ),
+    );
 
     // One pass: it comes back already resolved, naming the transaction that
     // carries what the user was looking at -- whose content version does not
@@ -996,7 +1024,7 @@
     const resolved = take({ resolveDirty: true }).entries.find(
       (held: any) => held.path === "draft.py",
     );
-    harness.expect(resolved.dirty).toBe(false);
+    if (resolved.dirty) throw new Error(`still dirty -- ${JSON.stringify(resolved)}`);
     harness.expect(typeof resolved.stored).toBe("string");
     harness.expect(resolved.versions.content).not.toBe(resolved.stored);
 
