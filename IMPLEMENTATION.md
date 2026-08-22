@@ -293,36 +293,46 @@ not what is true. The typing debounce stays by design.
 
 ---
 
-## Step 5 — Local durability and replay at load
+## Step 5 — Local durability — DONE (replay at load is not)
 
-**Now.** Nothing persists locally. A crash or a tab close loses anything typed
-since the last successful store.
+**`y-indexeddb`, wired by us.** `LiveblocksYjsProvider` has an
+`offlineSupport_experimental` option with an internal indexeddb provider and a
+`clearOfflineData()`, and we are deliberately not using it: it is undocumented
+and experimental, and durability is the one thing that has to be completely
+clear to whoever reads it next.
 
-**Wanted.**
+**Three loads now, in order, each waiting for the last.** `Rooms.open` recalls
+what this machine was holding, then settles the room with the server, then
+attaches the provider. Recalling first is what makes a document that was ahead
+when the tab closed ahead again when it opens, rather than looking empty and
+being filled with something older. "The document is empty" is only a fact after
+all three.
 
-- `y-indexeddb`, wired by us. `LiveblocksYjsProvider` has an
-  `offlineSupport_experimental` option with an internal indexeddb provider and
-  a `clearOfflineData()`, and we are deliberately NOT using it: it is
-  undocumented and experimental, and durability is the one thing that has to be
-  completely clear to whoever reads it next.
-- On page load, the client sends its outbox **and** Yjs updates for documents it
-  knows are dirty — not every document. Most loads carry nothing.
-- The server forwards those updates into the rooms and sets `base` from the
-  resulting version. Forwarding is a passthrough; idempotency makes it safe
-  whatever else is arriving.
-- **Order within the load transaction:** adjudicate the outbox, then replay
-  document updates, then set `base`. Replay is additive and idempotent, so this
-  order is safe and the reverse is not.
+**Putting a document down is now awaitable, and had to be.** The first version
+of the scenario failed: the update was still on its way to storage when the
+document was destroyed, so the work was gone — which is exactly the loss the
+rung exists to prevent. `dispose` flushes (`storeState(..., true)`) before
+destroying, and `Room.dispose`, `Rooms.close`, `Rooms.dispose` and
+`Collaborator.dispose` all return promises now. Finishing writing something is
+part of putting it down.
 
-**Note.** There are now **two** sync events — local store and remote room — and
-"the document is empty" is only a fact after both.
+**Confirm.** A tenth scenario: Ada goes offline, types, her tab goes away with
+nothing stored and nothing shared, a fresh client opens the same file and the
+machine hands the work back — then it reaches Grace exactly once and the
+snapshot still rebuilds. Ten of ten in both browsers.
 
-**Confirm.**
-- Type with the room connection down, close the tab, reopen → the work is there.
-- Then let it reach the second browser after the first reloads. A reload is a
-  way *out* of being ahead.
-- Kill the tab mid-typing (not a clean close) and reopen.
-- Confirm payload size: a clean session's load carries no document updates.
+### Not done
+
+Replay at load — sending the outbox and dirty document updates to the server on
+the initial workspace request — is not built. It matters for one case the
+provider does not cover: a client that can reach the SERVER but not Liveblocks,
+whose work would otherwise sit locally until the room is reachable again. The
+work is durable either way, which is why this is a refinement rather than the
+point.
+
+The `recorded` set that makes drafts and refusals count as rebuildable is still
+in memory, so it does not survive a reload. It belongs with the outbox when
+that is persisted.
 
 ---
 

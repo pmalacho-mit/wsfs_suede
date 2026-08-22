@@ -27,9 +27,12 @@ import {
 } from "$wsfs";
 
 import { emailOf, type Part } from "./collaboration";
+import { IndexeddbPersistence, storeState } from "y-indexeddb";
+
 import {
   Rooms,
   become,
+  type Persist,
   type Replacement,
   type Room,
   type Settle,
@@ -97,6 +100,24 @@ const handedOver = (liveblocks: LiveblocksClient, provider: LiveblocksYjsProvide
     });
   });
 
+/**
+ * This machine's own copy, kept under the entry's id.
+ *
+ * Keyed by entry rather than by session so that the next tab to open the same
+ * file finds it -- which is the whole point: work reaches here the moment it
+ * is typed, and outlives the tab that typed it.
+ */
+export const persisting: Persist = (entry, doc) => {
+  const kept = new IndexeddbPersistence(`wsfs:${entry}`, doc);
+  return {
+    loaded: kept.whenSynced.then(() => undefined),
+    stop: async () => {
+      await storeState(kept, true);
+      await kept.destroy();
+    },
+  };
+};
+
 export const enteringWith = (liveblocks: LiveblocksClient) =>
   ((entry, doc) => {
     const entered = liveblocks.enterRoom(entry);
@@ -137,7 +158,12 @@ export class Collaborator {
       bytes: inMemory(),
     });
     this.liveblocks = clientAs(this.email);
-    this.rooms = new Rooms(this.workspace, enteringWith(this.liveblocks), settling);
+    this.rooms = new Rooms(
+      this.workspace,
+      enteringWith(this.liveblocks),
+      settling,
+      persisting,
+    );
   }
 
   /** The version a room's text descends from, as the server stamped it. */
@@ -371,8 +397,8 @@ export class Collaborator {
     return ((await answer.json()) as contract.ReconstructionResponse).entries;
   }
 
-  dispose() {
-    this.rooms.dispose();
+  async dispose(): Promise<void> {
+    await this.rooms.dispose();
     this.workspace.stop();
   }
 }

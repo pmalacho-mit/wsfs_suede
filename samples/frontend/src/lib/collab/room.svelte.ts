@@ -48,6 +48,18 @@ export type Enter = (
 /** Asking the server to make this entry's room exist and say what the file says. */
 export type Settle = (entry: string) => Promise<void>;
 
+/**
+ * Keeping this document on THIS MACHINE, so a tab closing does not lose it.
+ *
+ * The rung below the room. Work reaches here the moment it is typed, before
+ * anybody else could possibly have it, and it is what makes a crash survivable
+ * -- see `SCENARIOS.md`, E2 and E3.
+ */
+export type Persist = (
+  entry: string,
+  doc: Y.Doc,
+) => { loaded: Promise<void>; stop: () => Promise<void> };
+
 /** What a write that was not text did to a room showing text. */
 export type Replacement = {
   entry: string;
@@ -159,6 +171,7 @@ export class Room {
 
   #provider: Provider | undefined;
   #leave: (() => void) | undefined;
+  #stopKeeping: (() => void) | undefined;
   /**
    * The attach in flight, so that a second caller waits for the first.
    *
@@ -235,6 +248,20 @@ export class Room {
       return;
     }
     await this.catchUp();
+  }
+
+  /**
+   * Bring back what this machine was holding.
+   *
+   * Before anything else, so that a document which was ahead when the tab
+   * closed is ahead again when it opens -- rather than looking empty and
+   * being filled with something older.
+   */
+  async recall(): Promise<void> {
+    if (this.#stopKeeping !== undefined) return;
+    const { loaded, stop } = this.held.persist(this.entry, this.doc);
+    this.#stopKeeping = stop;
+    await loaded;
   }
 
   /** Have the server bring this room up to whatever the file now says. */
@@ -393,8 +420,18 @@ export class Room {
     await this.catchUp();
   }
 
-  dispose() {
+  /**
+   * Put the document down, having finished writing it.
+   *
+   * The flush is awaited before the document is destroyed, because the whole
+   * point of the rung below the room is that a tab going away does not take
+   * the work with it -- and an update still on its way to storage when the
+   * document is torn down is exactly that loss.
+   */
+  async dispose(): Promise<void> {
     this.detach();
+    await this.#stopKeeping?.();
+    this.#stopKeeping = undefined;
     this.doc.destroy();
   }
 }
@@ -415,6 +452,7 @@ export class Rooms {
     readonly workspace: Workspace,
     readonly enter: Enter,
     readonly settle: Settle,
+    readonly persist: Persist,
   ) {
     this.#watching = workspace.watch((changes) => {
       for (const change of changes) {
@@ -436,7 +474,15 @@ export class Rooms {
   /**
    * Open a file's room and make it trustworthy before anything is shown.
    *
-   * SETTLED FIRST, ALWAYS. The server fills a room nobody has filled yet, so
+   * RECALLED, THEN SETTLED, THEN ATTACHED, and each waits for the last. What
+   * this machine was holding comes back first, so a document that was ahead
+   * when the tab closed is ahead again rather than looking empty; then the
+   * server fills a room nobody has filled yet; then the provider syncs.
+   *
+   * There are TWO loads to wait for now, not one, and "the document is empty"
+   * is only a fact after both.
+   *
+   * SETTLED BEFORE ATTACHED, ALWAYS. The server fills a room nobody has filled yet, so
    * that by the time a provider syncs, an empty document means an empty file
    * rather than one that has not arrived. Clients used to decide this among
    * themselves, which they cannot: a document that has not synced looks
@@ -446,20 +492,21 @@ export class Rooms {
   async open(entry: string): Promise<Room> {
     const room = this.held.get(entry) ?? new Room(entry, this);
     this.held.set(entry, room);
+    await room.recall();
     await this.settle(entry);
     await room.attach();
     room.ready = true;
     return room;
   }
 
-  close(entry: string) {
-    this.held.get(entry)?.dispose();
+  async close(entry: string): Promise<void> {
+    await this.held.get(entry)?.dispose();
     this.held.delete(entry);
   }
 
-  dispose() {
+  async dispose(): Promise<void> {
     this.#watching();
-    for (const room of this.held.values()) room.dispose();
+    await Promise.all([...this.held.values()].map((room) => room.dispose()));
     this.held.clear();
   }
 }

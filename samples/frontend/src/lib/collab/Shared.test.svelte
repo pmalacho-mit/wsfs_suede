@@ -766,3 +766,68 @@
     <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
+
+<Sweater
+  name="keeps what was typed when the tab holding it goes away"
+  body={async (harness) => {
+    /**
+     * The rung below the room. Ada types while she can reach nobody, and then
+     * her tab is gone -- no store landed, no update reached anybody. The only
+     * copy is on her machine, and it has to still be there.
+     *
+     * `SCENARIOS.md` E2 and E3: without this the work is simply lost, and it
+     * is the one exposure no server design can close.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "keeps", "start\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("start"));
+
+      client.goOffline(entry);
+      client.type(entry, client.text(entry) + "typed then closed\n");
+      const wanted = client.text(entry);
+
+      /** The tab goes. Nothing was stored and nothing was shared. */
+      await client.dispose();
+
+      const reopened = await joined(harness);
+      await reopened.open(entry);
+      await until(
+        "the machine to hand back what it was holding",
+        () => reopened.text(entry).includes("typed then closed"),
+      );
+      harness.expect(reopened.text(entry)).toBe(wanted);
+      pocket.text = reopened.text(entry);
+      pocket.note = "still here after the tab went";
+
+      /** And once it is back, it reaches everybody the ordinary way. */
+      await until("the room to speak again", () => reopened.speaks(entry));
+      const stored = await reopened.store(entry);
+      if (stored.held) throw new Error(`would not store: ${stored.why}`);
+      await announce(step(id, "keeps", "stored"));
+      await reopened.take(entry);
+      await reopened.rebuildable();
+    } else {
+      await client.open(entry);
+      await awaiting(step(id, "keeps", "stored"));
+      await until("ada's typing to arrive", () =>
+        client.text(entry).includes("typed then closed"),
+      );
+      pocket.text = client.text(entry);
+      pocket.note = "saw it once her tab came back";
+      harness.expect(pocket.text.split("typed then closed").length - 1).toBe(1);
+      await client.take(entry);
+      await client.rebuildable();
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
