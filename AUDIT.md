@@ -44,6 +44,10 @@ Every row is either covered by a browser scenario or named here as uncovered.
 | J1–J9 | the draft lifecycle | 6, and `tests/drafts.py` |
 | K1–K6 | writes that were never in an editor | 3, 8, 12 |
 | being told you are out of touch | `Room.trouble` names why the room cannot write | 6 |
+| F3 | writing text around a document that holds it | `write` refuses it; `tests/frontend/wire.test.ts` |
+| invariant 6, client half | an unissued token makes the client start again | `tests/frontend/wire.test.ts` |
+| the outbox outliving the page | queued work sent by the tab that comes next | 18, and `tests/frontend/kept.test.ts` |
+| a queue in a workspace nobody is looking at | waits, then drains on return | `tests/frontend/kept.test.ts` |
 
 And **B3 from the reachable side** — a client that can reach the host but not
 the collaboration server — is scenario 16, which was not in the original
@@ -56,7 +60,7 @@ the end.
 
 ### Not covered
 
-Three, and none of them can lose or duplicate work.
+Two, and neither of them can lose or duplicate work.
 
 - **B3 from the other side** — a client that loses the SERVER and keeps the
   room. Simulating it needs a switch on the transport that does not exist.
@@ -65,15 +69,6 @@ Three, and none of them can lose or duplicate work.
 - **F5 / H4** — a snapshot restored over a file somebody has open. It takes
   the same path as a script's write, which scenario 3 covers, but the restore
   itself is untested.
-- **F3** — a client with a document writing without joining the room. The
-  design requires it not to; nothing enforces it. Worth a guard, not just a
-  convention.
-- **The client half of invariant 6.** A token the server never issued is
-  refused with the right reason and that is tested; the loop re-enters when
-  nudged and that is tested; the line joining them — `workspace.ts` nudging on
-  that reason — has no test, because there is no fake transport to make a
-  server say it. That is the one seam in the sync core with tests on both
-  sides and none in the middle.
 
 ### Where the design is genuinely weak
 
@@ -236,15 +231,12 @@ path -- settle after somebody saved -- cost neither a query nor a call.
   server-origin write, so it takes the same path as a kernel's output, which
   scenario 3 covers; the restore case itself is untested.
 
-**The `recorded` set is in memory.** It is what lets `unsettled` answer for
-drafts, refusals and superseded writes, and a reload loses it — which
-understates what the server can rebuild rather than overstating it. It belongs
-with the outbox when that is persisted.
-
-**Drafts are kept forever and are not deduplicated.** `predecessor` chains a
-run of one client's drafts so storage holds only what was typed since, which
-bounds a long offline session. Same-client supersession and digest dedup are
-not built.
+**Drafts are kept forever, and that is the decision rather than a gap.** A
+draft can be part of a snapshot somebody took at that moment, so a later one
+does not stand in for an earlier one — every draft is a member of the outbox
+like any other transaction and has to reach the server. `predecessor` chains a
+run of them so storage holds what was typed since rather than a document per
+save.
 
 **A migration that is not additive still needs a person.** `widen` adds
 columns and refuses everything else — a column the code no longer declares is

@@ -119,7 +119,7 @@
   /** A collaborator wired to the shared workspace, torn down with the test. */
   const joined = async (harness: any) => {
     const id = await workspace();
-    const client = new Collaborator(me(), id);
+    const client = await Collaborator.opened(me(), id);
     harness.onAbort(() => client.dispose());
     await until("the workspace to settle", () => client.workspace.index().paths().length >= 0);
     return client;
@@ -1314,6 +1314,75 @@
       pocket.text = client.text(entry);
       pocket.note = "saw it once";
     }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="sends work queued before the tab went, once it is opened again"
+  body={async (harness) => {
+    /**
+     * The outbox, across page loads, against a real IndexedDB.
+     *
+     * Everything else in this client exists so that work reaches the server,
+     * and until now all of it lived in one closure that a reload emptied. A
+     * design whose claim is "a user never loses work" cannot keep the only
+     * copy of that work in memory.
+     *
+     * Solo on purpose: one machine losing the server and coming back is not a
+     * question about two clients, and making it one would only add a barrier.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    if (!playing("ada")) {
+      pocket.note = "not this one's scenario";
+      return;
+    }
+
+    const id = await workspace();
+    const client = await Collaborator.opened(me(), id);
+    harness.onAbort(() => client.dispose());
+    const { entry, settled } = client.workspace.create("outlived.py", "start\n");
+    await settled;
+
+    /**
+     * The server goes. What is typed now is answered by nobody, so it stays in
+     * the queue -- and the queue is the thing being tested, so nothing here
+     * awaits an answer that is never coming.
+     */
+    client.reachable(false);
+    const queued = client.workspace.write("outlived.py", "start\nqueued while away\n");
+    void queued.settled.catch(() => undefined);
+    await new Promise((carry) => setTimeout(carry, 500));
+
+    /** And the tab goes. Nothing in memory survives this; the store does. */
+    await client.dispose();
+
+    const again = await Collaborator.opened(me(), id);
+    harness.onAbort(() => again.dispose());
+    await until("the new tab to have the file at all", () =>
+      again.workspace.entries().has(entry),
+    );
+    const said = await untilAsked(
+      "the queued write to reach the server",
+      () => again.reads(entry),
+      (text) => text.includes("queued while away"),
+    );
+    harness.expect(said).toContain("queued while away");
+
+    /** And it is not merely on the server -- it is settled, so it is portable. */
+    await until(
+      "the answer to be written down too",
+      () => again.workspace.unsettled([queued.transaction]).length === 0,
+      15_000,
+    );
+    pocket.text = said;
+    pocket.note = "queued in a tab that closed, sent by the next one";
+    await again.rebuildable();
   }}
 >
   {#snippet vest(pocket: Pocket)}

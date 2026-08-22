@@ -3,7 +3,7 @@
 
   import Workspace from "$lib/Workspace.svelte";
   import { solo } from "$lib/liveblocks";
-  import { connect, http, inMemory, type Workspace as Client } from "$wsfs";
+  import { connect, http, keeping, type Workspace as Client } from "$wsfs";
   import { createClient } from "@liveblocks/client";
 
   const USER = "ada@example.com";
@@ -34,10 +34,19 @@
 
   const start = async () => {
     try {
+      const id = await project(USER);
+      /**
+       * Read before anything is served. A client that started answering reads
+       * and then found it had queued work would have shown a view missing its
+       * own -- so the queue is restored first, and `connect` is handed it.
+       */
+      const held = await keeping(id);
       workspace = connect({
-        workspace: await project(USER),
+        workspace: id,
         transport: http(BACKEND, asUser(USER)),
-        bytes: inMemory(),
+        bytes: held.bytes,
+        kept: held.kept,
+        restored: held.restored,
       });
     } catch (reason) {
       failure = reason instanceof Error ? reason.message : String(reason);

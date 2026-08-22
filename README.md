@@ -55,18 +55,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pmalacho-mit/suede/refs/head
 Everything about the collaboration server lives in `samples/`. `release/`
 knows nothing about Liveblocks, or about rooms.
 
-## The three rules
+## The four rules
 
 1. **Content that came out of an editor moves as a Yjs update, never as
    text.** Typing text into a document creates new characters, so the same
    work arriving twice survives twice. Only content that was never in an
    editor is diffed in, and that is safe because no second copy of it exists.
+   `write` refuses an entry a document speaks for, so this is enforced rather
+   than remembered.
 2. **The server is the only writer of a room's `base`, and the only party
    that carries text into a room.** Clients type and store; they never
    reconcile.
 3. **A client whose text has reached nobody does not store it as the file.**
    It keeps it as a draft — durable, addressable, and asserting nothing about
    what anybody else is looking at.
+4. **Every transaction this client makes reaches the server**, once the user
+   gets back to the workspace it belongs to. The queue is written down — a row
+   per transaction, scoped by workspace — so it outlives the page that made it
+   AND the user navigating somewhere else, which matters because a queue is
+   drained by the stream of its own workspace. Drafts are members of it like
+   anything else: one can be part of a snapshot somebody took at that moment,
+   so nothing supersedes and nothing is dropped.
 
 ## Run it
 

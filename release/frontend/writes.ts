@@ -164,6 +164,35 @@ export const pump = (wiring: Wiring): Pump => {
   };
 
   /**
+   * Staged and queued with nothing in between, and retried if the tail moved.
+   *
+   * Staging is not instantaneous -- it reads the write in front, diffs against
+   * it, and stores the result -- and the answer to that write can arrive
+   * during it. The tail then leaves the queue, taking the hand-off that would
+   * have given this delta the bytes it needs, and what gets queued is a delta
+   * against a predecessor that is not there: unreadable, and unreadable
+   * FOREVER once the queue survives the page that made it.
+   *
+   * The check and the capture have no `await` between them, which is what
+   * makes them one step. Nothing is thrown away but a delta that turned out to
+   * describe nothing.
+   */
+  const chainedIn = async (
+    entry: Id,
+    request: Write,
+    payload: string | Uint8Array,
+  ): Promise<void> => {
+    for (;;) {
+      const { content, basis } = await staged(entry, payload);
+      if (basis === undefined || queue.find(basis) !== undefined) {
+        queue.capture({ ...request, offset: offset() }, content, basis);
+        return;
+      }
+      released([content]);
+    }
+  };
+
+  /**
    * The request as it goes out: body filled back in, token chosen now rather
    * than when it was queued.
    *
@@ -297,8 +326,7 @@ export const pump = (wiring: Wiring): Pump => {
        */
       void inOrder(entry, async () => {
         try {
-          const { content, basis } = await staged(entry, payload);
-          queue.capture({ ...request, offset: offset() }, content, basis);
+          await chainedIn(entry, request, payload);
           wiring.remembered(request.transaction, heldAs(payload, mime));
           wiring.announced();
           void drain(entry);

@@ -23,6 +23,7 @@
  * business", and `writes.ts` puts them back on the way out.
  */
 import type { Digest, Store } from "./bytes";
+import { nowhere, type Kept } from "./kept";
 import { applyDelta, deltaBetween, type Delta } from "./delta";
 import {
   isWrite,
@@ -117,7 +118,15 @@ const elided = (request: Submitted): Held =>
 export const isElided = (request: Held): request is Elided =>
   isWrite(request as Submitted) && (request as Elided).content === null;
 
-export const queue = (held: Entry[] = []): Queue => {
+/**
+ * `kept` is told by the queue rather than by its callers.
+ *
+ * There are six places that move an item, three of them inside `writes.ts`,
+ * and one of them is not a call at all -- evicting an item hands the digest it
+ * was holding to the chained write behind it. A rule spread over six call
+ * sites is one that gets five of them.
+ */
+export const queue = (held: Entry[] = [], kept: Kept = nowhere): Queue => {
   const items = [...held];
 
   /**
@@ -151,6 +160,7 @@ export const queue = (held: Entry[] = []): Queue => {
     capture: (request, content, basis) => {
       const captured = stamped(elided(request), content, basis);
       items.push(captured);
+      kept.moved({ written: [captured] });
       return captured;
     },
 
@@ -162,16 +172,20 @@ export const queue = (held: Entry[] = []): Queue => {
       const stale = [item.content, item.basis?.content];
       item.content = content;
       delete item.basis;
+      kept.moved({ written: [item] });
       return freeing(stale);
     },
 
     evict: (transactions) => {
       const answered = new Set(transactions);
       const stale: (Digest | undefined)[] = [];
+      const gone: Transaction[] = [];
+      const amended: Entry[] = [];
       for (let at = items.length - 1; at >= 0; at -= 1) {
         const item = items[at]!;
         if (!answered.has(item.request.transaction)) continue;
         items.splice(at, 1);
+        gone.push(item.request.transaction);
         /**
          * A chained write behind this one is a delta against bytes that are
          * about to be forgotten. Hand it the digest on the way past: it is now
@@ -180,10 +194,18 @@ export const queue = (held: Entry[] = []): Queue => {
         const behind = items.find(
           (queued) => queued.basis?.after === item.request.transaction,
         );
-        if (behind?.basis !== undefined && item.content !== undefined)
+        if (behind?.basis !== undefined && item.content !== undefined) {
           behind.basis.content = item.content;
+          amended.push(behind);
+        }
         stale.push(item.content, item.basis?.content);
       }
+      /**
+       * One change, not two. A store told to remove these and separately to
+       * amend those could be killed between the two, and what came back would
+       * be a delta against a predecessor that is gone.
+       */
+      if (gone.length > 0) kept.moved({ written: amended, gone });
       return freeing(stale);
     },
   };

@@ -22,6 +22,7 @@ import {
   type Write,
 } from "./contract";
 import * as effective from "./effective";
+import { nothing, nowhere, type Kept, type Restored } from "./kept";
 import { mint } from "./identity";
 import { offset } from "./minted";
 import * as loop from "./loop";
@@ -50,6 +51,13 @@ export type Options = {
    * that knows which entries have one.
    */
   shared?: (entry: Id) => boolean;
+  /**
+   * Where the queue is written down, and what it held when this client last
+   * ran. Say nothing and the outbox lives and dies with the page, which loses
+   * work and is the default only because a consumer must choose its storage.
+   */
+  kept?: Kept;
+  restored?: Restored;
 };
 
 /**
@@ -177,7 +185,9 @@ const isText = (content: string | Uint8Array): content is string =>
 export const connect = (options: Options): Workspace => {
   const { workspace, transport } = options;
   const bytes = options.bytes ?? inMemory();
-  const queue = outbox.queue();
+  const kept = options.kept ?? nowhere;
+  const restored = options.restored ?? nothing;
+  const queue = outbox.queue(restored.entries, kept);
   const listeners = new Set<Changed>();
 
   let map = confirmed.empty();
@@ -196,10 +206,17 @@ export const connect = (options: Options): Workspace => {
    * An answer is the proof. Whatever the server decided, it wrote the
    * transaction down before saying so.
    *
-   * Held in memory only. A reload loses it, which understates what the server
-   * can rebuild rather than overstating it.
+   * Written down with the queue, and pruned against every snapshot: an answer
+   * the confirmed map speaks for is one this set need not hold. What survives
+   * is only the three the map cannot answer, which is what makes keeping it
+   * across page loads cost almost nothing.
    */
-  const recorded = new Set<Transaction>();
+  const recorded = new Set<Transaction>(restored.recorded);
+
+  const answered = (transaction: Transaction) => {
+    recorded.add(transaction);
+    kept.answered([transaction]);
+  };
 
   const content: Content = cache((entry, version) =>
     transport.content(workspace, entry, version),
@@ -269,7 +286,7 @@ export const connect = (options: Options): Workspace => {
       content.remember(request.transaction, heldAs(payload, mime));
     recomputed();
     const response = await transport.submit(workspace, request);
-    recorded.add(request.transaction);
+    answered(request.transaction);
     if (settledHere(response)) {
       if (response.rejected && response.reason === UNSOUND) sync.nudge();
       bytes.forget(queue.evict([request.transaction]));
@@ -341,7 +358,7 @@ export const connect = (options: Options): Workspace => {
         payload,
         mime,
       );
-      recorded.add(transaction);
+      answered(transaction);
       return answer;
     })();
     return { transaction, settled };
@@ -354,13 +371,21 @@ export const connect = (options: Options): Workspace => {
           workspace,
           await outbox.presenting(queue.entries(), queue, bytes),
         );
-        bytes.forget(
-          queue.evict([
-            ...snapshot.applied,
-            ...snapshot.rejected.map(({ transaction }) => transaction),
-          ]),
-        );
+        /**
+         * Replay is an answer like any other, and it used to be the one that
+         * was not written down. A draft sent during Initialize left the queue
+         * and was recorded nowhere, so a client that had reloaded called its
+         * own landed work unsettled for ever -- which is exactly the question
+         * a consumer asks before handing a snapshot to anybody else.
+         */
+        const answers = [
+          ...snapshot.applied,
+          ...snapshot.rejected.map(({ transaction }) => transaction),
+        ];
+        answers.forEach(answered);
+        bytes.forget(queue.evict(answers));
         map = confirmed.snapshot(snapshot.entries);
+        forgetWhatTheMapNowAnswers();
         recomputed();
         snapshot.entries.forEach(readied);
         flight.resume();
@@ -477,21 +502,41 @@ export const connect = (options: Options): Workspace => {
      * past.
      */
     unsettled: (transactions) => {
-      const confirmed = new Set<Transaction>(recorded);
-      for (const entry of map.values()) {
-        confirmed.add(entry.name_version);
-        confirmed.add(entry.parent_version);
-        confirmed.add(entry.deleted_version);
-        if (entry.content_version != null) confirmed.add(entry.content_version);
-      }
+      const settled = currentVersions();
+      for (const transaction of recorded) settled.add(transaction);
       return [...transactions].filter(
-        (transaction) => !confirmed.has(transaction),
+        (transaction) => !settled.has(transaction),
       );
     },
 
     stop: sync.stop,
     nudge: sync.nudge,
   };
+
+  /**
+   * A snapshot has just said where every entry stands, so any answer this set
+   * holds that is also a current version is one it is keeping twice. What is
+   * left is the three the map cannot speak to -- drafts, refusals, and writes
+   * a later write moved past -- which is the only reason the set exists.
+   */
+  function forgetWhatTheMapNowAnswers(): void {
+    const spoken = [...recorded].filter((transaction) =>
+      currentVersions().has(transaction),
+    );
+    for (const transaction of spoken) recorded.delete(transaction);
+    if (spoken.length > 0) kept.redundant(spoken);
+  }
+
+  function currentVersions(): Set<Transaction> {
+    const held = new Set<Transaction>();
+    for (const entry of map.values()) {
+      held.add(entry.name_version);
+      held.add(entry.parent_version);
+      held.add(entry.deleted_version);
+      if (entry.content_version != null) held.add(entry.content_version);
+    }
+    return held;
+  }
 
   function heldEntry(entry: Id): Metadata {
     const held = shown.view.get(entry);

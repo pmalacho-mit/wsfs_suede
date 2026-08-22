@@ -20,8 +20,9 @@ import {
   connect,
   contract,
   http,
-  inMemory,
+  keeping,
   rooms,
+  type Keeping,
   type Transport,
   type Workspace,
 } from "$wsfs";
@@ -177,16 +178,58 @@ export const enteringWith = (liveblocks: LiveblocksClient) =>
     };
   }) satisfies ConstructorParameters<typeof Rooms>[1];
 
+/**
+ * The wire, with a switch on it.
+ *
+ * There is one for the ROOM already -- `drivable()` -- and none for the
+ * server, so a client that could reach the collaboration server but not this
+ * one was a state no test could reach. It is also the only way to make a
+ * browser hold work long enough to prove the queue outlives the page.
+ *
+ * A refusal, not a hang: a socket that is not there fails, and a client that
+ * waited for ever on one would be a different bug than the one being tested.
+ */
+export const switchable = (wire: Transport): Transport & { reachable: (now: boolean) => void } => {
+  let reaching = true;
+  const reach = () => {
+    if (!reaching) throw new Error("the server cannot be reached");
+  };
+  return {
+    reachable: (now) => (reaching = now),
+    initialize: (workspace, replayed) => (reach(), wire.initialize(workspace, replayed)),
+    submit: (workspace, request) => (reach(), wire.submit(workspace, request)),
+    content: (workspace, entry, version) => (reach(), wire.content(workspace, entry, version)),
+    store: (workspace, digest, bytes, mime) => (reach(), wire.store(workspace, digest, bytes, mime)),
+    cleared: (workspace, transactions) => (reach(), wire.cleared(workspace, transactions)),
+    follow: (workspace, token, reading) => {
+      if (!reaching) {
+        queueMicrotask(() => reading.failed(new Error("the server cannot be reached")));
+        return { close: () => {} };
+      }
+      return wire.follow(workspace, token, reading);
+    },
+  };
+};
+
 export class Collaborator {
   readonly part: Part;
   readonly email: string;
   readonly workspaceId: string;
   readonly workspace: Workspace;
-  readonly transport: Transport;
+  readonly transport: Transport & { reachable: (now: boolean) => void };
   readonly liveblocks: LiveblocksClient;
   readonly rooms: Rooms;
 
-  constructor(part: Part, workspaceId: string) {
+  /**
+   * Opened rather than constructed, because the durable outbox has to be read
+   * before anything is served -- a client that answered reads first and found
+   * its queued work afterwards would have shown a view missing its own.
+   */
+  static async opened(part: Part, workspaceId: string): Promise<Collaborator> {
+    return new Collaborator(part, workspaceId, await keeping(workspaceId));
+  }
+
+  constructor(part: Part, workspaceId: string, held: Keeping) {
     this.part = part;
     this.workspaceId = workspaceId;
     this.email = emailOf(part);
@@ -197,7 +240,7 @@ export class Collaborator {
      * learn that again, and would learn it wrong the first time a file turned
      * binary.
      */
-    this.transport = http(BACKEND, asUser(this.email));
+    this.transport = switchable(http(BACKEND, asUser(this.email)));
     /**
      * Late-bound because the two need each other: `connect` asks whether a
      * document speaks for an entry, and the thing that knows is built ON the
@@ -206,7 +249,9 @@ export class Collaborator {
     this.workspace = connect({
       workspace: workspaceId,
       transport: this.transport,
-      bytes: inMemory(),
+      bytes: held.bytes,
+      kept: held.kept,
+      restored: held.restored,
       shared: (entry) => this.rooms.speaksFor(entry),
     });
     this.liveblocks = clientAs(this.email);
@@ -216,6 +261,11 @@ export class Collaborator {
       hosted,
       persisting,
     );
+  }
+
+  /** Whether this client can reach the server at all. */
+  reachable(now: boolean): void {
+    this.transport.reachable(now);
   }
 
   /** The version a room's text descends from, as the server stamped it. */

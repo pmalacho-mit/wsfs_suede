@@ -27,6 +27,18 @@ export type { Reading } from "./minted";
 export { inMemory } from "./bytes";
 
 /**
+ * The queue, across page loads and across workspaces.
+ *
+ * `keeping` is awaited once before `connect`, and what it hands back is the
+ * three things a durable outbox needs: where payloads live, where the queue is
+ * written down, and what was there last time.
+ */
+export { keeping } from "./indexed";
+export type { Keeping } from "./indexed";
+export { nothing, nowhere, remembering } from "./kept";
+export type { Kept, Restored } from "./kept";
+
+/**
  * Text diffing, as the outbox uses it to store a chained write as an edit
  * script rather than another copy of the file -- and as a consumer holding a
  * CRDT document needs it, to turn "the file now says this" into the smallest

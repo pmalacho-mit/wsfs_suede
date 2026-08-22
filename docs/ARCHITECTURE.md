@@ -160,19 +160,31 @@ could not reach anybody.
 of server truth. Mutated *only* by `Initialize` snapshots (replace-all) and
 stream events. Never by request responses.
 
-**Outbox** (IndexedDB) — the persistent queue of in-flight/offline
-transactions, keyed `user → workspace → client → ordered list`. Plus a
-content-addressed bytes store (hash → bytes) holding write/store payloads so
-the queue itself stays rows-of-pointers.
+**Outbox** (IndexedDB, `kept.ts` + `indexed.ts`) — the queue of transactions
+the server has not answered, written down as **a row per transaction, scoped
+by workspace**. Two consequences, both deliberate: a queue survives the page
+that made it, and it survives the user navigating to a DIFFERENT workspace —
+which it must, because a queue is drained by the stream of the workspace it
+belongs to and a client follows one at a time. A row per transaction rather
+than a document per workspace is what lets two tabs append and remove
+without either writing back a version that forgot the other's work.
+
+Beside it, a content-addressed bytes store (hash → bytes, also per workspace)
+holding write payloads so the queue itself stays rows-of-pointers. Bytes are
+released only against what is WRITTEN DOWN, never against one tab's queue.
+
+`connect` takes the two as `kept` and `restored`; say nothing and the queue
+lives and dies with the page.
 
 **Effective view** (derived, never stored) —
 `effective(id) = outbox.replayOver(confirmed)`. What the UI and the Pyodide
 filesystem actually read. Optimistic updates are *derived*, not applied;
 failure rollback is recomputation, not an operation.
 
-**Content cache** (IndexedDB) — per-entry-id cache of `Content` responses
-(bytes + kind/mime/size + version). Invalidated by `write`/`delete` stream
-signals. Blob-kind bytes are additionally cacheable by hash, forever.
+**Content cache** (memory) — per-entry-id cache of `Content` responses, keyed
+by the version an entry is currently at and invalidated by `write`/`delete`
+stream signals. In memory on purpose: everything in it can be fetched again,
+which is exactly what is not true of the outbox beside it.
 
 **Yjs doc registry** (memory + y-indexeddb) — refcounted `Y.Doc` +
 Liveblocks room per *open* text file; "detach" means leave the room, never
@@ -549,7 +561,7 @@ assuming your work is where everybody else's is.
 | Stream event types | 5 (create, write, delete, name, parent) |
 | Client loops | 1 per client per workspace |
 | Server tables beyond the domain schema | 1 (stream tokens) |
-| Client persistent stores | 3 (outbox + bytes-by-hash, content cache, y-indexeddb per open doc) |
+| Client persistent stores | 2 (outbox + bytes-by-hash, y-indexeddb per open doc) |
 | Server tables beyond the domain schema and drafts | 1 (rooms: created, and where each stands) |
 | Derived client state | 2 (confirmed map, effective view) |
 | Third-party dependencies in the sync core | 0 (Liveblocks serves only the collaboration plane) |
@@ -568,16 +580,21 @@ reach nobody either loses its typing or has it delivered twice).
   and now demonstrated rather than assumed. Election is a contained
   optimization; it saves work, not correctness.
 
-  What it stops being safe to assume the day the outbox is persisted:
-  browser storage is shared per origin, so **nothing may assume an entry in
-  the outbox was written by the tab that finds it.** True today only because
-  the outbox is still per-client in memory.
+  The outbox IS persisted now, so the thing this was waiting to become true
+  is true: browser storage is shared per origin, and **nothing may assume an
+  entry in the outbox was written by the tab that finds it.** `indexed.ts`
+  is built for that — a row per transaction rather than a document per
+  workspace, so two tabs append and remove without either writing back a
+  version that forgot the other's work, and bytes are released only against
+  what is written down rather than against one tab's queue.
 - **A precise definition of "active" for non-yjs editor buffers** — a
   product decision (visible? dirty? this session?) pending real UX.
-- **Draft retention.** Drafts are kept forever by design and chained against
-  their predecessor, so a long offline session stores only what was typed
-  since. Supersession within one client's own lineage, and dedup by digest,
-  are the two bounded wins nobody has taken.
+- **Draft supersession.** Deliberately not built, and now deliberately not
+  wanted: a draft can be part of a snapshot somebody took at that moment, so
+  a later draft does not stand in for an earlier one. Every draft is a member
+  of the outbox like any other transaction and has to reach the server.
+  Chaining against `predecessor` is what keeps that affordable — a long
+  offline session stores what was typed since, not a document per save.
 - **Migrations that are not additive.** `widen` adds columns the code
   declares and refuses everything else — a column the code no longer declares
   is left alone, and one that is NOT NULL with no plain default stops the
