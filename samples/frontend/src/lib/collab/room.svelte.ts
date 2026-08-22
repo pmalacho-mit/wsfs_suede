@@ -373,7 +373,7 @@ export class Room {
     const stored = await this.held.workspace.read(path);
     if (stored?.kind !== "text") return;
     if (stored.text === this.text.toString()) return;
-    await this.store(path);
+    await this.store();
   }
 
   /** Resolves once everything typed here has reached the room. */
@@ -394,12 +394,12 @@ export class Room {
    * -- and the server reads that claim to tell a write the room made from one
    * it did not, which is what stops its own text being carried back in.
    */
-  send(path: string): Sending {
+  send(): Sending {
     const trouble = this.trouble;
     if (trouble !== undefined) return this.#kept(trouble.says);
 
-    const { transaction, settled } = this.held.workspace.write(
-      path,
+    const { transaction, settled } = this.held.workspace.shares(
+      this.entry,
       this.text.toString(),
     );
 
@@ -478,9 +478,9 @@ export class Room {
    * refusing -- `send` is the one that refuses, and by then there is nothing
    * left to wait for.
    */
-  async store(path: string): Promise<Written> {
+  async store(): Promise<Written> {
     if (this.attached) await this.#provider?.handedOver();
-    const sent = this.send(path);
+    const sent = this.send();
     if (sent.held) {
       await sent.settled;
       return sent;
@@ -615,6 +615,15 @@ export class Room {
  */
 export class Rooms {
   readonly held = new Map<string, Room>();
+
+  /**
+   * Whether a document here speaks for this entry -- what `connect` asks
+   * before letting anything write the file's text around it.
+   *
+   * A room that is detached or replaced still counts. Its text is in a CRDT
+   * either way, and that is the whole reason the second route is closed.
+   */
+  speaksFor = (entry: string): boolean => this.held.has(entry);
 
   #watching: () => void;
 

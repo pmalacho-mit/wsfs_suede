@@ -36,6 +36,20 @@ export type Options = {
   transport: Transport;
   bytes?: Store;
   timing?: loop.Timing;
+  /**
+   * Whether a shared document here speaks for this entry.
+   *
+   * Answering yes closes `write` for it. Content that came out of an editor
+   * moves as a CRDT update and reaches the file through the document that
+   * holds it, because typing text in creates NEW characters and the same work
+   * arriving twice survives twice. That is rule one, and until now it was a
+   * convention -- nothing stopped a second route being added years later by
+   * somebody who had not read this.
+   *
+   * No CRDT is named here. A consumer holding documents is the only party
+   * that knows which entries have one.
+   */
+  shared?: (entry: Id) => boolean;
 };
 
 /**
@@ -104,6 +118,18 @@ export type Workspace = {
    * keeping, and by then it has no path to name.
    */
   keep: (
+    entry: Id,
+    content: string | Uint8Array,
+    mime?: string,
+  ) => Submitting;
+  /**
+   * The write a shared document makes for the file it speaks for.
+   *
+   * The same write `write` makes, minus the refusal -- this is the route rule
+   * one leaves open, and it takes an ENTRY because the document holds an id
+   * and the file may have been renamed under it since.
+   */
+  shares: (
     entry: Id,
     content: string | Uint8Array,
     mime?: string,
@@ -374,18 +400,17 @@ export const connect = (options: Options): Workspace => {
 
     write: (path, payload, mime = TEXT) => {
       const entry = index.at(path);
-      return entry === undefined
-        ? created(path, payload, mime)
-        : written(entry, payload, mime);
+      if (entry === undefined) return created(path, payload, mime);
+      refuseIfShared(entry.id, path);
+      return written(entry, payload, mime);
     },
 
     cleared: (transactions) => transport.cleared(workspace, transactions),
 
-    keep: (entry, payload, mime = TEXT) => {
-      const held = shown.view.get(entry);
-      if (held === undefined) throw new Error(`No such entry: ${entry}`);
-      return written(held, payload, mime, true);
-    },
+    keep: (entry, payload, mime = TEXT) => written(heldEntry(entry), payload, mime, true),
+
+    shares: (entry, payload, mime = TEXT) =>
+      written(heldEntry(entry), payload, mime),
 
     create: (path, payload, mime = TEXT) => created(path, payload, mime),
 
@@ -467,6 +492,26 @@ export const connect = (options: Options): Workspace => {
     stop: sync.stop,
     nudge: sync.nudge,
   };
+
+  function heldEntry(entry: Id): Metadata {
+    const held = shown.view.get(entry);
+    if (held === undefined) throw new Error(`No such entry: ${entry}`);
+    return held;
+  }
+
+  /**
+   * Named rather than boolean, because the mistake this catches is somebody
+   * reaching for the obvious method, and the error has to say which one is
+   * not obvious.
+   */
+  function refuseIfShared(entry: Id, path: paths.Path): void {
+    if (options.shared?.(entry) !== true) return;
+    throw new Error(
+      `${path} has a shared document open, so its text reaches the file ` +
+        "through that document. Type into it, or call `shares` if you ARE " +
+        "it. Writing text around it would say the same work twice.",
+    );
+  }
 
   function parentOf(path: paths.Path): Id | null {
     const holder = paths.parent(path);

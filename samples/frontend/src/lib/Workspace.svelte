@@ -276,7 +276,7 @@
       const sent: Sending =
         room === undefined
           ? { held: true, why: "the room is not open yet", draft: null, settled: null }
-          : room.send(file.path);
+          : room.send();
       /**
        * Cleared once the text has left this machine, whichever way it left.
        *

@@ -198,10 +198,16 @@ export class Collaborator {
      * binary.
      */
     this.transport = http(BACKEND, asUser(this.email));
+    /**
+     * Late-bound because the two need each other: `connect` asks whether a
+     * document speaks for an entry, and the thing that knows is built ON the
+     * workspace. A field read at call time is the whole of the knot.
+     */
     this.workspace = connect({
       workspace: workspaceId,
       transport: this.transport,
       bytes: inMemory(),
+      shared: (entry) => this.rooms.speaksFor(entry),
     });
     this.liveblocks = clientAs(this.email);
     this.rooms = new Rooms(
@@ -306,7 +312,7 @@ export class Collaborator {
   }
 
   store(entry: string): Promise<Written> {
-    return this.#room(entry).store(this.#path(entry));
+    return this.#room(entry).store();
   }
 
   /** A write that does NOT go through the room -- a script, another tool. */
