@@ -26,9 +26,10 @@
  * queue affordable: only the head of a chain holds whole text, and the rest
  * are deltas against it, so the wait costs a diff rather than a document.
  */
-import type { Digest, Store } from "./bytes";
+import { digestOf, type Digest, type Store } from "./bytes";
 import type { Payload } from "./content";
 import {
+  kept,
   UNSOUND,
   type Body,
   type Id,
@@ -92,7 +93,14 @@ export const pump = (wiring: Wiring): Pump => {
   const failed = new Map<Transaction, (error: unknown) => void>();
   /** Sent and still unanswered, or answered and not yet off the queue. */
   const sent = new Set<Transaction>();
-  /** Sent and accepted: the tokens a follower is allowed to write against. */
+  /**
+   * Sent and accepted AS CONTENT: the tokens a follower may write against.
+   *
+   * A draft is answered without being rejected and is still not one of these.
+   * It never became the file's content, so the server never issued its
+   * transaction as a version -- presenting it would be presenting a token
+   * nobody has heard of.
+   */
   const accepted = new Set<Transaction>();
   const draining = new Set<Id>();
   /** One entry's captures, in the order they were asked for. */
@@ -143,16 +151,51 @@ export const pump = (wiring: Wiring): Pump => {
   const staged = async (
     entry: Id,
     payload: string | Uint8Array,
-  ): Promise<{ content: Digest; basis?: Transaction }> => {
+  ): Promise<{ held: string | Uint8Array; content: Digest; basis?: Transaction }> => {
     const chain = queue.chain(entry);
     const tail = chain[chain.length - 1];
     if (!isText(payload) || tail === undefined || !isElided(tail.request))
-      return { content: await bytes.put(payload) };
+      return { held: payload, content: await digestOf(payload) };
     const before = await textOf(tail, queue, bytes);
+    const delta = chained(before, payload);
     return {
-      content: await bytes.put(chained(before, payload)),
+      held: delta,
+      content: await digestOf(delta),
       basis: tail.request.transaction,
     };
+  };
+
+  /**
+   * Staged and queued with nothing in between, and retried if the tail moved.
+   *
+   * Staging is not instantaneous -- it reads the write in front, diffs against
+   * it, and stores the result -- and the answer to that write can arrive
+   * during it. The tail then leaves the queue, taking the hand-off that would
+   * have given this delta the bytes it needs, and what gets queued is a delta
+   * against a predecessor that is not there: unreadable, and unreadable
+   * FOREVER once the queue survives the page that made it.
+   *
+   * The check and the capture have no `await` between them, which is what
+   * makes them one step. Nothing is thrown away but a delta that turned out to
+   * describe nothing.
+   */
+  const chainedIn = async (
+    entry: Id,
+    request: Write,
+    payload: string | Uint8Array,
+  ): Promise<void> => {
+    for (;;) {
+      const { held, content, basis } = await staged(entry, payload);
+      if (basis !== undefined && queue.find(basis) === undefined) continue;
+      /**
+       * Row first, bytes second, and no `await` between the check and the
+       * capture. Bytes with no row are work that is gone unnoticed; a row
+       * with no bytes is work that is gone and says so.
+       */
+      queue.capture({ ...request, offset: offset() }, content, basis);
+      await bytes.put(held, content);
+      return;
+    }
   };
 
   /**
@@ -171,8 +214,13 @@ export const pump = (wiring: Wiring): Pump => {
     if (isElided(item.request)) {
       const text = await textOf(item, queue, bytes);
       body = { type: "text", content: text };
-      if (item.basis !== undefined)
-        released(queue.promote(request.transaction, await bytes.put(text)));
+      if (item.basis !== undefined) {
+        /** Row first here too, for the same reason it is first everywhere. */
+        const whole = await digestOf(text);
+        const freed = queue.promote(request.transaction, whole);
+        await bytes.put(text, whole);
+        released(freed);
+      }
     }
 
     /**
@@ -198,6 +246,7 @@ export const pump = (wiring: Wiring): Pump => {
      * correctness. See `refusals` on the backend.
      */
     const predecessor = ahead?.request.transaction ?? null;
+
 
     return {
       ...request,
@@ -244,6 +293,16 @@ export const pump = (wiring: Wiring): Pump => {
         owed.delete(transaction);
         failed.delete(transaction);
 
+        if (kept(answer)) {
+          /**
+           * Kept, not applied. It leaves the queue like a refusal -- no event
+           * will follow it either -- but it is not a failure and the writes
+           * behind it carry on against the token it presented.
+           */
+          released(queue.evict([transaction]));
+          continue;
+        }
+
         if (!answer.rejected) {
           accepted.add(transaction);
           continue;
@@ -278,8 +337,7 @@ export const pump = (wiring: Wiring): Pump => {
        */
       void inOrder(entry, async () => {
         try {
-          const { content, basis } = await staged(entry, payload);
-          queue.capture({ ...request, offset: offset() }, content, basis);
+          await chainedIn(entry, request, payload);
           wiring.remembered(request.transaction, heldAs(payload, mime));
           wiring.announced();
           void drain(entry);

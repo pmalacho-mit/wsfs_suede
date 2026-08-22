@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass, field
 from itertools import count, islice
 from collections.abc import Awaitable, Callable, Iterator
-from typing import Any, final
+from typing import Any, cast, final
 from uuid import UUID
 
 from sqlalchemy import literal, union_all
@@ -993,7 +993,25 @@ async def declined(
     )
 
 
+def _asks_to_be_kept(request: Submitted) -> bool:
+    return isinstance(request, Write) and request.draft
+
+
+async def kept(submission: Submission, request: Write) -> Outcome:
+    """Recorded beside the refusals, and not applied to anything.
+
+    No judgement runs: a draft is not competing for the file, so there is no
+    race for it to lose and no token for it to consume.
+    """
+    await refusals.record(
+        submission, request, Refusal.NOT_SHARED, *_writes(submission.models, request)
+    )
+    return Outcome(Acknowledged(draft=True))
+
+
 async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
+    if _asks_to_be_kept(request):
+        return await kept(submission, cast(Write, request))
     applied = await _already_applied(submission, request)
     if applied is not None:
         if isinstance(applied.response, Rejected):

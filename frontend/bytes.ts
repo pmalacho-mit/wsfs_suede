@@ -9,7 +9,12 @@
 export type Digest = string;
 
 export type Store = {
-  put: (content: Uint8Array | string) => Promise<Digest>;
+  /**
+   * `at` is the digest when the caller has already computed it -- which it
+   * has whenever it needed to write the row that NAMES these bytes before
+   * storing them. Hashing a payload twice is the only alternative.
+   */
+  put: (content: Uint8Array | string, at?: Digest) => Promise<Digest>;
   read: (digest: Digest) => Promise<Uint8Array | undefined>;
   text: (digest: Digest) => Promise<string | undefined>;
   forget: (digests: Iterable<Digest>) => Promise<void>;
@@ -55,8 +60,8 @@ export const digestOf = async (content: Uint8Array | string): Promise<Digest> =>
 export const inMemory = (): Store => {
   const held = new Map<Digest, Uint8Array>();
   return {
-    put: async (content) => {
-      const digest = await digestOf(content);
+    put: async (content, at) => {
+      const digest = at ?? (await digestOf(content));
       held.set(digest, bytesOf(content));
       return digest;
     },

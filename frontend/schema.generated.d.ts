@@ -93,6 +93,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stranded Drafts
+         * @description Work that is still only where it was typed.
+         *
+         *     Uncleared drafts, which is the one question a client cannot answer for
+         *     itself: the case worth reporting is the machine that never came back,
+         *     and its own record of what it was holding went with it.
+         */
+        get: operations["stranded_drafts_wsfs_workspaces__workspace_id__drafts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wsfs/workspaces/{workspace_id}/drafts/cleared": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Drafts
+         * @description These drafts' work has since reached everybody else.
+         *
+         *     Cleared, not deleted. The row is still what that client had, and a
+         *     snapshot may still name it.
+         */
+        post: operations["clear_drafts_wsfs_workspaces__workspace_id__drafts_cleared_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wsfs/workspaces/{workspace_id}/reconstruction": {
         parameters: {
             query?: never;
@@ -159,6 +206,14 @@ export interface components {
             size: number;
             /** Mime */
             mime: string;
+        };
+        /**
+         * Clearing
+         * @description Drafts whose work has since reached everybody else.
+         */
+        Clearing: {
+            /** Transactions */
+            transactions: string[];
         };
         /** Create */
         Create: {
@@ -481,6 +536,43 @@ export interface components {
             content_version: string | null;
         };
         /**
+         * Stranded
+         * @description A draft whose work is still only where it was typed.
+         */
+        Stranded: {
+            /**
+             * Transaction
+             * Format: uuid
+             */
+            transaction: string;
+            /**
+             * Entry
+             * Format: uuid
+             */
+            entry: string;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+        };
+        /**
+         * StrandedDrafts
+         * @description What one client had and nobody else ever got.
+         *
+         *     The question drafts exist to answer. A machine that never comes back
+         *     cannot report its own, which is why the flag is the server's.
+         */
+        StrandedDrafts: {
+            /** Drafts */
+            drafts: components["schemas"]["Stranded"][];
+        };
+        /**
          * StreamEvent
          * @description DEPARTURE: a create's metadata rides in `value`, as every other event's
          *     payload does. The contract spreads it over the event, where its `type`
@@ -587,6 +679,11 @@ export interface components {
             content_version: string;
             /** Content */
             content: components["schemas"]["TextBody"] | components["schemas"]["BinaryBody"];
+            /**
+             * Draft
+             * @default false
+             */
+            draft: boolean;
             /** Predecessor */
             predecessor?: string | null;
         };
@@ -754,6 +851,70 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stranded_drafts_wsfs_workspaces__workspace_id__drafts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StrandedDrafts"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_drafts_wsfs_workspaces__workspace_id__drafts_cleared_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Clearing"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
