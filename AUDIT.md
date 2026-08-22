@@ -47,11 +47,14 @@ Every row is either covered by a browser scenario or named here as uncovered.
 | F3 | writing text around a document that holds it | `write` refuses it; `tests/frontend/wire.test.ts` |
 | invariant 6, client half | an unissued token makes the client start again | `tests/frontend/wire.test.ts` |
 | the outbox outliving the page | queued work sent by the tab that comes next | 18, and `tests/frontend/kept.test.ts` |
+| B3, client side | server lost, room kept: work still reaches everybody | 19 |
+| F5 / H4 | rolled back to an earlier version under an open document | 20 |
 | a queue in a workspace nobody is looking at | waits, then drains on return | `tests/frontend/kept.test.ts` |
 
-And **B3 from the reachable side** — a client that can reach the host but not
-the collaboration server — is scenario 16, which was not in the original
-enumeration because the answer to it did not exist yet.
+And **B3 in both directions** — a client that can reach the host but not the
+collaboration server (scenario 16), and one that can reach the room but not
+the host (scenario 19). Neither was in the original enumeration, because the
+answer to the first did not exist yet and the second could not be simulated.
 
 **Every scenario also asks the second question**: can this client still be
 handed what it was looking at. Snapshots are taken mid-scenario, including
@@ -60,15 +63,19 @@ the end.
 
 ### Not covered
 
-Two, and neither of them can lose or duplicate work.
+**None.** The last two needed the same missing thing — a switch on the wsfs
+transport, the counterpart to the one the room already had — and once it
+existed both were ordinary scenarios to write:
 
-- **B3 from the other side** — a client that loses the SERVER and keeps the
-  room. Simulating it needs a switch on the transport that does not exist.
-  What it would show is already known: the client cannot store, its work
-  reaches the others through the room, and their next store carries it.
-- **F5 / H4** — a snapshot restored over a file somebody has open. It takes
-  the same path as a script's write, which scenario 3 covers, but the restore
-  itself is untested.
+- **B3 from the client's side**, a client that loses the SERVER and keeps the
+  room, is scenario 19. It demonstrates the asymmetry the draft design rests
+  on: losing the room costs the right to write the file, losing the server
+  costs nothing of the sort, and the next person to store carries the work.
+- **F5 / H4**, a file rolled back to an earlier version while somebody has it
+  open, is scenario 20. Worth its own scenario rather than folding into 3
+  because the restored content is text the room has ALREADY SEEN — a document
+  reasoning about what it recognised rather than about what the server
+  stamped would decide there was nothing to do.
 
 ### Where the design is genuinely weak
 
@@ -222,15 +229,6 @@ path -- settle after somebody saved -- cost neither a query nor a call.
 
 ## 3. Known problems
 
-**Two scenarios have no test.** Neither can lose or duplicate anything.
-
-- **B3 from the client's side** — a client that loses the SERVER and keeps the
-  room. Hard to simulate in a browser without a switch on the transport. The
-  other direction (host reachable, room not) is scenario 16.
-- **F5 / H4** — a snapshot restored over a file somebody has open. It is a
-  server-origin write, so it takes the same path as a kernel's output, which
-  scenario 3 covers; the restore case itself is untested.
-
 **Drafts are kept forever, and that is the decision rather than a gap.** A
 draft can be part of a snapshot somebody took at that moment, so a later one
 does not stand in for an earlier one — every draft is a member of the outbox
@@ -300,9 +298,15 @@ open is 12-13ms. Measured in section 2.
 
 ## Verdict
 
-**Scenarios: yes**, with three uncovered cases named above, none of which can
-lose or duplicate work, and two sample-shell behaviours unproven because the
-test double cannot provide what they assert.
+**Scenarios: yes, all of them.** Twenty scenarios across two real browsers,
+and the enumeration has nothing left in it that is not covered. Two
+sample-shell behaviours remain unproven, and that is a test double's limit
+rather than the product's — named below.
+
+**Work reaching the server: yes, across page loads.** The outbox is written
+down, scoped by workspace, so a queue survives both the tab that made it and
+the user navigating somewhere else. Drafts are members of it like anything
+else and nothing supersedes them.
 
 **Backend: comfortably.** Two hundred clients cost about 0.1 GB and
 essentially no CPU; saves are tens of milliseconds and the tail is queueing

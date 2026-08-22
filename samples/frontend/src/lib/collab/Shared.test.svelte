@@ -1390,3 +1390,134 @@
     <pre>{pocket.text}</pre>
   {/snippet}
 </Sweater>
+
+<Sweater
+  name="loses the server but keeps the room"
+  body={async (harness) => {
+    /**
+     * `SCENARIOS.md` B3, from the side that had no switch until now.
+     *
+     * The two planes fail independently, and this is the asymmetry the draft
+     * design rests on: losing the ROOM costs the right to write the file,
+     * because what you hold is not shared. Losing the SERVER costs nothing of
+     * the sort -- the work still reaches everybody through the room, and the
+     * next person to store carries it. Nothing is kept as a draft, because
+     * nothing is private.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "roomonly", "start\n");
+    const id = await workspace();
+
+    await client.open(entry);
+    await until("the room to carry the file", () => client.text(entry).includes("start"));
+    await announce(step(id, "roomonly", "open"));
+    await awaiting(step(id, "roomonly", "open"));
+
+    if (playing("ada")) {
+      /** The server goes. The room does not. */
+      client.reachable(false);
+      client.type(entry, client.text(entry) + "typed with no server\n");
+      await client.handedOver(entry);
+      await announce(step(id, "roomonly", "typed"));
+
+      await awaiting(step(id, "roomonly", "stored"));
+      client.reachable(true);
+      await untilAsked(
+        "the file to come back holding it",
+        () => client.reads(entry),
+        (text) => text.includes("typed with no server"),
+      );
+      /** Once, not twice: it reached the file by exactly one route. */
+      harness.expect(client.text(entry).split("typed with no server").length - 1).toBe(1);
+      pocket.note = "reached everybody without reaching the server";
+    } else {
+      await awaiting(step(id, "roomonly", "typed"));
+      await until("the typing to arrive through the room", () =>
+        client.text(entry).includes("typed with no server"),
+      );
+      /** And this client, which can reach the server, is the one that stores it. */
+      await until("the room to speak", () => client.speaks(entry));
+      const stored = await client.store(entry);
+      if (stored.held) throw new Error(`would not store: ${stored.why}`);
+      await announce(step(id, "roomonly", "stored"));
+      pocket.note = "carried it to the file on her behalf";
+    }
+    pocket.text = client.text(entry);
+    await client.take(entry);
+    await client.rebuildable();
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="rolls a file back to an earlier version while somebody has it open"
+  body={async (harness) => {
+    /**
+     * `SCENARIOS.md` F5 and H4. A restore is a server-origin write like any
+     * other -- the same path a script's write takes -- and the reason it is
+     * worth its own scenario is that its content is text the room has ALREADY
+     * SEEN. A document that reasoned about what it recognised, rather than
+     * about what the server stamped, would decide there was nothing to do and
+     * quietly leave the file and the room disagreeing.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "rolledback", "first\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      /** Ada holds the room. She is the one who must be brought back. */
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("first"));
+      const original = client.token(entry);
+      await announce(step(id, "rolledback", "open"), original ?? "");
+
+      await until("the second version to arrive", () =>
+        client.text(entry).includes("second"),
+      );
+      await announce(step(id, "rolledback", "moved on"));
+
+      await awaiting(step(id, "rolledback", "rolled back"));
+      await until(
+        "the room to be handed the older text again",
+        () => !client.text(entry).includes("second"),
+        30_000,
+        () => JSON.stringify(client.text(entry)),
+      );
+      harness.expect(client.text(entry)).toBe("first\n");
+      await until(
+        "the room to be stamped with the version it was carried to",
+        () => client.base(entry) === client.token(entry),
+        30_000,
+        () => `base=${client.base(entry)} token=${client.token(entry)}`,
+      );
+      pocket.note = "rolled back underneath an open document";
+    } else {
+      /** Grace has no document, so she writes the way a restore would. */
+      const original = await awaiting(step(id, "rolledback", "open"));
+      await client.workspace.write("rolledback.py", "first\nsecond\n").settled;
+      await awaiting(step(id, "rolledback", "moved on"));
+
+      const older = await client.reads(entry, original);
+      harness.expect(older).toBe("first\n");
+      await client.workspace.write("rolledback.py", older).settled;
+      await announce(step(id, "rolledback", "rolled back"));
+      pocket.note = "restored what it said before";
+    }
+    pocket.text = client.text(entry);
+    await client.take(entry);
+    await client.rebuildable();
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
