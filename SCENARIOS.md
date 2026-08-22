@@ -183,7 +183,171 @@ of being ahead, not just a risk to survive.
 
 ---
 
-# The open choices
+# The decisions
+
+These were open when the enumeration was written. All but one are settled,
+and the reasoning is worth more than the answer.
+## Revised decisions
+
+### C1 — what a client that is *ahead* does with work it cannot store
+
+**Resolved: drafts.** The original three options collapse, because the premise
+was wrong. The rule was never "you may not store"; it is **"you may not store
+*as the file*"**. The work goes to the server immediately, is durable and
+recoverable, and asserts nothing about shared state.
+
+This also dissolves *"a held store is never retried"* from the known problems.
+Nothing needs retrying to be safe.
+
+And it is load-bearing beyond failure handling: a snapshot is only
+reconstructable server-side when every token in it exists on the server. Today,
+a user with unsynced typing who asks the assistant a question produces a
+snapshot that cannot be resolved. Drafts make it resolvable, which is the normal
+case rather than an edge case.
+
+### C2 — how old local-only work can be before returning it surprises the user
+
+**Resolved: always merge, no threshold.** Old local work always syncs.
+
+The reasoning is that the previous version is always stored, so the state before
+the merge is recoverable. The user can get back. That makes silent merging the
+right default: it is never destructive, only occasionally surprising, and the
+undo path exists.
+
+This removes the product decision the original document deferred.
+
+### C4 — closing the gap between shared and stored
+
+**Unchanged recommendation: store on open** if the room's document holds work
+the stored version does not. Nearly free, no timers, no server job.
+
+With load-time replay from local persistence, the only remaining way to lose
+rung-3 work is D5 — the room evicted *and* nobody holding it locally ever
+returns — which is irreducible.
+
+### C5 — one user in two tabs
+
+**Resolved: explicitly supported, and tested as such.** Two tabs are treated as
+two clients and must behave exactly like two browsers. Nothing may assume it is
+the only client on this machine.
+
+**The gotcha to test for:** local state is shared per origin, so the outbox and
+the local document store are *not* private to one tab. Nothing may assume an
+entry in the outbox was written by the tab that finds it. This is believed to
+hold already, but it has never been exercised and must not be assumed.
+
+### C6 — who carries an outside write into a room
+
+**Resolved: the server, once.** Clients stop reacting to content changes for
+entries they have open.
+
+**Built, and it taught one thing worth keeping.** Moving the work to the server
+did not move finding 3 with it: the server decided from one read of the room
+and built its update from a later one, so a room that caught up in between was
+handed what it already held. The rule survives the move -- *the content is the
+authority, and it must be consulted against the read being acted on, not an
+earlier one.* Whoever carries, carries under that rule.
+
+### C7 — an open room whose file is deleted
+
+**Resolved: the room stands down**, with a restore affordance — *and a draft is
+written first.* No work that has not been stored may be lost to a deletion the
+user did not make. The same rule applies to a file becoming binary.
+
+### C3 — who stores, and how often
+
+**Still open.** Deferred; it is history noise, not correctness.
+
+---
+
+## New scenarios that drafts introduce
+
+| # | situation | resolution | |
+|---|---|---|---|
+| J1 | client is ahead and stores | write is labelled draft; file's current content unchanged; other clients unaffected | **obvious** |
+| J2 | that client reconnects; its work merges; it stores again | the second write is current content. The draft is **cleared** | **obvious** |
+| J3 | client is ahead, drafts, and never returns | draft remains uncleared forever — it is the only copy of that work | **obvious, and the reason drafts exist** |
+| J4 | client drafts, reconnects, its work merges, and a *collaborator deletes that text* before anyone stores | the draft is **cleared**. The work reached people and was deliberately removed; that is editing, not loss | **obvious once the clearing condition is propagation rather than content** |
+| J5 | client drafts repeatedly during one long disconnection | each draft supersedes the previous one *from the same client for the same entry* — the newer strictly contains the older's intent. Bounds the storage of a long offline session | **obvious**; the one safe use of supersession |
+| J6 | two clients are both ahead and both draft | two independent drafts. Neither clears the other; they are different work | **obvious** |
+| J7 | a draft is referenced by a snapshot sent to the assistant | resolvable, because the token is on the server. This is the main reason drafts are common rather than rare | **obvious** |
+| J8 | the machine that made an uncleared draft never comes back | only the server can report this. The client's local draft list dies with the machine, so **the server owns the cleared flag** | **obvious** |
+| J9 | client drafts, then the debounce fires again with no change | deduped by digest; no row written | **obvious** |
+
+### Every scenario asks whether the snapshot survives
+
+`SCENARIOS.md` now carries this too, but it belongs here because drafts are
+what make it answerable: a snapshot names what was on screen, and what was on
+screen may exist nowhere but one laptop. Taking a snapshot puts it on the
+server first — content if the room is reachable, a draft if not.
+
+Two things that turned out to be true of the SERVER side of this, found by
+asking the question rather than by reasoning about it:
+
+- A **refused** write is recorded and rebuildable, exactly as a draft is.
+  Anything the server wrote down can be handed back, whatever it decided about
+  it.
+- A reconstruction answers **once per entry**, so two snapshots of one file
+  taken at different moments are two requests, not one.
+
+### The clearing condition
+
+> A draft is created because this client's updates had not reached the room.
+> It is cleared when they have.
+
+Creation and clearing are the same predicate, flipped, and both are decidable
+locally. Clearing is **not** "a later stored version contains this text" — see
+J4, where that test would strand a draft that was never actually lost.
+
+---
+
+## Writes that did not come from a Yjs editor
+
+`SCENARIOS.md` group F, made explicit, because this is where the transport rule
+earns its keep.
+
+The distinction that matters is not text-versus-binary. It is **whether a second
+copy of this content exists in somebody's document.** Content from a script or a
+kernel has no second copy, so diffing it in cannot double it. Content from an
+editor always has one.
+
+| # | situation | resolution |
+|---|---|---|
+| K1 | Python writes **text**, file open in nobody's room | commit the version. Nothing else. The next open finds the room behind and the server carries the gap in |
+| K2 | Python writes **text**, file open in a live room | server commits, then carries the change into the room once, and advances `base`. Members receive it as an ordinary update. **No client computes anything** |
+| K3 | Python writes **bytes**, file open in a live room | every open client writes a **draft of its current text first**, then the room stands down. The editor becomes a preview. No merge is attempted |
+| K4 | Python writes **bytes**, file open in nobody's room | commit the version. Nothing else |
+| K5 | Python **reads** a file that has unstored work in a room | it reads the stored version, which lacks that work. The client must checkpoint before handing a file to a kernel — this is what `dirty` is for. If the client is ahead and cannot checkpoint as current, an in-browser kernel should read the *document*, not the server |
+| K6 | Python writes text to a file that a client is ahead on | both survive: the server's change lands in the room, the client's local work merges when it reconnects. Neither overwrites the other |
+
+### How K2 is carried, precisely
+
+Two requirements that are easy to conflate and both mandatory:
+
+1. **What the diff is between.** Compute it between the two *stored versions* —
+   the one the room records as its base, and the newly written one. Never
+   between the room's live text and the new version: that would describe the
+   users' unstored work as text to delete, and applying it would delete it.
+2. **What the update is causally based on.** Apply those edits to the room's
+   **live** document, and send the resulting incremental update. An update
+   computed against a stale snapshot is dropped silently by Yjs — no error, no
+   effect.
+
+Because the room's live text has drifted from the base version, the diff's
+positions no longer line up. Apply the change as a **patch with fuzzy
+matching** (`fast_diff_match_patch` is already a dependency) against the live
+text, then apply the minimal difference between the live text and the patched
+result as document edits. Misplacement is possible in pathological cases;
+loss is not, and duplication is not, because this content has no second copy.
+
+
+---
+
+# How the open choices were framed at the time
+
+The options each decision chose between, kept because the rejected ones are
+the argument for the chosen one.
+
 
 Everything above marked **choice**, with the options and a recommendation.
 
@@ -309,51 +473,10 @@ makes deletion unreliable; option 3 makes deletion depend on who is looking.
 
 ---
 
-# Where the current design stands
+# What covers what
 
-| scenario | covered by |
-|---|---|
-| A1–A4 | 1, 4 |
-| B1, B2 | 6 |
-| B3 — server lost, room kept | **not covered** — hard to simulate in-browser without a proxy switch |
-| B4, B5 | 10 |
-| C1, C2 | 5, 7 |
-| D1 | 2 |
-| D2 — the morning/afternoon merge | 14 |
-| D3 — shared but never stored | 13 |
-| D4 | 5, 7, 14 |
-| D5 | unavoidable, by definition |
-| D6 | 12 |
-| E1–E4 | 10 |
-| E5 — two tabs | 11 |
-| E6 — reloading is a way out of being ahead | 10 |
-| F1, F2 | 3 |
-| F3 | required by design: a client with a document joins the room before writing |
-| F4 | 8 |
-| F5 — a snapshot restored over an open file | **not covered** |
-| G1–G5 | the keeper's tests, and every scenario's first open |
-| H1 — renamed while open | 15 |
-| H2 — deleted while open | 12 |
-| H3 — became binary | 8 |
-| H4 — restored while open | **not covered**, same as F5 |
-
-And the second question, asked by every scenario: **every snapshot taken can
-still be rebuilt by the server**, including ones taken while the client could
-reach nobody.
-
-**All three gaps that were about losing or duplicating work are closed.** F2
-— independent repairs doubling content — went when the server took over
-carrying text in. B4/E2 — a crash losing work — went with local persistence.
-D3 — shared work nobody stored — is stored by whoever opens the file next.
-
-What is left uncovered is three scenarios, and none of them can lose or
-duplicate anything: a client that loses the server but keeps the room (B3),
-and a restore landing on an open file (F5/H4). Both are worth a test; neither
-is a hole in the design.
-
-**Update, fourth session.** The intermittency that made several of these hard
-to read was a single bug, and it was in neither the stream nor the room: a
-queued create was being laid back over its own entry, rewinding every version
-to the create and hiding writes since. Fixed, with a deterministic test. All
-nine browser scenarios now pass. The three gaps above are unchanged — they are
-about the design, not about that bug.
+`../AUDIT.md` maps every row above to the scenario that covers it, names the
+three that nothing covers, and records what the system was measured doing.
+Kept there rather than here so that this document stays a statement of what
+must be true, and the evidence for it stays somewhere that has to be re-run
+to stay honest.

@@ -7,23 +7,18 @@ network lapses; live collaborative editing of text; efficient storage of both
 text and binary content; boring, auditable failure recovery.
 
 This document is the map: every system at play, the vocabulary, the state
-machines, the flows, and the invariants that hold it together. The
-authoritative wire contract lives in `filesystem-sync-contract.ts`; the
-client reference implementation sketch in `workspace-fs.ts`.
+machines, the flows, and the invariants that hold it together.
 
-The diagrams below are generated, not drawn. They are authored as TypeScript
-types in `diagram.ts` and embedded here by
-[typescript2mermaid](../typescript2mermaid-suede/README.md):
+**The wire contract is `release/backend/contract.py`, and it is the only
+place those shapes are declared.** The client's types are generated from it.
+There used to be a second copy here, written as TypeScript, with diagrams
+generated from that; by the time anybody checked, it disagreed with the real
+one about what a draft was. A contract with two spellings does not stay one
+contract, and the pictures drawn from the wrong spelling were worse than no
+pictures.
 
-```sh
-./typescript2mermaid-suede/cli.sh --embed docs/ARCHITECTURE.md          # regenerate
-./typescript2mermaid-suede/cli.sh --embed docs/ARCHITECTURE.md --check  # CI: fail if stale
-```
-
-The data diagrams (§2, §3, §6) reference the contract's own declarations and
-are expanded by the type checker, so their member lists are the contract's —
-a rename there fails the run rather than quietly leaving a stale picture here.
-Edit `diagram.ts` and re-run; never hand-edit the fenced blocks.
+What the system must DO is enumerated in `../SCENARIOS.md`, one row per state
+two clients and a server can be in. What it demonstrably does is `../AUDIT.md`.
 
 ---
 
@@ -35,9 +30,14 @@ they are deliberately kept apart.
 **The collaboration plane (yjs / Liveblocks).** Character-level, multi-writer,
 CRDT-merged live editing of open text files. One `Y.Doc` per open file, one
 Liveblocks room per open file, persisted locally via y-indexeddb, attached
-lazily (refcounted) only while an editor holds the file open. CRDTs are used
-here and *only* here, because this is the only place writes are genuinely
-concurrent and peer-shaped.
+only while an editor holds the file open. CRDTs are used here and *only*
+here, because this is the only place writes are genuinely concurrent and
+peer-shaped.
+
+**The room's document holds text and nothing else.** Which stored version
+that text descends from is bookkeeping, and it lives on the host — putting it
+in the document made advancing it a write, so one person saving cost a round
+trip to Liveblocks for every client that heard.
 
 **The authority plane (this protocol).** Server-authoritative,
 single-ordered-stream sync of the tree (names, parents, deletions) and of
@@ -45,49 +45,20 @@ content commits. Postgres is the source of truth; clients submit transactions,
 the server adjudicates them, and all state flows to clients through exactly
 one ordered channel.
 
-The planes meet at exactly two seams, and the design's health depends on the
-seam staying this thin:
+The planes meet at three seams, and the design's health depends on them
+staying this thin:
 
 1. The **read flow priority** (§6.1): a live yjs doc outranks everything.
 2. The **write-failure policy**: a content-write failure is ignored when a
    live editor is open, because the doc is the truth there.
+3. **The host fills rooms, and is the only thing that carries text into
+   one.** A client that reads its file, diffs it and types the difference in
+   creates NEW characters, so when the original author's edits arrive the
+   file says everything twice. Content authored in a document therefore moves
+   only as Yjs updates; only content that was never in a document — a
+   kernel's output, an upload — is ever diffed in, and that is safe precisely
+   because no second copy of it exists.
 
-<!-- diagram: TwoPlanes -->
-```mermaid
-flowchart TD
-    Editor(["Editor / Pyodide"])
-    subgraph "Collaboration plane — concurrent, peer-shaped"
-        YDoc("Y.Doc per open text file")
-        Liveblocks("Liveblocks room")
-        YDoc -->|CRDT merge| Liveblocks
-    end
-    subgraph "Authority plane — server-authoritative, one ordered stream"
-        Outbox[("Outbox (IndexedDB)")]
-        ConfirmedMap("Confirmed map")
-        Postgres[("Postgres — the source of truth")]
-        Stream[/"SSE event stream"/]
-        Outbox -->|transactions| Postgres
-        Postgres -->|events generated from the truth| Stream
-        Stream -->|the one door| ConfirmedMap
-    end
-    Editor -->|open text file| YDoc
-    Editor -->|tree + content commits| Outbox
-    subgraph "The only two seams"
-        ReadPriority{{"1. Read priority — a live doc outranks everything"}}
-        WritePolicy{{"2. Write failure ignored while a live editor is open"}}
-    end
-    YDoc -.-> ReadPriority
-    ConfirmedMap -.-> ReadPriority
-    YDoc -.-> WritePolicy
-    Outbox -.-> WritePolicy
-    classDef collab fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
-    classDef authority fill:#e6f4ea,stroke:#34a853,stroke-width:2px
-    classDef seam fill:#fef7e0,stroke:#f9ab00,stroke-width:2px
-    class YDoc,Liveblocks collab
-    class Outbox,ConfirmedMap,Postgres,Stream authority
-    class ReadPriority,WritePolicy seam
-```
-<!-- /diagram -->
 
 ---
 
@@ -133,9 +104,9 @@ order-encoding (counter is strictly increasing per client).
 minted at page load. One client = one transaction counter = one outbox queue
 = one sync loop.
 
-**Session** — a GUID minted per page load, stamped on outbox entries and
-drafts to distinguish "this session already rendered this optimistically"
-from "survived a reload, definitely not reflected in the UI."
+**Session** — a GUID minted per page load, stamped on outbox entries to
+distinguish "this session already rendered this optimistically" from
+"survived a reload, definitely not reflected in the UI."
 
 **Occurrence** — when one transaction happened, in *both* clocks that saw it:
 `{minted?, offset?, accepted}`. `minted` is the client's, and it is when the
@@ -163,100 +134,25 @@ Orders the event stream and anchors tokens. *Never client-visible.*
 to `{user, workspace, position}`. Connecting the stream claims it atomically;
 the stream replays events after its position before going live.
 
-**Draft** — parked content with no server-side home: a `write` to a
-now-deleted entry, plus a hash pointer to the bytes. Carries no version,
-cannot conflict, lives outside the sync machinery. Down to this one case:
-the offline-create draft is gone, because an offline create is now an
-ordinary queued transaction.
+**Draft** — a write the client asks not to be made the file's content,
+because its text has reached nobody else. Recorded on the SERVER beside the
+refusals, keyed by its transaction, readable at that transaction, and
+retained. It carries no version and cannot conflict.
 
-<!-- diagram: Vocabulary -->
-```mermaid
-classDiagram
-    class EntryMetadata {
-        +string id
-        +string version
-        +string name
-        +string parent
-        +boolean deleted
-        +Entry.Type type
-    }
-    class Versioned {
-        +string id
-        +string version
-    }
-    class StreamEvent {
-        +string id
-        +string version
-        +string user
-        +string transaction
-    }
-    class InitializeResponse {
-        +string token
-        +Entry.Metadata[] entries
-        +Rejection[] rejected
-        +OutboxRequest[] applied
-    }
-    class Rejection {
-        +string transaction
-        +string reason
-        +string version
-    }
-    EntryMetadata *-- Versioned : every mutation presents one
-    StreamEvent --> EntryMetadata : the one door into the map
-    InitializeResponse --> EntryMetadata : entries, the replace-all snapshot
-    InitializeResponse *-- Rejection : rejected
-    StreamEvent ..> Versioned : carries the new CAS token
-```
-<!-- /diagram -->
+It is what a client does instead of storing while it is reaching nobody.
+Storing then would either lose the text — the next store from somebody else
+would not contain it — or have the host carry it into their documents, where
+this client's own copy would arrive and say it twice. A draft asserts nothing
+about what anybody is looking at, and it makes a snapshot naming it portable,
+which is the whole reason it is on the server rather than on the machine that
+could not reach anybody.
+
 
 ---
 
 
 ## 3. System inventory
 
-<!-- diagram: SystemInventory -->
-```mermaid
-flowchart LR
-    subgraph "Client"
-        PyodideBridge{{"Pyodide bridge — sync-over-async, deadline-bounded"}}
-        UI(["UI"])
-        EffectiveView[/"Effective view = outbox.replayOver(confirmed)"/]
-        ConfirmedMap("Confirmed map (memory)")
-        Outbox[("Outbox + bytes-by-hash (IDB)")]
-        ContentCache[("Content cache (IDB)")]
-        DraftsStore[("Drafts (IDB)")]
-        YjsRegistry[("Yjs registry + y-indexeddb")]
-        SyncLoopDriver(("Sync loop"))
-        ConfirmedMap -->|base| EffectiveView
-        Outbox -->|overlay| EffectiveView
-        EffectiveView --- UI
-        EffectiveView --- PyodideBridge
-        PyodideBridge -->|reads| ContentCache
-        PyodideBridge -->|reads live docs first| YjsRegistry
-        SyncLoopDriver -->|snapshot + events| ConfirmedMap
-        SyncLoopDriver -.->|surfaces on reconnect| DraftsStore
-    end
-    subgraph "Server"
-        Controller{{"Workspace controller — one per workspace per process"}}
-        ChokePoint{"The choke point — mutation, position, transaction record and event row in one DB transaction"}
-        Postgres[("Postgres — entries, transactions, event buffer, tokens")]
-        SseHandler[/"SSE handler — claim token, replay, follow"/]
-        BlobStore[("Blob store, keyed by hash")]
-        Controller -->|serialized submit| ChokePoint
-        ChokePoint -->|one commit| Postgres
-        Controller -->|fan out after commit| SseHandler
-    end
-    subgraph "Third-party"
-        Liveblocks("Liveblocks — rooms + yjs sync")
-    end
-    SyncLoopDriver -->|Initialize| Controller
-    Outbox -->|transactional requests| Controller
-    SseHandler -->|stream events| SyncLoopDriver
-    ContentCache -.->|Content — bypasses the controller| Postgres
-    Outbox -->|PUT the bytes, keyed by hash| BlobStore
-    YjsRegistry -->|open text files only| Liveblocks
-```
-<!-- /diagram -->
 
 ### Client-side
 
@@ -278,8 +174,6 @@ failure rollback is recomputation, not an operation.
 (bytes + kind/mime/size + version). Invalidated by `write`/`delete` stream
 signals. Blob-kind bytes are additionally cacheable by hash, forever.
 
-**Drafts store** (IndexedDB) — the parking lot (§5.3).
-
 **Yjs doc registry** (memory + y-indexeddb) — refcounted `Y.Doc` +
 Liveblocks room per *open* text file; "detach" means leave the room, never
 forget unsynced work (teardown waits for flush).
@@ -292,57 +186,6 @@ calls are served by the main thread against the effective view + content
 cache, with hard deadlines so a hung fetch can never wedge the
 Atomics-blocked worker.
 
-<!-- diagram: ClientStores -->
-```mermaid
-classDiagram
-    class OutboxEntry {
-        +string session
-        +string timestamp
-    }
-    class DeleteRequest {
-        +string id
-        +string version
-        +string transaction
-    }
-    class WriteText {
-        +string content
-    }
-    class StoreRequest {
-        +string hash
-        +string mime
-        +number size
-    }
-    class Draft {
-        +string id
-        +string workspace
-        +string session
-        +string timestamp
-        +DraftContent content
-    }
-    class DraftContent {
-        +string hash
-        +number size
-        +string mime
-    }
-    class ContentResponse {
-        +string version
-    }
-    class EntryMetadata {
-        +string id
-        +string version
-        +string name
-        +string parent
-        +boolean deleted
-        +Entry.Type type
-    }
-    OutboxEntry --> DeleteRequest : request (one of five)
-    OutboxEntry --> WriteText : request (one of five)
-    OutboxEntry --> StoreRequest : bytes live by hash, not here
-    Draft *-- DraftContent : a pointer, so drafts stay cheap
-    Draft --> StoreRequest : recovery replays Create, Store, Write
-    ContentResponse ..> EntryMetadata : cached per entry id
-```
-<!-- /diagram -->
 
 ### Server-side
 
@@ -401,37 +244,6 @@ position → follow live, with comment heartbeats (~15s).
 **Blob store** — object storage keyed by hash; `PUT /workspaces/{workspace}/blobs/{hash}` verifies
 the hash and no-ops on duplicates.
 
-<!-- diagram: ServerTables -->
-```mermaid
-erDiagram
-    TransactionRow ||--o{ EntryRow : "adjudicated against"
-    TokenRow ||--|| TransactionRow : "stream position anchors after"
-    EntryRow ||--o{ EntryRow : "parent of"
-
-    TransactionRow {
-        string user
-        string workspace
-        int position
-        text id PK
-        text outcome
-    }
-    EntryRow {
-        string version
-        string name
-        boolean deleted
-        text id PK
-        text parent FK
-        text type
-    }
-    TokenRow {
-        string user
-        string workspace
-        int position
-        string expires
-        text token PK
-    }
-```
-<!-- /diagram -->
 
 ### Third-party
 
@@ -455,25 +267,6 @@ only. Its footprint in the system is exactly the multi-writer surface.
 Eviction triggers, any one suffices: response received; own transaction id
 echoed on the stream; reported in `Initialize.applied`/`rejected`.
 
-<!-- diagram: TransactionLifecycle -->
-```mermaid
-stateDiagram-v2
-    [*] --> Captured : persisted to the outbox
-    Captured --> InFlight : request sent
-    InFlight --> Captured : timeout — remains queued
-    InFlight --> Applied : response, stream echo, or Initialize verdict
-    InFlight --> Rejected : typed failure
-    Applied --> Evicted : confirmed change and overlay removal cancel exactly
-    Rejected --> Evicted : routed to the failure policy
-    Evicted --> [*]
-    note right of Captured
-        Capture before send — the bytes are durable before the network is involved
-    end note
-    note left of Evicted
-        Any one eviction trigger suffices: response received, own transaction id echoed on the stream, or reported by Initialize
-    end note
-```
-<!-- /diagram -->
 
 ### 4.2 Entry lifecycle
 
@@ -503,43 +296,20 @@ unreachable folder is refused — and it exposes no shortcut: a reachability
 flag in a snapshot would go stale on the first event after it, which is worse
 than not having one. See `Entry.Metadata.deleted` in the contract.
 
-<!-- diagram: EntryLifecycle -->
-```mermaid
-stateDiagram-v2
-    [*] --> Absent
-    Absent --> Live : Create — the client already holds the id, the stream event yields the entry
-    Live --> Live : rename / reparent / write — each advances that property's token
-    Live --> Tombstoned : delete
-    Tombstoned --> [*] : terminal — a restore is a fresh Create
-    note right of Tombstoned
-        Tombstones are load-bearing: reconciliation cannot tell deleted from unchanged without them
-    end note
-```
-<!-- /diagram -->
 
 ### 4.3 Draft lifecycle
 
 | State | Meaning | Transitions |
 |---|---|---|
-| **parked** | Entry + hash pointer persisted (always *before* the error is raised to the caller) | → recovering (user accepts, online) / dismissed (explicit) |
-| **recovering** | Minting a fresh entry id and replaying Create → Store → Write | → evicted (success) / parked (failure — never silently dropped) |
-| **dismissed / evicted** | User chose, or recovery succeeded | terminal |
+| **kept** | Recorded on the server, not the file's content. Its transaction names it and can be read at it | → cleared (the work reached the others) |
+| **cleared** | Marked as work that has since got out. The row stays — a snapshot may still name it | terminal |
+| **uncleared and old** | Nobody ever said this got out, and the machine that made it may never come back | reported by `GET /workspaces/{id}/drafts` |
 
-<!-- diagram: DraftLifecycle -->
-```mermaid
-stateDiagram-v2
-    [*] --> Parked : intent + hash persisted before the error is raised
-    Parked --> Recovering : user accepts, online
-    Parked --> Dismissed : explicit dismissal
-    Recovering --> Parked : failure — never silently dropped
-    Recovering --> Evicted : Create, Store, Write replayed in order
-    Dismissed --> [*]
-    Evicted --> [*]
-    note right of Parked
-        No version, cannot conflict, never touches the stream — deliberately outside the sync machinery
-    end note
-```
-<!-- /diagram -->
+Created because this client's updates had not reached the room; cleared when
+they have. The same predicate, flipped, and both decidable locally — but the
+flag is the SERVER's, because the case worth reporting is the machine that
+never came back, and a note kept only there goes with it.
+
 
 ### 4.4 Sync-loop connection states
 
@@ -553,25 +323,6 @@ stateDiagram-v2
 Cold start, reconnect, and recovery are the *same* path: every disruption
 re-enters the loop at Initialize.
 
-<!-- diagram: ConnectionStates -->
-```mermaid
-stateDiagram-v2
-    [*] --> Cold : page load
-    Cold --> Cached : IndexedDB tree loads
-    Cold --> LiveConnection : Initialize succeeds
-    Cached --> LiveConnection : loop re-enters successfully
-    LiveConnection --> Cached : error event or watchdog expiry
-    LiveConnection --> Degraded : acks succeed but the stream will not establish
-    Degraded --> LiveConnection : stream recovers
-    Degraded --> Degraded : meanwhile the loop degrades into polling
-    note right of Cold
-        Cold start, reconnect and recovery are the same path — every disruption re-enters at Initialize
-    end note
-    note left of Degraded
-        A proxy is eating SSE: surface live updates unavailable
-    end note
-```
-<!-- /diagram -->
 
 ### 4.5 Yjs doc lifecycle (per text file, per client)
 
@@ -582,27 +333,6 @@ the room until the server has everything) → **closed** (local state kept as
 warm cache) or **evicted** (file deleted: local state wiped, so stale CRDT
 state can never resurrect).
 
-<!-- diagram: YjsDocLifecycle -->
-```mermaid
-stateDiagram-v2
-    [*] --> Closed
-    Closed --> Attaching : first reference
-    Attaching --> Open : y-indexeddb loads first, then the room connects
-    Open --> Open : references added and released (refcounted)
-    Open --> Flushing : last reference released with unsynced changes
-    Flushing --> Closed : the server has everything
-    Open --> Closed : last reference released, nothing pending
-    Open --> EvictedDoc : file deleted
-    Closed --> EvictedDoc : file deleted
-    EvictedDoc --> [*] : local state wiped — stale CRDT state can never resurrect
-    note right of Flushing
-        Detach never discards
-    end note
-    note left of Closed
-        Local state kept as a warm cache
-    end note
-```
-<!-- /diagram -->
 
 ---
 
@@ -621,103 +351,11 @@ with a cold cache, kind is honestly UNKNOWN and the UI says so.
 Live-editability is a client-side determination (text kind + within size
 budget + editor opened), not a server-side state.
 
-<!-- diagram: ContentModel -->
-```mermaid
-flowchart TD
-    CachedKind{"Cached kind for this id?"}
-    TextRoute("text — inline string")
-    BinaryRoute("binary — hash + size + mime")
-    UnknownKind{{"UNKNOWN — offline with a cold cache; say so in the UI"}}
-    LiveEditable{"text + within size budget + editor opened?"}
-    WriteAsText[/"Write(text)"/]
-    WriteAsBinary[/"Store bytes, then Write(binary)"/]
-    Invalidate(["stream write signal invalidates content AND kind"])
-    CachedKind -->|text| TextRoute
-    CachedKind -->|binary| BinaryRoute
-    CachedKind -->|cold cache, offline| UnknownKind
-    TextRoute --> LiveEditable
-    LiveEditable -->|yes — a client-side determination| YDoc
-    LiveEditable -->|no| WriteAsText
-    BinaryRoute --> WriteAsBinary
-    WriteAsText ==>|a write of the other kind IS the transition| Invalidate
-    WriteAsBinary ==> Invalidate
-    Invalidate -.->|the next Content fetch reveals the new kind| CachedKind
-```
-<!-- /diagram -->
 
 ---
 
 ## 6. Data flows
 
-<!-- diagram: RequestSurface -->
-```mermaid
-classDiagram
-    class CreateRequest {
-        +Entry.Type type
-        +string name
-        +string parent
-        +string transaction
-    }
-    class Versioned {
-        +string id
-        +string version
-    }
-    class DeleteRequest {
-        +string id
-        +string version
-        +string transaction
-    }
-    class RenameRequest {
-        +string id
-        +string version
-        +string name
-        +string transaction
-    }
-    class ReparentRequest {
-        +string id
-        +string version
-        +string parent
-        +string transaction
-    }
-    class ContentRequest {
-        +string id
-    }
-    class StoreRequest {
-        +string hash
-        +string mime
-        +number size
-    }
-    class WriteText {
-        +string content
-    }
-    class WriteBinary {
-        +string hash
-        +string mime
-        +number size
-    }
-    class InitializeRequest {
-        +string workspace
-        +OutboxRequest[] outbox
-    }
-    class InitializeResponse {
-        +string token
-        +Entry.Metadata[] entries
-        +Rejection[] rejected
-        +OutboxRequest[] applied
-    }
-    CreateRequest ..> Versioned : no prior version to present — the entry is new
-    DeleteRequest *-- Versioned : CAS
-    RenameRequest *-- Versioned : CAS
-    ReparentRequest *-- Versioned : CAS
-    ContentRequest *-- Versioned : version optional = latest
-    WriteBinary --> StoreRequest : hash must be stored first
-    InitializeRequest --> DeleteRequest : outbox
-    InitializeRequest --> RenameRequest : outbox
-    InitializeRequest --> ReparentRequest : outbox
-    InitializeRequest --> WriteText : outbox
-    InitializeResponse --> InitializeRequest : adjudicates
-```
-<!-- /diagram -->
 
 ### 6.1 Read (`readFile`, called by the Pyodide bridge or a viewer)
 
@@ -728,27 +366,6 @@ classDiagram
 4. Fetch `Content` (deadline-bounded), populate cache, serve.
 5. Offline/failed → clean filesystem error through the bridge. Never a hang.
 
-<!-- diagram: ReadFlow -->
-```mermaid
-flowchart TD
-    PyodideBridge(["readFile — Pyodide bridge or viewer"])
-    YDoc{"1. live yjs doc open on this client?"}
-    ActiveBuffer{"2. active non-yjs editor buffer?"}
-    ContentCache{"3. content cache hit for this id?"}
-    ContentFetch{"4. fetch Content, deadline-bounded"}
-    Serve(["serve"])
-    FsError{{"5. clean filesystem error — never a hang"}}
-    PyodideBridge --> YDoc
-    YDoc -->|yes — the doc is the truth| Serve
-    YDoc -->|no| ActiveBuffer
-    ActiveBuffer -->|yes — visible or dirty this session| Serve
-    ActiveBuffer -->|no| ContentCache
-    ContentCache -->|hit| Serve
-    ContentCache -->|miss| ContentFetch
-    ContentFetch -->|ok — populate the cache| Serve
-    ContentFetch -->|offline or deadline exceeded| FsError
-```
-<!-- /diagram -->
 
 ### 6.2 Write (`writeFile`)
 
@@ -758,27 +375,6 @@ edits merge instead of being clobbered. Otherwise → capture transaction to
 outbox → (binary: `Store` bytes by hash first) → submit `Write` with the
 entry's current version (CAS). Failure routes per §7.
 
-<!-- diagram: WriteFlow -->
-```mermaid
-flowchart TD
-    WriteCall(["writeFile"])
-    CachedKind{"route on the cached kind"}
-    YDoc{"text with a live doc open?"}
-    YjsDiff("minimal yjs diff — one delete and one insert around the common prefix and suffix")
-    Capture[("capture the transaction to the outbox, before sending")]
-    StoreBytes("binary — Store the bytes by hash first")
-    SubmitWrite[/"submit Write with the entry's current version (CAS)"/]
-    FailurePolicy{{"failure policy"}}
-    WriteCall --> CachedKind
-    CachedKind --> YDoc
-    YDoc -->|yes — concurrent human edits merge| YjsDiff
-    YDoc -->|no| Capture
-    Capture -->|binary| StoreBytes
-    Capture -->|text| SubmitWrite
-    StoreBytes -->|ack required first| SubmitWrite
-    SubmitWrite -.->|rejected| FailurePolicy
-```
-<!-- /diagram -->
 
 ### 6.3 Create
 
@@ -822,26 +418,6 @@ as a wrong answer, because a create only settles away from its name when
 somebody claimed that name first, and that earlier claimant still holds it
 afterwards.
 
-<!-- diagram: CreateFlow -->
-```mermaid
-sequenceDiagram
-    actor Caller as Caller (UI or Pyodide)
-    participant OutboxQueue as Outbox
-    participant ServerSide as Server
-    participant ConfirmedMap as Confirmed map
-    Note over Caller,ConfirmedMap: The client mints the entry id, so a create is queued like anything else — online or off
-    Caller->>Caller: mint entry id + transaction id
-    Caller->>OutboxQueue: capture before send
-    Caller->>+ServerSide: Create(transaction, id, type, name?, parent?)
-    ServerSide-->>-Caller: ack — carries nothing; the id was never the server's to give
-    Note right of Caller: Dependent work referenced that id from the moment it was minted
-    ServerSide-)ConfirmedMap: stream create event — the entry enters the map here, and only here
-    opt ack lost
-        Caller->>ServerSide: retry with the SAME transaction id and entry id
-        ServerSide-->>Caller: answered from the row already appended — never a second entry
-    end
-```
-<!-- /diagram -->
 
 ### 6.4 The sync loop
 
@@ -862,36 +438,6 @@ Never rely on EventSource auto-reconnect (it replays a spent token). Also
 re-enter on `visibilitychange`-to-visible and `online` — Initialize with an
 empty outbox is a cheap no-op.
 
-<!-- diagram: SyncLoopFlow -->
-```mermaid
-sequenceDiagram
-    participant SyncLoop as Sync loop
-    participant Outbox as Outbox
-    participant ServerSide as Server
-    participant ConfirmedMap as Confirmed map
-    participant EventStream as EventSource
-    Note over SyncLoop,EventStream: Cold start, reconnect and recovery are the same path
-    loop forever
-        SyncLoop->>Outbox: read pending transactions, in counter order
-        SyncLoop->>+ServerSide: POST Initialize(workspace, outbox)
-        Note right of ServerSide: ONE repeatable-read transaction: adjudicate the outbox in order, snapshot entries, read position, mint token
-        ServerSide-->>-SyncLoop: { token, entries, applied, rejected }
-        SyncLoop->>Outbox: evict applied and rejected
-        SyncLoop->>ConfirmedMap: replace-all from the snapshot — same server transaction, so no gap and no flicker
-        SyncLoop->>+EventStream: connect with the single-use token
-        EventStream->>ServerSide: claim the token atomically (DELETE ... RETURNING)
-        ServerSide-->>EventStream: replay events after token.position, then follow live
-        loop until error or watchdog expiry
-            EventStream-)ConfirmedMap: create / write / delete / name / parent
-            ServerSide-)EventStream: comment heartbeat, ~15s
-        end
-        EventStream-xSyncLoop: error, or watchdog expiry at ~45s
-        Note over SyncLoop,EventStream: close() — never rely on EventSource auto-reconnect: it replays a spent token
-        SyncLoop->>SyncLoop: jittered exponential backoff — reset only on an established stream
-    end
-    Note over SyncLoop,Outbox: Also re-enter on visibilitychange-to-visible and online — Initialize with an empty outbox is a cheap no-op
-```
-<!-- /diagram -->
 
 ### 6.5 Blob transfer
 
@@ -899,23 +445,6 @@ Upload: `PUT /workspaces/{workspace}/blobs/{hash}` with raw bytes; server verifi
 hash → immediate ack (retry-safe by construction). Download: raw bytes with
 `Content-Type` and `ETag: {version}` (or redirect to object storage).
 
-<!-- diagram: BlobTransfer -->
-```mermaid
-sequenceDiagram
-    participant ClientSide as Client
-    participant Blobs as Blob store
-    ClientSide->>+Blobs: PUT /workspaces/{workspace}/blobs/{hash} — raw bytes as the body
-    alt hash already stored
-        Note right of Blobs: ack immediately, without reading the body — this is the retry story
-    else new bytes
-        Note right of Blobs: verify sha256(body) === hash
-    end
-    Blobs-->>-ClientSide: ack, or a typed failure: hash mismatch / too large
-    ClientSide->>Blobs: GET the bytes
-    Blobs-->>ClientSide: raw bytes with Content-Type: {mime} and ETag: {version}, or a redirect to object storage
-    Note over ClientSide,Blobs: Blobs are immutable: a cached blob by hash can never be wrong — only pointers go stale
-```
-<!-- /diagram -->
 
 ---
 
@@ -925,34 +454,12 @@ sequenceDiagram
 |---|---|
 | Content write conflict, live editor open | Ignore — the yjs doc is the truth; all text mutations flow through it |
 | Text write conflict, no live editor | Diff editor: fetch `Content` at the conflicting version for the other side |
-| Write to a deleted entry | Evict transaction; park content as a draft |
+| Write to a deleted entry | Evict transaction; keep the content as a draft |
 | Create offline | Queue it — the id is the client's to mint. Nothing to park, nothing to disable |
 | Move / rename / delete rejected | Evict; effective view snaps back automatically |
 | Store hash mismatch / too large | Surface; do not retry blindly (the bytes are wrong or oversized, not the network) |
 | Content fetch offline, cold cache | Clean filesystem error (deadline-bounded), never a wedge |
 
-<!-- diagram: FailurePolicyRouting -->
-```mermaid
-flowchart LR
-    Failure(["an operation fails"])
-    LiveEditorOpen{"content write conflict — is a live editor open?"}
-    IgnoreIt("ignore — the yjs doc is the truth")
-    DiffEditor("diff editor — fetch Content at the conflicting version for the other side")
-    ParkDraft("evict; park the content as a draft")
-    SnapBack("evict; the effective view snaps back — recomputation, not an undo operation")
-    SurfaceIt("surface; do not retry blindly — the bytes are wrong or oversized, not the network")
-    Failure -->|Write rejected| LiveEditorOpen
-    LiveEditorOpen -->|yes| IgnoreIt
-    LiveEditorOpen -->|no| DiffEditor
-    Failure -->|write to a deleted entry, or create offline| ParkDraft
-    Failure -->|move, rename or delete rejected| SnapBack
-    Failure -->|Store hash mismatch or too large| SurfaceIt
-    classDef quiet fill:#e6f4ea,stroke:#34a853,stroke-width:2px
-    classDef loud fill:#fce8e6,stroke:#d93025,stroke-width:2px
-    class IgnoreIt,SnapBack quiet
-    class DiffEditor,ParkDraft,SurfaceIt loud
-```
-<!-- /diagram -->
 
 ---
 
@@ -969,8 +476,9 @@ flowchart LR
    transaction record, and event row commit atomically at the choke point.
    There is no publish step that can fail independently.
 4. **Capture before send; park before raise.** A transaction is persisted to
-   the outbox before its request is sent; a draft is persisted before the
-   error is returned to the caller. Ordering is what saves the bytes.
+   the outbox before its request is sent, and a room that cannot reach
+   anybody keeps its text as a draft rather than storing it. Ordering is what
+   saves the bytes.
 5. **Order is sacred in the outbox.** Counter order in, counter order out;
    coalescing is per-entry, writes-only, boring, and unit-tested.
 6. **Versions are equality-only, per-property CAS tokens.** No client-side
@@ -1026,7 +534,8 @@ flowchart LR
 | Stream event types | 5 (create, write, delete, name, parent) |
 | Client loops | 1 per client per workspace |
 | Server tables beyond the domain schema | 1 (stream tokens) |
-| Client persistent stores | 4 (outbox + bytes-by-hash, content cache, drafts, y-indexeddb per open doc) |
+| Client persistent stores | 3 (outbox + bytes-by-hash, content cache, y-indexeddb per open doc) |
+| Server tables beyond the domain schema and drafts | 1 (rooms: created, and where each stands) |
 | Derived client state | 2 (confirmed map, effective view) |
 | Third-party dependencies in the sync core | 0 (Liveblocks serves only the collaboration plane) |
 | Seams between the two planes | 2 (read-flow priority; live-editor write policy) |
@@ -1034,17 +543,35 @@ flowchart LR
 Everything in the sync core survives the subtraction test: remove any piece
 and a named goal breaks (outbox → lost work; CAS → silently destroyed
 collaborators' work; one-door → response/stream races; Initialize → stranded
-outboxes; token position → silent stream gaps; drafts → a write whose entry
-was deleted underneath it loses its bytes).
+outboxes; token position → silent stream gaps; drafts → a client that can
+reach nobody either loses its typing or has it delivered twice).
 
 ## 10. Deliberately not built (yet)
 
-- **Multi-tab leader election.** Multiple tabs are *correct* today (one
-  client each, converging via the stream, server dedup by transaction id) —
-  just wasteful. Web Locks election + BroadcastChannel fan-out is a
-  contained optimization. Orphaned outbox queues are already adoptable.
+- **Multi-tab leader election.** Multiple tabs are *correct* today — one
+  client each, converging via the stream, server dedup by transaction id —
+  and now demonstrated rather than assumed. Election is a contained
+  optimization; it saves work, not correctness.
+
+  What it stops being safe to assume the day the outbox is persisted:
+  browser storage is shared per origin, so **nothing may assume an entry in
+  the outbox was written by the tab that finds it.** True today only because
+  the outbox is still per-client in memory.
 - **A precise definition of "active" for non-yjs editor buffers** — a
   product decision (visible? dirty? this session?) pending real UX.
+- **Draft retention.** Drafts are kept forever by design and chained against
+  their predecessor, so a long offline session stores only what was typed
+  since. Supersession within one client's own lineage, and dedup by digest,
+  are the two bounded wins nobody has taken.
+- **An affordance for being out of touch.** `Room.attached` and
+  `Room.replaced` are reactive so a banner can exist, and none does. A user
+  whose typing is reaching nobody should be told; `send` already returns the
+  sentence saying why.
+- **Migrations that are not additive.** `widen` adds columns the code
+  declares and refuses everything else — a column the code no longer declares
+  is left alone, and one that is NOT NULL with no plain default stops the
+  server starting rather than inventing what the old rows held. Both refusals
+  are deliberate; neither is a migration tool.
 - **Stream resume via cursor.** The single-use-token design makes every
   reconnect a fresh snapshot. If resnapshot-per-blip ever gets expensive
   (mobile), a resume cursor can be added server-side without breaking this
@@ -1067,3 +594,149 @@ was deleted underneath it loses its bytes).
 The design is at the stage where the threat is no longer a flaw in it, but
 feature pressure gradually un-simplifying it. Each addition should be asked
 the same question this document answers: which goal breaks without you?
+
+---
+
+## 11. Six findings, and what each one cost to learn
+
+**Read these as history with one live rule in them.** Findings 1, 2, 3 and 6
+are about machinery that no longer exists: the client-side verdicts, the
+bookkeeping about whose write was whose, and the repair-by-diff they drove. All
+of it went when the server took over carrying text into rooms. They are kept
+because each one is a way of getting this wrong that looked reasonable at the
+time, and because finding 6 is the reason to expect them to come back in new
+clothes.
+
+**Findings 4 and 5 are still rules.** A client that cannot reach the others
+must not store as the file, coming or going. What changed is the consequence:
+the work is kept as a draft and handed to the host, so being unable to reach
+the room costs the direct route and nothing else.
+
+None of the first three would have shown up in one browser. The fourth would
+not have shown up in one *session*. The fifth would not have shown up without
+running the fourth's test.
+
+**1. `Standing` has to be held in structures that merge.** `produced` started as
+a list in one `Y.Map` slot, which is last-writer-wins. Two clients storing at the
+same moment each wrote their own one-element list; one survived; the client whose
+entry was lost then treated the other's write as a stranger's and asked for a
+repair. Now it is a key per transaction. Recorded in `rooms.ts`.
+
+**2. Concurrent seeding doubles the file.** "The document is empty" is true for
+*both* clients opening together, and a CRDT merges two inserts rather than
+noticing they say the same thing. Now claimed first and acted on second: one
+last-writer-wins slot, a wait for the room to converge, and only the winner
+writes. **The wait is a 600ms guess** (`CONVERGING` in `room.svelte.ts`) — it
+wants to hang off an acknowledgement instead, and that is still the single
+piece of this most worth replacing.
+
+**3. A verdict is a hypothesis, not a fact.** The bookkeeping travels between
+clients through the *shared document*; the write it is about travels through the
+*server*; nothing orders those two. A member can be told a write landed before
+being told its own room made it, and will call its own text a stranger's — and
+repairing against text you already hold does not conflict, it duplicates. So
+every non-`current` verdict is confirmed by reading the file at that token, and
+nothing is done if the document already says it. Bookkeeping makes the common
+case free; the comparison is what makes it correct. Recorded in `rooms.ts`.
+
+Reading the file is also how a room finds out it is **over**: nothing in a token
+says whether it names text or bytes, so that read is the first moment anybody
+can know the file stopped being text. That is where `replaced` comes from.
+
+**4. A room nobody can hear must not write around itself.** The second
+session's finding, and the one hardest to reason your way to. A member that
+loses the room keeps its document — that is what a CRDT is for — and it keeps
+its connection to the *server* as well, so storing still works. It must not.
+The text it would store is text the others have not been given, so they repair
+towards it; then the lapse ends, the documents merge, and the same text arrives
+a second time as edits nothing can deduplicate. Nobody did anything wrong and
+the file says everything twice.
+
+The rule is that the two channels are used together or not at all, and it has
+two halves, because the trap has two directions:
+
+- **A detached room does not act on the stream.** It records that it missed
+  something and nothing else — not even advancing `base`, which is one
+  last-writer-wins slot in a document that has not merged for a while, so a
+  detached client's guess at it would win over what the room agreed while it
+  was away.
+- **A detached room does not write to the server.** `store` answers
+  `{ held: true, why }` instead. Nothing is lost: the work stays in the
+  document and goes when the room comes back.
+
+On reattach the room asks `rooms.opening` once, which covers a lapse of any
+length. Recorded in `rooms.ts`, expressed as `rooms.speaking`, and covered by
+the scenario *holds a store while the room is not reaching anybody* — which
+**has never been run**, so finding 4 is reasoned rather than observed. It is the
+first thing to check when docker is back.
+
+**5. Coming back is not the same as having been heard.** The third session's
+finding, and the half of finding 4 that was missing.
+
+Finding 4 says a room that cannot reach anybody must not write to the server.
+True, and **not sufficient**. The symmetric case is the moment it comes *back*:
+`provider.synced` is the provider saying **this client has received the room**,
+and it says nothing whatever about whether the room has received this client.
+A room that stored in that window sent, through the SERVER, text whose only
+other copy was still in flight through the DOCUMENT. The others met a token
+they had no bookkeeping for, carrying text they did not hold, and did the one
+thing that is correct on the evidence available: they repaired towards it. Then
+the merge landed and said the same thing again.
+
+It is finding 4's own doubling, reached from the other direction, and by
+exactly the members who did nothing wrong.
+
+**Observed, not reasoned.** `holds a store while the room is not reaching
+anybody` failed **four times out of four** on the member who stayed — three
+times as a repair that should not have happened, and once, decisively, as
+
+```
+said=2  verdicts=["seed","repair"]  text="kept\nada while away\nada while away\n"
+```
+
+Note what the three non-doubling failures mean: `#act` records the verdict from
+one comparison and `#mend` re-reads before acting, so when the merge lands
+between the two the repair is contemplated and then declined. The file is
+right; the verdict log records a repair that never happened. That is the same
+race, caught by the guard rather than by luck — which is why asserting on the
+verdict log, and not only on the text, is what made this visible at all.
+
+The fix is `#settling` in `room.svelte.ts`: a room that has just reattached
+does not speak until what it holds has had a chance to go out, and `send`
+answers `{ held: true, why: "the room has not finished handing over what it
+holds" }` until then. Scenario 6 went from **0 of 4** to **6 of 7**, and the
+doubling is gone. The one remaining failure is a different shape — the member
+who stayed never received the line at all — which belongs to *The stream
+sometimes does not carry a write* rather than to this.
+
+**It is a timer, and it should not be.** `#settling` waits `CONVERGING` — the
+same 600ms guess seeding uses. Both callers are asking the same question from
+opposite ends: *has this document been round the room yet?* Neither can ask it,
+so both guess. This is now the second place where correctness rests on a
+duration, which makes replacing it with a real acknowledgement the most
+valuable change left in the protocol rather than merely the tidiest.
+
+**6. Moving a rule's execution does not move the rule.** The fourth session's,
+and the shortest to state.
+
+Finding 3 says a verdict is a hypothesis and the content is the authority. When
+the server took over carrying text into rooms, that lesson did not travel with
+the work: the keeper read the room to DECIDE what it owed, and read it again to
+BUILD the update it sent. A room that caught up in between was handed what it
+already held, and a CRDT cannot notice two inserts say the same thing.
+
+The first full browser run after the change doubled whole changes for whichever
+member arrived second -- `"written before grace ever looked\n"` twice, and a
+lapse scenario reading `"shared start\nada was alone\ngrace was alone\nada was
+alone\ngrace was alone\n"`.
+
+The fix is finding 3's own: ask again, against the read being acted on, where
+the answer cannot go stale. Reproduced deterministically by letting a fake
+answer a read and only then change the room, so the deciding read and the
+building read see different states.
+
+Worth remembering when the remaining steps move more work to the server: every
+guard that exists on the client is a candidate to be needed again on the other
+side, and the reasons are written down where the old code was, not where the
+new code is going.
+

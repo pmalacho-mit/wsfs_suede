@@ -52,7 +52,7 @@
    * Swapping `solo()` for `clientAs(ADA)` makes them pass -- verified, one of
    * them in three seconds on its own -- but eighteen tests each opening a
    * real room is minutes rather than seconds, so it is not the default. See
-   * COLLABORATION.md.
+   * AUDIT.md.
    *
    * The CONNECTION is drivable either way: whether this client's work is
    * reaching anybody is a question about a network, and no room, real or

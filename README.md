@@ -1,10 +1,16 @@
 # Wsfs Suede
 
-This repo is a [suede dependency](https://github.com/pmalacho-mit/suede). 
+A workspace filesystem for a browser-based, collaborative, Python-in-the-browser
+platform. Versioned files on a server, live co-editing in the browser, and a
+rule about which of those two is allowed to speak at any moment.
 
-To see the installable source code, please checkout the [release branch](https://github.com/pmalacho-mit/wsfs_suede/tree/release).
+The goal it is built around, in priority order: **a user never loses work**,
+and where loss is possible it is surfaced rather than silent. Everything else —
+the CRDT, the outbox, the drafts, the version tokens — exists to serve that.
 
-## Installation
+This repo is a [suede dependency](https://github.com/pmalacho-mit/suede). The
+installable source is on the
+[release branch](https://github.com/pmalacho-mit/wsfs_suede/tree/release).
 
 ```bash
 bash <(curl -fsSL https://suede.sh/install/release) --repo pmalacho-mit/wsfs_suede
@@ -21,85 +27,53 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pmalacho-mit/suede/refs/head
 
 </details>
 
-# wsfs — workspace filesystem sync scaffold
+---
 
-Runnable scaffold of the sync architecture (see `docs/ARCHITECTURE.md` for
-the full system map, `docs/filesystem-sync-contract.ts` for the wire
-contract). Backend: FastAPI + SQLModel. Frontend: framework-free TypeScript
-(Vite-compatible) + Vitest.
+## What to read
+
+| | |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | the design: the two planes, the vocabulary, the invariants, and the six findings that shaped it |
+| [`SCENARIOS.md`](SCENARIOS.md) | what it must do — every state two clients and a server can be in, and the decisions taken against them |
+| [`AUDIT.md`](AUDIT.md) | what it demonstrably does — coverage, measurements, and what is still weak |
+| [`docs/TESTING.md`](docs/TESTING.md) | how to run any of it, and the traps |
+| [`TODO.md`](TODO.md) | what is deliberately not built |
 
 ## Layout
 
-    backend/
-      app/models.py     tables of record: entries + per-version history,
-                        transaction record (audit/dedup/Initialize), event
-                        buffer, tokens, blobs
-      app/service.py    adjudication + the choke point (position bump, event
-                        row, txn record — one db transaction)
-      app/controller.py per-workspace controller + registry: serialized
-                        submit, post-commit fan-out, refcounted stream
-                        lifecycle with grace-period release
-      app/main.py       Initialize handshake, SSE stream (token claim +
-                        splice), blob PUT, content fetch
-      tests/            behavior tests against a real uvicorn server
-    frontend/
-      src/state.ts      confirmed map, ordered outbox (+ write coalescing),
-                        effective overlay, drafts
-      src/client.ts     WorkspaceClient: actions, the sync loop, the pump;
-                        HttpTransport for the browser
-      tests/fake.ts     FakeServer (mirrors backend semantics) + seeded
-                        fault-injecting transport
-      tests/sync.test.ts unit tests + the torture suite
+    release/backend/     the package a host mounts: adjudication, the event
+                         stream, refusals and drafts, reconstruction
+    release/frontend/    the client: outbox, sync loop, effective view,
+                         content cache. Types generated from the backend's
+                         contract, so the two cannot drift
+    samples/backend/     a worked example of mounting it, plus everything
+                         Liveblocks-shaped: room keeping, seeding, relaying
+    samples/frontend/    a SvelteKit app that uses it, and the browser suite
+    tests/              backend tests against a real postgres, client tests
+                         against a fake one, and measurements against neither
 
-## Run
+Everything about the collaboration server lives in `samples/`. `release/`
+knows nothing about Liveblocks, or about rooms.
 
-    cd backend  && pip install -e . pytest pytest-asyncio httpx && pytest
-    cd frontend && npm install && npm test && npm run typecheck
+## The three rules
 
-Dev server: `uvicorn app.main:app --reload` (SQLite in-memory by default;
-pass a Postgres URL to `create_app` for the real thing — the choke point's
-`with_for_update()` is already the Postgres path). TOPOLOGY INVARIANT:
-one process per workspace — serve with a single worker; see TODO §3
-before scaling out.
+1. **Content that came out of an editor moves as a Yjs update, never as
+   text.** Typing text into a document creates new characters, so the same
+   work arriving twice survives twice. Only content that was never in an
+   editor is diffed in, and that is safe because no second copy of it exists.
+2. **The server is the only writer of a room's `base`, and the only party
+   that carries text into a room.** Clients type and store; they never
+   reconcile.
+3. **A client whose text has reached nobody does not store it as the file.**
+   It keeps it as a draft — durable, addressable, and asserting nothing about
+   what anybody else is looking at.
 
-## What the tests pin down (keyed to ARCHITECTURE.md invariants)
+## Run it
 
-Backend: ack-carries-identity (create), CAS failures carry the current
-version, write-to-deleted is typed for drafts routing, dedup returns the
-recorded outcome on retry (one entry, ever), Initialize adjudicates the
-outbox in order inside the same transaction as its snapshot, tokens are
-single-use, and the stream splices replay-then-live with no gap (deduped by position
-across the subscribe/replay overlap). Blob PUT verifies hashes and dedupes.
-Controller tests pin the racy lifecycle: one controller per workspace,
-submit serialization (no overlap, ever), ordered fan-out to all streams,
-grace-period release with reconnect-cancel, the release/acquire race under
-hammering, and visit-created controllers not leaking.
+```bash
+docker compose -f samples/compose.yml up -d --build
+npm install && cd samples/frontend && npm install && npm run dev
+```
 
-Frontend: outbox ordering + per-entry write coalescing, effective-view
-snap-back (rollback is recomputation), stranded-transaction reconciliation
-through Initialize, drafts capture on offline create and on
-write-to-deleted, same-txn-id create retries never double-mint, and five
-seeded torture runs: random request drops, response drops (after the server
-applied — the nasty case), stream kills, and Initialize failures, followed
-by healing and an assertion of field-level convergence between client
-confirmed state and server truth with an empty outbox.
-
-## What the torture test already found
-
-The design as documented had a stranding gap: a request dropped while the
-stream stays healthy was never resubmitted, because reconciliation only ran
-on loop re-entry and a healthy stream never re-enters. The fix is the
-submission pump in `client.ts` — periodic resubmission of queued
-transactions, safe by construction because the server dedupes by transaction
-id. Two torture seeds caught it before any human would have. Keep the suite;
-extend it before extending the design.
-
-## Deliberate scaffold simplifications
-
-Parent is an inline column (production: your FileSystem/FileHierarchy
-schema). Fan-out is in-process by design (the controller architecture);
-enforcing its one-process-per-workspace invariant on real deployments is
-TODO §3 (startup guard, advisory locks). Auth is an
-`X-User` header stub. Binary write flow, content caching, drafts recovery
-UI, the yjs plane, and the Pyodide bridge are represented in the contract
-and architecture docs but not wired here.
+See [`docs/TESTING.md`](docs/TESTING.md) for the suites, and read the docker
+section there before running the browser tests for the first time.

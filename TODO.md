@@ -64,12 +64,19 @@ is a worked example. What remains:
 
 ## 2. Migrations
 
+Done for the case that kept biting: `migrate.widen` adds columns the code
+declares and the database lacks -- nullable, then filled, then constrained,
+because adding a NOT NULL column to a table with rows fails outright and
+adding one with a DEFAULT silently rewrites every existing row. It runs at
+startup and says what it added. `create_all` alone made a schema change
+silent until the first write, which happened twice.
+
 ```
-[ ] alembic baseline from SQLModel.metadata. Deliberately not started yet:
-    where it lives depends on §1 -- migrations are a deployment concern, and
-    release/ is heading towards holding none. Worth doing before any real
-    data exists. `create_all` is already opt-in (tests only).
-    For whoever writes it: `utc_offset` is declared on the abstract
+[ ] alembic, or something like it, for the changes `widen` refuses: a column
+    the code no longer declares (it may hold the only copy of something), a
+    type that changed, a constraint that moved. Those refusals are correct
+    and they are not a migration tool
+[ ] For whoever writes it: `utc_offset` is declared on the abstract
     TransactionRow, so it lands on all FIVE logs -- wsfs_names,
     wsfs_parentage, wsfs_deletions, wsfs_text_content, wsfs_blob_content.
     Nullable, no default: "the client did not say" is a real answer and not

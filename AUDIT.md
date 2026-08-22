@@ -10,7 +10,8 @@ Everything below was run against the sample stack on 2026-08-22.
 
 ## 1. The scenarios
 
-`SCENARIOS.md` enumerates every state two clients and a server can be in.
+`SCENARIOS.md` enumerates every state two clients and a server can be in, and
+records the decisions taken against it.
 Every row is either covered by a browser scenario or named here as uncovered.
 
 ### Covered, and how
@@ -209,6 +210,90 @@ What this host knows about rooms lives in its own `rooms` table, so it is
 shared by anything reading that database and survives restarts. The keeper
 keeps an in-memory copy in front of it, which is what makes the repeating
 path -- settle after somebody saved -- cost neither a query nor a call.
+
+---
+
+## 3. Known problems
+
+**Two scenarios have no test.** Neither can lose or duplicate anything.
+
+- **B3 from the client's side** — a client that loses the SERVER and keeps the
+  room. Hard to simulate in a browser without a switch on the transport. The
+  other direction (host reachable, room not) is scenario 16.
+- **F5 / H4** — a snapshot restored over a file somebody has open. It is a
+  server-origin write, so it takes the same path as a kernel's output, which
+  scenario 3 covers; the restore case itself is untested.
+
+**The `recorded` set is in memory.** It is what lets `unsettled` answer for
+drafts, refusals and superseded writes, and a reload loses it — which
+understates what the server can rebuild rather than overstating it. It belongs
+with the outbox when that is persisted.
+
+**Drafts are kept forever and are not deduplicated.** `predecessor` chains a
+run of one client's drafts so storage holds only what was typed since, which
+bounds a long offline session. Same-client supersession and digest dedup are
+not built.
+
+**A migration that is not additive still needs a person.** `widen` adds
+columns and refuses everything else — a column the code no longer declares is
+left alone, and a NOT NULL column with no plain default raises at startup
+rather than inventing what the old rows held. That is the right refusal, but it
+is a refusal.
+
+**The sample database is `tmpfs`** and wipes on every `sample-db` restart. That
+is deliberate, and now much less dangerous than it was, because the schema is
+brought up to date at startup rather than silently disagreeing.
+
+**`Room.attached` and `Room.replaced` are `$state` so a banner can exist, and
+none does.** A user whose typing is not reaching anybody should be told,
+particularly now that `send` returns a sentence saying exactly why.
+
+**The sample shell: 16 passed, 2 failed, and the cause is now proven rather
+than suspected.** Tests 13 and 18 turn on the shared document holding the
+file. `solo()`, the fake room, answers as a genuinely EMPTY one — which was
+right while the CLIENT filled a room from the file, and is wrong now that the
+host does, on the real collaboration server that `solo` knows nothing about.
+
+**Swapping `solo()` for `clientAs(ADA)` makes them pass** — verified, test 18
+in three seconds on its own. It is not the default because eighteen tests each
+opening a real room takes minutes rather than seconds and the suite times out.
+The switch is one line in `Sample.test.svelte`.
+
+Two ways to finish it, both straightforward:
+
+- Let the Sample suite use a real room and give it the time (raise the
+  `--silence` window and the per-test waits, as the collaboration suite does).
+- Or teach `solo()` to hold content the test puts there, so a test can say
+  "given a room holding this file" without a network. That is the "given /
+  when / then" shape and it is fully deterministic.
+
+**What the connection needs is already there.** `Provider` is this codebase's
+own type, and two of its members — whether this client is holding changes, and
+waiting until it is not — are about a NETWORK, not a document. No room, real
+or fake, answers those on demand. So `Workspace.svelte` now takes an
+`entering` prop, and `drivable()` supplies one whose connection the test
+answers for:
+
+```ts
+const room = drivable();
+room.reaching(false);   // now this client is holding work nobody else has
+```
+
+**And it earned its keep immediately.** Driving the connection exposed a real
+bug in the product, not the double: a room hears the workspace's stream from
+the moment it exists, and a write landing before it is attached is recorded as
+missed. Opening was exactly that window, and nothing closed it — so a room
+that missed anything while opening stayed behind FOR EVER, refused to write
+the file back, and turned every save into a draft silently. `Rooms.open` now
+catches up after attaching.
+
+**The cold-open cost is measured, not guessed:** first settle 1.7–2.3s,
+repeat 11–28ms. Three sequential calls to the collaboration server — create
+the room, read it, fill it — and `create` is required, verified by trying
+without it (`ROOM_NOT_FOUND`). It is once per file ever. The right place to
+pay it is when the file is CREATED rather than when it is first opened, which
+is not built.
+
 
 ---
 

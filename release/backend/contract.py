@@ -1,4 +1,10 @@
-"""The wire shapes, mirroring `docs/filesystem-sync-contract.ts`.
+"""The wire shapes, and the only place they are declared.
+
+A second copy of a contract does not stay a copy. There was one, written as
+TypeScript beside the architecture notes, and by the time anybody checked it
+disagreed with this file about what a draft was. The client's types are
+GENERATED from this one (`release/frontend/generate.py`), so the two cannot
+drift without the build saying so.
 
 Identity is client-minted throughout. A transaction id is chosen by the client
 before it sends anything, and after the server applies it that same id is the
