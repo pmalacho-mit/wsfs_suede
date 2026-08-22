@@ -12,7 +12,22 @@ import type { Emitter } from "./events";
  */
 export type Announce = Pick<Emitter, "emit">;
 
-export type Options = FileTreeOptions;
+export type Options = FileTreeOptions & {
+  /**
+   * Whether the tree's own empty space -- anywhere below the last row, and the
+   * header -- accepts a drop, and means the root when it does. On wherever
+   * `dragAndDrop` is.
+   *
+   * The tree reads a drop target off the row under the pointer, so without
+   * this the only way out of a directory is a drop onto a row that already
+   * lives at the top level. See `dropping.ts`.
+   */
+  dropOnRoot?: boolean;
+};
+
+/** Whether a model's options leave drops on empty space to mean the root. */
+export const dropsOnRoot = (options: Options): boolean =>
+  options.dropOnRoot ?? true;
 
 const relay =
   <Args extends unknown[]>(
@@ -70,7 +85,21 @@ const announcingDrops = (
   };
 };
 
-export const announcing = (options: Options, emitter: Announce): Options => ({
+/**
+ * The options as the tree takes them: every callback it can make routed
+ * through the emitter first, and what only this wrapper understands removed.
+ *
+ * `dragAndDrop` comes back as the config it resolved to rather than the
+ * shorthand it may have arrived as, because the model holds on to it.
+ */
+export type Announced = FileTreeOptions & {
+  dragAndDrop?: FileTreeDragAndDropConfig;
+};
+
+export const announcing = (
+  { dropOnRoot: _dropOnRoot, ...options }: Options,
+  emitter: Announce,
+): Announced => ({
   ...options,
   onSelectionChange: relay(
     (paths) => emitter.emit("selection changed", paths),

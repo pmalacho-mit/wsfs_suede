@@ -11,6 +11,9 @@
  * `--trees-item-height` and `--trees-density-override` are absent for a
  * different reason — the component writes both from the model, so `density`
  * and `itemHeight` in the options are how you move them.
+ *
+ * The two `--trees-root-drop-*` are the exception: the sheet has never heard
+ * of them, because the drop zone they colour is this wrapper's own.
  */
 export type Variables = Partial<{
   // Surface and text
@@ -47,6 +50,11 @@ export type Variables = Partial<{
   "--trees-focus-ring-color-override": string;
   "--trees-focus-ring-width-override": string;
   "--trees-focus-ring-offset-override": string;
+
+  // The one thing this wrapper draws itself: the host while a drop on it
+  // would land at the root. Both default to the tree's focus ring.
+  "--trees-root-drop-ring-color": string;
+  "--trees-root-drop-bg": string;
 
   // Selection
   "--trees-selected-bg-override": string;

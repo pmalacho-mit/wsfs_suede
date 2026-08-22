@@ -36,3 +36,10 @@ export const singletonify = <T extends Record<string, () => any>>(
   });
   return self;
 };
+
+/** A promise something else decides the moment of. */
+export const latch = () => {
+  let release!: () => void;
+  const opened = new Promise<void>((resolve) => (release = resolve));
+  return { opened, release };
+};

@@ -2,11 +2,12 @@
   import "@codingame/monaco-vscode-python-default-extension";
   import { MonacoEditorLanguageClientWrapper } from "monaco-editor-wrapper";
   import { configureDefaultWorkerFactory } from "monaco-editor-wrapper/workers/workerLoaders";
+  import { getMonacoEnvironmentEnhanced } from "monaco-languageclient/vscode/services";
   import * as monaco from "monaco-editor";
   import { MonacoBinding } from "y-monaco";
   import { untrack } from "svelte";
   import type { EditableFile } from "./models.svelte";
-  import { prepare } from "./workspace";
+  import { analyse, prepare, servicesStarted } from "./workspace";
 
   export type OnEditor = (
     editor: monaco.editor.IStandaloneCodeEditor,
@@ -14,22 +15,68 @@
 
   type Attachable = Pick<EditableFile, "path" | "source" | "sourceSync">;
 
+
+  /**
+   * The first attach brings the workspace's services up, and a second begun
+   * before it finishes brings them up again — which throws, leaving that
+   * editor unattached. Only the first has to be alone; making every attach
+   * wait its turn would leave a long notebook opening one cell at a time.
+   */
+  let first: Promise<unknown> | undefined;
+
+  /** Read from the page rather than remembered, so that a second copy of this
+   *  module — a dev server's reload, say — cannot answer differently. */
+  const servicesAreUp = () =>
+    getMonacoEnvironmentEnhanced()?.vscodeApiInitialised === true;
+
+  const afterTheFirst = <T,>(attach: () => Promise<T>): Promise<T> => {
+    if (first !== undefined) return first.then(attach);
+    const attached = attach();
+    first = attached.catch(() => {});
+    return attached;
+  };
+
+  /**
+   * The grammar that colours Python arrives with an extension the editor
+   * itself brings up. A model created before it registers is never tokenized
+   * again on its own — left alone, the first keystroke in a cell is what
+   * colours that cell and no other.
+   *
+   * Setting a model's language resets its tokenization, and setting it to the
+   * language it already has does nothing at all, hence the round trip.
+   */
   const attachEditor = async (
     target: HTMLElement,
     file: Attachable,
     onEditor?: OnEditor,
   ) => {
+    const modified = await prepare(file.path, file.source);
+
     const wrapper = new MonacoEditorLanguageClientWrapper();
 
     await wrapper.initAndStart({
       $type: "extended",
+      vscodeApiConfig: { vscodeApiInitPerformExternally: servicesAreUp() },
       htmlContainer: target,
       editorAppConfig: {
         useDiffEditor: false,
         monacoWorkerFactory: configureDefaultWorkerFactory,
-        codeResources: { modified: await prepare(file.path, file.source) },
+        codeResources: { modified },
+        editorOptions: {
+          /**
+           * An embedded editor sits inside something that clips, and a hover
+           * is routinely taller than the editor it belongs to. Fixed widgets
+           * are laid out against the viewport instead, which only the editor
+           * that builds them can be told — the option is read once, when the
+           * view is constructed.
+           */
+          fixedOverflowWidgets: true,
+        },
       },
     });
+
+    servicesStarted();
+    await analyse(file.path);
 
     const editor = wrapper.getEditor();
     if (!editor) throw new Error("Editor not found");
@@ -80,7 +127,7 @@
     child.style.width = "100%";
     child.style.height = "100%";
     container.appendChild(child);
-    const handle = untrack(() => attachEditor(child, file, onEditor));
+    const handle = untrack(() => afterTheFirst(() => attachEditor(child, file, onEditor)));
     current = handle;
     return () => {
       handle.then(({ dispose }) => dispose());

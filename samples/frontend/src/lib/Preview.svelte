@@ -1,4 +1,6 @@
 <script lang="ts">
+  import DownloadIcon from "@lucide/svelte/icons/download";
+  import { Button } from "$lib/components/ui/button";
   import type { Held } from "$wsfs";
 
   let { path, held }: { path: string; held: Held } = $props();
@@ -23,34 +25,20 @@
   const shows = $derived(binary?.mime.startsWith("image/") ?? false);
 </script>
 
-<div class="preview">
+<div class="bg-background grid h-full place-items-center overflow-auto p-4">
   {#if !binary}
-    <p class="note">Nothing to preview.</p>
+    <p class="text-muted-foreground text-sm">Nothing to preview.</p>
   {:else if shows && source}
-    <img src={source} alt={path} />
+    <img src={source} alt={path} class="max-h-full max-w-full" />
   {:else}
-    <p class="note">
+    <p class="text-muted-foreground flex items-center gap-2 text-sm">
       {binary.mime} · {binary.bytes.byteLength} bytes
-      {#if source}<a href={source} download={path}>Download</a>{/if}
+      {#if source}
+        <Button href={source} download={path} variant="outline" size="xs">
+          <DownloadIcon />
+          Download
+        </Button>
+      {/if}
     </p>
   {/if}
 </div>
-
-<style>
-  .preview {
-    display: grid;
-    place-items: center;
-    height: 100%;
-    padding: 1rem;
-    overflow: auto;
-  }
-  img {
-    max-width: 100%;
-    max-height: 100%;
-    image-rendering: auto;
-  }
-  .note {
-    font: 0.85rem/1.6 ui-sans-serif, system-ui, sans-serif;
-    color: var(--wsfs-muted, #6b7280);
-  }
-</style>

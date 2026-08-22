@@ -165,6 +165,39 @@ if (item?.isDirectory()) item.toggle();
 `isDirectory()` narrows the handle, so `expand`, `collapse`, `toggle` and
 `isExpanded` only typecheck where they exist.
 
+### Drops on the root
+
+The tree resolves a drop target from the ROW under the pointer: a folder row is
+that folder, a file row is the folder holding it, and a row that already lives
+at the top level is the root. Empty space is no row, so a file inside a
+directory has nowhere to be dropped that would take it out of one.
+
+So the model makes the tree's own surface — anything below the last row, and
+the header — mean the root:
+
+```ts
+new Tree.Model({ paths, dragAndDrop: true }); // on, wherever dragAndDrop is
+new Tree.Model({ paths, dragAndDrop: true, dropOnRoot: false }); // off
+```
+
+`src/lib/utils.ts` dropped there becomes `utils.ts`, and a folder carries its
+contents with it. It is the tree's own drop in every other respect: `canDrag`
+still decides whether the drag starts, `canDrop` is asked with
+`target.kind === "root"`, a name the root is already using is refused before
+anything moves, and the outcome arrives as [`dropped` or `drop
+refused`](#6-events) like any other. `dropOnRoot` is the one option
+`Tree.Model` takes that is not `@pierre/trees`'.
+
+While a drop would land on the root, the host carries `data-root-drop-target` —
+which draws a ring in the tree's own focus colour, and is there to hang a rule
+of your own on:
+
+```css
+file-tree-container[data-root-drop-target] {
+  /* or move the built-in one with --trees-root-drop-ring-color, --trees-root-drop-bg */
+}
+```
+
 ### The rest
 
 ```ts
@@ -247,8 +280,10 @@ also work spread from an object, in which case they land on the host inline:
 <Tree.Component {model} {...dark} />
 ```
 
-The list is exactly the properties the stylesheet reads without declaring — the
-holes it leaves open. Two groups are deliberately absent:
+The list is the properties the stylesheet reads without declaring — the holes
+it leaves open — plus `--trees-root-drop-ring-color` and `--trees-root-drop-bg`,
+which are this wrapper's own, for the [drop zone](#drops-on-the-root) it draws
+itself. Two groups are deliberately absent:
 
 - **Resolved values** (`--trees-bg`, `--trees-fg`, the per-language icon
   palette). The sheet declares these on `:host`, so an inherited value would

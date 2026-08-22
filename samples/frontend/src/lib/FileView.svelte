@@ -10,7 +10,7 @@
 
   import { Editor } from "wsfs_suede.python-monaco-suede";
   import Preview from "$lib/Preview.svelte";
-  import Runner from "$lib/Runner.svelte";
+  import Runner, { type Outcome } from "$lib/Runner.svelte";
   import type { Workspace } from "$wsfs";
   import type { KernelPool, OpenFile } from "./Workspace.svelte";
   import type { Payload } from "../../../../release/frontend/content";
@@ -20,6 +20,7 @@
     opened: OpenFile;
     workspace: Workspace;
     kernelPool: KernelPool;
+    onFinished: (outcome: Outcome) => void;
   };
 
   let { params }: IDockviewPanelProps<Params> = $props();
@@ -66,7 +67,10 @@
 
 {#if binary}
   {#if params.opened.sharedText?.shared?.replaced}
-    <p class="note">
+    <p
+      class="bg-destructive/10 text-destructive border-destructive/30 border-b px-3 py-2 text-sm"
+      data-region="replaced"
+    >
       Somebody wrote {params.opened.sharedText.shared.replaced.mime} over this
       file. What you were editing is no longer what it holds.
     </p>
@@ -75,7 +79,12 @@
 {:else if params.opened.sharedText}
   {@const trouble = params.opened.sharedText.shared?.trouble}
   {#if trouble}
-    <p class="note out-of-touch" class:passing={trouble.passing}>
+    <p
+      class="border-b px-3 py-2 text-sm {trouble.passing
+        ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+        : 'bg-destructive/10 text-destructive border-destructive/30'}"
+      data-region="trouble"
+    >
       {trouble.says} — what you type is kept, and goes when it can.
     </p>
   {/if}
@@ -91,23 +100,22 @@
       <Runner
         kernelPool={params.kernelPool}
         shared={params.opened.sharedText}
+        onFinished={params.onFinished}
       />
     {/if}
   </div>
 {:else}
-  <p class="note">Opening {params.opened.path}…</p>
+  <p class="text-muted-foreground p-4 text-sm">Opening {params.opened.path}…</p>
 {/if}
 
+<!--
+  Both notices are SAID rather than hidden. Typing into a document that is
+  reaching nobody is safe -- it is kept, and it goes when the room comes back
+  -- but a person who is not told assumes their work is where everybody
+  else's is. Amber for that, and destructive for a file that stopped being
+  the text on screen, because only one of the two has already cost something.
+-->
 <style>
-  /*
-   * Said rather than hidden. Typing into a document that is reaching nobody
-   * is safe -- it is kept, and it goes when the room comes back -- but a
-   * person who is not told assumes their work is where everybody else's is.
-   */
-  .out-of-touch {
-    border-left: 3px solid var(--pierre-warning, #c8a020);
-  }
-
   .text {
     display: grid;
     grid-template-rows: 1fr;
@@ -116,13 +124,5 @@
   }
   .text.runnable {
     grid-template-rows: 1fr minmax(7rem, 30%);
-  }
-  .note {
-    font:
-      0.85rem/1.6 ui-sans-serif,
-      system-ui,
-      sans-serif;
-    color: var(--wsfs-muted, #6b7280);
-    padding: 1rem;
   }
 </style>

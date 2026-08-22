@@ -133,6 +133,41 @@ const runningMajor = (told) => {
   }
 };
 
+/** The grammar engine and the regex engine it runs on, both UMD. */
+const UMD_BUNDLES = /vscode-(textmate|oniguruma)[\\/]release[\\/]main\.js$/;
+
+/**
+ * The grammar engine and its regex engine ship UMD bundles, which look for
+ * CommonJS first and fall back to hanging themselves off the file's top-level
+ * `this`. Served straight to the tokenizer's worker as a module, that `this`
+ * is `undefined` and each throws on load — inside a worker, where nothing
+ * surfaces it, so documents render and simply never colour.
+ *
+ * Pre-bundling hands them the CommonJS they want; a worker's import does not,
+ * so this does. Their consumer reads `module.default ?? module`, which is why
+ * one default export is enough.
+ *
+ * @return {import('vite').Plugin}
+ */
+const umdAsCommonJs = () => ({
+  name: "python-monaco-suede:umd-global",
+  enforce: /** @type {const} */ ("pre"),
+  /**
+   * @param {string} code
+   * @param {string} id
+   */
+  transform(code, id) {
+    if (!UMD_BUNDLES.test(id.split("?")[0])) return;
+    const asCommonJs = [
+      "const module = { exports: {} };",
+      "const exports = module.exports;",
+      code,
+      "export default module.exports;",
+    ].join("\n");
+    return { code: asCommonJs, map: null };
+  },
+});
+
 /**
  * @typedef {object} ApplyOptions
  * @property {string} [base] Base URL to embed into PYTHON_MONACO_BASE
@@ -170,6 +205,7 @@ export const applyConfig = (current, options = {}) => {
 
   current.plugins.push(
     resolvingAssetUrls(),
+    umdAsCommonJs(),
     viteStaticCopy({ targets: [{ src: server, dest: "./" }] }),
   );
 

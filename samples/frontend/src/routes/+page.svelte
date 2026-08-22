@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
 
   import Workspace from "$lib/Workspace.svelte";
+  import WorkspaceFrame from "$lib/shell/WorkspaceFrame.svelte";
   import { solo } from "$lib/liveblocks";
   import {
     connect,
@@ -12,9 +13,15 @@
     type Workspace as Client,
   } from "$wsfs";
   import { createClient } from "@liveblocks/client";
+  import { toast } from "svelte-sonner";
 
   const USER = "ada@example.com";
   const BACKEND = "/wsfs";
+
+  /** What this page is looking at. A real host reads it off the route. */
+  const TITLE = "Workspace Example";
+  const EVENT = "Example";
+  const COURSE = "Example";
 
   /** The sample's stand-in for a session. A real host sends a cookie. */
   const asUser = (email: string) => async () => ({ "X-User-Email": email });
@@ -35,8 +42,22 @@
    * is an error the app can recover from on their behalf.
    */
   let storage = $state<Faltering | undefined>(undefined);
-  let lost = $state<string[]>([]);
   let unwatch: (() => void) | undefined;
+
+  /**
+   * Queued work whose bytes are gone. An event, not a state -- it happened
+   * once, to particular changes -- so it is said the way this app says
+   * things that happen, and it does not dismiss itself.
+   */
+  const cannotBeSent = (count: number) =>
+    toast.error(
+      count === 1 ? "A change could not be sent" : `${count} changes could not be sent`,
+      {
+        description:
+          "They were queued here and can no longer be read back. Anything you typed and did not see arrive may need typing again.",
+        duration: Number.POSITIVE_INFINITY,
+      },
+    );
 
   const project = async (email: string) => {
     const response = await fetch("/projects", {
@@ -72,8 +93,7 @@
         bytes: held.bytes,
         kept: held.kept,
         restored: held.restored,
-        lost: (entries) =>
-          (lost = [...lost, ...entries.map(({ transaction }) => transaction)]),
+        lost: (entries) => cannotBeSent(entries.length),
       });
     } catch (reason) {
       failure = reason instanceof Error ? reason.message : String(reason);
@@ -84,48 +104,32 @@
   onDestroy(() => (unwatch?.(), workspace?.stop()));
 </script>
 
-<!-- The shell fills whatever it is given, so the page is what says "all of
+<!-- The frame fills whatever it is given, so the page is what says "all of
      it" -- a test gives it a card-sized box instead. -->
-<div class="page">
-  {#if failure}
-    <p class="failure">{failure}</p>
-  {:else if workspace}
-    {#if storage}
-      <p class="failure">
-        {storage.says}.{storage.full
-          ? " Free some space — until then, anything typed here only lives in this tab."
-          : " Anything typed here only lives in this tab until it is sent."}
-      </p>
+<div class="h-dvh w-full">
+  <WorkspaceFrame title={TITLE} event={EVENT} course={COURSE}>
+    {#if failure}
+      <p class="text-destructive p-4 text-sm">{failure}</p>
+    {:else if workspace}
+      <div class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+        <!-- A banner rather than a toast, because it is not an event: for as
+             long as it says this, everything typed here is going nowhere but
+             this tab, and a notice that fades would stop saying so while it
+             was still true. -->
+        {#if storage}
+          <p
+            class="bg-destructive/10 text-destructive border-destructive/30 border-b px-3 py-2 text-sm"
+            data-region="storage-trouble"
+          >
+            {storage.says}.{storage.full
+              ? " Free some space \u2014 until then, anything typed here only lives in this tab."
+              : " Anything typed here only lives in this tab until it is sent."}
+          </p>
+        {/if}
+        <Workspace {workspace} {liveblocks} />
+      </div>
+    {:else}
+      <p class="text-muted-foreground p-4 text-sm">Opening a workspace\u2026</p>
     {/if}
-    {#if lost.length > 0}
-      <p class="failure">
-        {lost.length}
-        {lost.length === 1 ? "change was" : "changes were"} queued and can no longer
-        be read back, so they were never sent. Anything you typed and did not see
-        arrive may need typing again.
-      </p>
-    {/if}
-    <Workspace {workspace} {liveblocks} />
-  {:else}
-    <p class="waiting">Opening a workspace…</p>
-  {/if}
+  </WorkspaceFrame>
 </div>
-
-<style>
-  .page {
-    height: 100dvh;
-    width: 100%;
-  }
-  :global(body) {
-    margin: 0;
-  }
-  .failure,
-  .waiting {
-    font: 0.9rem/1.5 ui-sans-serif, system-ui, sans-serif;
-    padding: 1rem;
-    color: var(--wsfs-muted, #6b7280);
-  }
-  .failure {
-    color: #b91c1c;
-  }
-</style>

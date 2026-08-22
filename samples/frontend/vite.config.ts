@@ -1,6 +1,8 @@
 import { sveltekit } from "@sveltejs/kit/vite";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, type UserConfig } from "vite";
-import { applyConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
+import { applyConfig as applyMonacoConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
+import { applyConfig as applyKernelConfig } from "../../wsfs_suede.python-web-kernel-suede/config/vite.js";
 
 const BACKEND = process.env.WSFS_BACKEND ?? "http://localhost:8099";
 
@@ -14,7 +16,7 @@ const CHECKOUT = new URL("../../", import.meta.url).pathname;
  * looks like a file that will not open.
  */
 const config = defineConfig({
-  plugins: [sveltekit()],
+  plugins: [tailwindcss(), sveltekit()],
   server: {
     // Reachable from outside this container, because the browser that runs
     // `npm run test:browser` is in one of its own: `--forward` publishes this
@@ -47,8 +49,8 @@ const config = defineConfig({
  * resolves, and this app resolves its own -- two installs, structurally the
  * same and nominally different.
  */
-const configured = applyConfig(
-  config as Parameters<typeof applyConfig>[0],
+const configured = applyKernelConfig(
+  applyMonacoConfig(config as Parameters<typeof applyMonacoConfig>[0]),
 ) as UserConfig;
 
 export default configured;

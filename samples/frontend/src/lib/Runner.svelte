@@ -1,3 +1,30 @@
+<script lang="ts" module>
+  import type { Output } from "wsfs_suede.python-web-kernel-suede";
+
+  /**
+   * How a run ended, as anything downstream of it needs to know.
+   *
+   * `because` is there so that whoever reacts to a failure can say what
+   * failed without going back to the outputs to work it out again.
+   */
+  export type Outcome = { ok: true } | { ok: false; because: string };
+
+  const raised = (outputs: Output.Specific[]) =>
+    outputs.find((output) => output.output_type === "error") as
+      | Output.Error
+      | undefined;
+
+  const outcomeOf = (
+    outputs: Output.Specific[],
+    failure: string | undefined,
+  ): Outcome => {
+    if (failure !== undefined) return { ok: false, because: failure };
+    const error = raised(outputs);
+    if (error === undefined) return { ok: true };
+    return { ok: false, because: `${error.ename}: ${error.evalue}` };
+  };
+</script>
+
 <script lang="ts">
   /**
    * The terminal that belongs to one file.
@@ -6,15 +33,23 @@
    * writes to, so running a file runs what is on screen -- including imports
    * of siblings nobody has saved by hand.
    */
-  import { snippets, type Output } from "wsfs_suede.python-web-kernel-suede";
+  import EraserIcon from "@lucide/svelte/icons/eraser";
+  import PlayIcon from "@lucide/svelte/icons/play";
+  import SquareIcon from "@lucide/svelte/icons/square";
+  import { snippets } from "wsfs_suede.python-web-kernel-suede";
+  import { Button } from "$lib/components/ui/button";
+  import { Separator } from "$lib/components/ui/separator";
   import type { KernelPool, SharedTextFile } from "./Workspace.svelte";
 
   let {
     kernelPool,
     shared,
+    onFinished,
   }: {
     kernelPool: KernelPool;
     shared: Pick<SharedTextFile, "source"> & { file: { path: string } };
+    /** Every run, as it ends. A refused run is not a run and is not reported. */
+    onFinished?: (outcome: Outcome) => void;
   } = $props();
 
   let outputs = $state<Output.Specific[]>([]);
@@ -39,86 +74,54 @@
         failure = reason instanceof Error ? reason.message : String(reason);
       } finally {
         running = undefined;
+        onFinished?.(outcomeOf(outputs, failure));
       }
     });
   };
 </script>
 
-<section class="runner">
-  <header>
-    <button onclick={run} disabled={!!running}
-      >{running ? "Running…" : "Run"}</button
-    >
+<section
+  class="bg-sidebar grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] border-t"
+  data-region="runner"
+>
+  <header class="flex h-9 shrink-0 items-center gap-1 px-2">
     {#if running}
-      <button onclick={() => running?.interrupt()}>Stop</button>
+      <Button size="xs" variant="destructive" onclick={() => running?.interrupt()}>
+        <SquareIcon />
+        Stop
+      </Button>
+    {:else}
+      <Button size="xs" onclick={run} data-region="run">
+        <PlayIcon />
+        Run
+      </Button>
     {/if}
-    <button onclick={() => (outputs = [])} disabled={outputs.length === 0}>
+    <Button
+      size="xs"
+      variant="ghost"
+      onclick={() => (outputs = [])}
+      disabled={outputs.length === 0}
+    >
+      <EraserIcon />
       Clear
-    </button>
-    <span class="path">{shared.file.path}</span>
+    </Button>
+    <Separator orientation="vertical" class="mx-1 h-4" />
+    <span class="text-muted-foreground truncate font-mono text-[0.7rem]">
+      {shared.file.path}
+    </span>
   </header>
-  <output>
+  <output
+    class="block overflow-auto px-3 pb-3 font-mono text-[0.78rem] leading-relaxed whitespace-pre-wrap"
+  >
     {#each outputs as produced}
       {@render snippets.output.any(produced)}
     {:else}
-      <span class="idle">Run to see output.</span>
+      <span class="text-muted-foreground italic">Run to see output.</span>
     {/each}
-    {#if failure}<span class="failure">{failure}</span>{/if}
+    <!-- Only when the outputs did not already say it: a kernel that raised
+         reports it as an output AND rejects the job. -->
+    {#if failure && raised(outputs) === undefined}
+      <span class="text-destructive block">{failure}</span>
+    {/if}
   </output>
 </section>
-
-<style>
-  .runner {
-    display: grid;
-    grid-template-rows: auto 1fr;
-    min-height: 0;
-    border-top: 1px solid var(--wsfs-line, #e5e7eb);
-    background: var(--wsfs-sunken, #fbfbfd);
-  }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.35rem 0.5rem;
-  }
-  button {
-    font:
-      500 0.75rem/1 ui-sans-serif,
-      system-ui,
-      sans-serif;
-    padding: 0.35rem 0.7rem;
-    border: 1px solid var(--wsfs-line, #e5e7eb);
-    border-radius: 6px;
-    background: var(--wsfs-raised, #fff);
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .path {
-    margin-left: auto;
-    font:
-      0.7rem/1 ui-monospace,
-      monospace;
-    color: var(--wsfs-muted, #6b7280);
-  }
-  output {
-    display: block;
-    overflow: auto;
-    padding: 0.5rem 0.75rem 0.75rem;
-    font:
-      0.78rem/1.55 ui-monospace,
-      SFMono-Regular,
-      monospace;
-    white-space: pre-wrap;
-  }
-  .failure {
-    display: block;
-    color: #b91c1c;
-  }
-  .idle {
-    color: var(--wsfs-muted, #9ca3af);
-    font-style: italic;
-  }
-</style>

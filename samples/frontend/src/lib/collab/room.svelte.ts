@@ -617,6 +617,20 @@ export class Rooms {
   readonly held = new Map<string, Room>();
 
   /**
+   * Whether this registry has been put away.
+   *
+   * Opening a room is several round trips, and a workspace can be torn down
+   * in the middle of one -- a tab closing, a panel unmounting, a test ending.
+   * The open then fails, correctly, and it is NOT a fault: there is nobody
+   * left to show the document to. Anything reporting a failed open asks this
+   * first, so a normal teardown stops looking like an error.
+   */
+  #gone = false;
+  get gone(): boolean {
+    return this.#gone;
+  }
+
+  /**
    * Whether a document here speaks for this entry -- what `connect` asks
    * before letting anything write the file's text around it.
    *
@@ -721,6 +735,7 @@ export class Rooms {
   }
 
   async dispose(): Promise<void> {
+    this.#gone = true;
     this.#watching();
     await Promise.all([...this.held.values()].map((room) => room.dispose()));
     this.held.clear();
