@@ -27,6 +27,35 @@ describe("the sync loop", () => {
     loop.stop();
   });
 
+  /**
+   * A token the server never issued means this client's state is unsound, and
+   * the only sound answer is to throw it away and start again. Nudging is how
+   * it asks for that -- and a client that has just been told its state is
+   * unsound is by definition one whose stream is working, so the case that
+   * matters is exactly the one where there is no backoff to wake from.
+   */
+  it("re-enters at Initialize when nudged, stream or no stream", async () => {
+    const reconcile = vi.fn(async () => "token");
+    const loop = run(
+      {
+        reconcile,
+        follow: (_token, _alive, until) =>
+          new Promise<void>((ended) => until.addEventListener("abort", () => ended())),
+      },
+      { watchdogMs: 10_000, minBackoffMs: 0, maxBackoffMs: 0 },
+    );
+
+    await settled();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+
+    loop.nudge();
+    await settled();
+    await settled();
+    expect(reconcile.mock.calls.length).toBeGreaterThan(1);
+
+    loop.stop();
+  });
+
   it("treats a silent stream as a failed one", async () => {
     const reconcile = vi.fn(async () => "token");
     const loop = run(

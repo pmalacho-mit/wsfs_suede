@@ -110,10 +110,23 @@ export const run = (cycle: Cycle, timing: Timing = DEFAULTS): Loop => {
       reading?.abort();
       wake?.();
     },
-    /** Re-enter now: what a tab becoming visible, or coming online, means. */
+    /**
+     * Re-enter at Initialize now.
+     *
+     * What a tab becoming visible or coming online means -- and what a client
+     * means when the server tells it a token it presented was never issued,
+     * which says its state is unsound and the only sound answer is to throw
+     * it away and start again.
+     *
+     * Waking the backoff is not enough, and the case that matters is exactly
+     * the one it misses: a client whose state has just been called unsound is
+     * one whose stream is working, so there is no backoff to wake from. The
+     * stream has to be given back for the loop to come round again.
+     */
     nudge: () => {
       backoff = timing.minBackoffMs;
       wake?.();
+      reading?.abort();
     },
   };
 };

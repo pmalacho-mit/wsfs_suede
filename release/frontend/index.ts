@@ -24,7 +24,7 @@ export type { Authorized, Transport } from "./transport";
 export { mint, session } from "./identity";
 export { mintedAt, localised, accepted, offset, reading, written } from "./minted";
 export type { Reading } from "./minted";
-export { inMemory, digestOf } from "./bytes";
+export { inMemory } from "./bytes";
 
 /**
  * Text diffing, as the outbox uses it to store a chained write as an edit

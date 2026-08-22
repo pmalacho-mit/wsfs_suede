@@ -35,9 +35,7 @@ import {
   type Persist,
   type Replacement,
   type Room,
-  type HandOver,
-  type Settle,
-  type Stored as ToldStored,
+  type Host,
   type Written,
 } from "./room.svelte";
 
@@ -76,7 +74,7 @@ export const clientAs = (email: string): LiveblocksClient =>
  * Idempotent, and the only way a room is ever filled. The browsers used to
  * elect one of themselves to do it, which is a race no client can settle.
  */
-export const settling: Settle = async (entry) => {
+const settling = async (entry: string) => {
   const answer = await fetch(`/rooms/${encodeURIComponent(entry)}`, { method: "POST" });
   if (!answer.ok) throw new Error(`settling ${entry}: ${answer.status}`);
   return ((await answer.json()) as { base: string | null }).base;
@@ -101,7 +99,7 @@ export const warming = async (entry: string): Promise<void> => {
  * room already holds the text, so the host only has to be told where the file
  * now stands rather than go and look.
  */
-export const storedFromRoom: ToldStored = async (entry, version) => {
+const storedFromRoom = async (entry: string, version: string) => {
   const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/stored`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -149,13 +147,20 @@ export const persisting: Persist = (entry, doc) => {
   };
 };
 
-export const handingOver: HandOver = async (entry, update) => {
+const handingOver = async (entry: string, update: Uint8Array) => {
   const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/updates`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: update as BodyInit,
   });
   if (!answer.ok) throw new Error(`handing over ${entry}: ${answer.status}`);
+};
+
+/** Everything a room asks of this host, in one place. */
+export const hosted: Host = {
+  settle: settling,
+  stored: storedFromRoom,
+  handOver: handingOver,
 };
 
 export const enteringWith = (liveblocks: LiveblocksClient) =>
@@ -201,9 +206,7 @@ export class Collaborator {
     this.rooms = new Rooms(
       this.workspace,
       enteringWith(this.liveblocks),
-      settling,
-      storedFromRoom,
-      handingOver,
+      hosted,
       persisting,
     );
   }

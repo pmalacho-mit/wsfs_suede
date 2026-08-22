@@ -14,7 +14,14 @@
  */
 import * as Y from "yjs";
 
-import { contract, deltaBetween, editsFor, rooms, type Workspace } from "$wsfs";
+import {
+  contract,
+  deltaBetween,
+  editsFor,
+  rooms,
+  type Change,
+  type Workspace,
+} from "$wsfs";
 
 /** What a room needs a provider to be able to do. */
 export type Provider = {
@@ -45,27 +52,30 @@ export type Enter = (
   doc: Y.Doc,
 ) => { provider: Provider; leave: () => void };
 
-/**
- * Asking the host to make this entry's room exist and say what the file says.
- *
- * Answers where the room now stands, which the host keeps rather than the
- * document: putting it in the document would mean a write to the
- * collaboration server every time anybody saved, for every client that heard.
- */
-export type Settle = (entry: string) => Promise<string | null>;
+/** What a room asks of the host that keeps it. */
+export type Host = {
+  /**
+   * Make this entry's room exist and say what the file says, and answer where
+   * it now stands.
+   *
+   * Where it stands is the host's to keep, not the document's: in the
+   * document, advancing it is a write, so one person saving would cost a
+   * round trip to the collaboration server for every client that heard.
+   */
+  settle: (entry: string) => Promise<string | null>;
 
-/** Telling the host that a member of this room wrote the file. */
-export type Stored = (entry: string, version: string) => Promise<void>;
+  /** A member of this room wrote the file, so the room already holds the text. */
+  stored: (entry: string, version: string) => Promise<void>;
 
-/**
- * Asking the host to put this client's own update into the room for it.
- *
- * The one thing a client cannot do for itself when it can reach the host and
- * not the collaboration server. Its work would otherwise sit on its machine
- * until that connection came back, which is not a good enough reason for
- * nobody else to see it.
- */
-export type HandOver = (entry: string, update: Uint8Array) => Promise<void>;
+  /**
+   * Put this client's own update into the room for it.
+   *
+   * The one thing a client cannot do for itself when it can reach the host
+   * and not the collaboration server, and losing that connection should cost
+   * the direct route to everybody else rather than everybody else.
+   */
+  handOver: (entry: string, update: Uint8Array) => Promise<void>;
+};
 
 /**
  * Keeping this document on THIS MACHINE, so a tab closing does not lose it.
@@ -329,7 +339,7 @@ export class Room {
 
   /** Have the server bring this room up to whatever the file now says. */
   async catchUp(): Promise<void> {
-    this.base = await this.held.settle(this.entry);
+    this.base = await this.held.host.settle(this.entry);
     this.#missed = false;
   }
 
@@ -363,7 +373,7 @@ export class Room {
     void settled.then((answer) => {
       if (answer.rejected) return;
       this.base = transaction;
-      void this.held.stored(this.entry, transaction);
+      void this.held.host.stored(this.entry, transaction);
     });
     return { held: false, transaction, settled };
   }
@@ -398,7 +408,7 @@ export class Room {
    */
   async #carriedByTheHost(): Promise<void> {
     if (this.replaced !== undefined) return;
-    await this.held.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
+    await this.held.host.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
   }
 
   /**
@@ -568,31 +578,28 @@ export class Rooms {
   constructor(
     readonly workspace: Workspace,
     readonly enter: Enter,
-    readonly settle: Settle,
-    readonly stored: Stored,
-    readonly handOver: HandOver,
+    readonly host: Host,
     readonly persist: Persist,
   ) {
     this.#watching = workspace.watch((changes) => {
-      for (const change of changes) {
-        /**
-         * A create counts too. A client shows a file the moment it is asked
-         * for and opens its room straight away, so the room can exist before
-         * the server has heard of the entry -- and the host cannot fill a
-         * room from a file it does not have yet.
-         */
-        if (change.kind === "appeared") {
-          void this.held.get(change.entry)?.catchUp();
-          continue;
-        }
-        if (change.kind === "removed") {
-          void this.held.get(change.entry)?.standDown(change.by, null);
-          continue;
-        }
-        if (change.kind !== "written") continue;
-        this.held.get(change.entry)?.heard(change.by);
-      }
+      for (const change of changes) this.#tell(change);
     });
+  }
+
+  /**
+   * What one change means to the room holding that entry, if one is.
+   *
+   * A create counts, and not only a write: a client shows a file the moment
+   * it is asked for and opens its room straight away, so a room can exist
+   * before the server has heard of its entry -- and the host cannot fill a
+   * room from a file it does not have yet.
+   */
+  #tell(change: Change) {
+    const room = this.held.get(change.entry);
+    if (room === undefined) return;
+    if (change.kind === "appeared") return void room.catchUp();
+    if (change.kind === "removed") return void room.standDown(change.by, null);
+    if (change.kind === "written") room.heard(change.by);
   }
 
   /** The version the workspace believes this entry's content is at. */
@@ -634,7 +641,7 @@ export class Rooms {
     room.opening = "recalling";
     await room.recall();
     room.opening = "settling";
-    room.base = await this.settle(entry);
+    room.base = await this.host.settle(entry);
     room.opening = "attaching";
     await room.attach();
     /**
