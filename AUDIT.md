@@ -298,9 +298,10 @@ catches up after attaching.
 **The cold-open cost is measured, not guessed:** first settle 1.7–2.3s,
 repeat 11–28ms. Three sequential calls to the collaboration server — create
 the room, read it, fill it — and `create` is required, verified by trying
-without it (`ROOM_NOT_FOUND`). It is once per file ever. The right place to
-pay it is when the file is CREATED rather than when it is first opened, which
-is not built.
+without it (`ROOM_NOT_FOUND`). It is once per file ever, and it is paid when
+the file is CREATED rather than when somebody opens it -- `FileTree` calls
+`warming(entry)`, the host fills the room in a background task, and the first
+open is 12-13ms. Measured in section 2.
 
 
 ---
