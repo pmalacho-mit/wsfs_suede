@@ -336,37 +336,56 @@ that is persisted.
 
 ---
 
-## Step 6 — Two tabs
+## Step 6 — Two tabs — DONE
 
-**Now.** Untested and unreasoned-about. It probably works.
+Two tabs of one browser are two clients, and now tested as such: both open the
+same file, each sees the other's typing exactly once, one stores, and the
+other browser sees both lines once. They are the same user on the same
+machine, so they share what a machine shares — local storage, keyed by entry.
 
-**Wanted.** Two tabs of one browser behave exactly as two separate clients.
-Nothing assumes it is the only client on this machine — in particular, **nothing
-may assume an entry in the local outbox was written by the tab that finds it**,
-since local storage is shared per origin.
+**The outbox gotcha does not bite yet, and will.** Local state is shared per
+origin, but the outbox is still in memory per client, so nothing can find an
+entry another tab queued. When the outbox is persisted that stops being true,
+and *nothing may assume an entry in the outbox was written by the tab that
+finds it.*
 
-**Confirm.** Run the paired scenarios with two tabs of one browser in place of
-two browsers. They should pass unchanged. Add one that is specifically about the
-shared outbox: tab A queues a write, tab B loads and adjudicates, and neither
-loses nor double-submits it.
+## Step 7 — Standing down without losing work — DONE
 
----
+A room stands down when the file stops being its text — bytes written over it,
+or the file deleted — and **what was on screen is put somewhere first**.
+Terminal without keeping the text would mean a kernel's output or somebody
+else's deletion silently taking work its author never stored. Nobody chose
+that; it just happened to them.
 
-## Step 7 — Standing down without losing work
+`Replacement` now carries `kept`, the draft the text went into, and `mime` is
+null when the file was deleted rather than replaced.
 
-**Now.** When a file becomes binary the room stands down. Whatever was typed and
-not stored is simply gone from the file's perspective.
+**A draft is named by ENTRY, not by path**, which the deletion case forced: a
+file being deleted underneath somebody is exactly when their unstored work
+needs keeping, and by then it has no path to name.
 
-**Wanted.** Before standing down — for a file becoming binary *or* being deleted
-— every client with the room open **writes a draft of its current text**. Then
-the room stands down and the editor becomes a preview, with a restore
-affordance. Multiple clients produce multiple drafts, deduped by digest.
+**Confirm.** Scenario 8 asserts the binary case keeps the text; scenario 12 is
+new and covers deletion, which had no coverage at all.
 
-**Confirm.** Extend the existing binary scenario: the client that had it open
-asserts a draft exists whose content is what it was showing. Add the deletion
-case, which has no coverage at all today.
+## A third thing `unsettled` could not answer
 
----
+Chasing an intermittent *"never reached the server"* in scenario 5 turned up
+the last member of a family:
+
+| what | is it an entry's version? | can the server rebuild it? |
+|---|---|---|
+| a draft | never | yes |
+| a refusal | never | yes |
+| **an applied write a later write superseded** | **not any more** | **yes** |
+
+All three fall through the confirmed map, which says what each entry is at
+NOW — a different question from what the server can rebuild. Grace stored,
+Ada stored after her, and Grace's own transaction stopped being the entry's
+version before she asked about it.
+
+`unsettled` now counts every transaction the server has ANSWERED. The answer
+is the proof: whatever the server decided, it wrote the transaction down
+before saying so.
 
 ## Order and dependencies
 

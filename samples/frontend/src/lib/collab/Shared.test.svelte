@@ -623,6 +623,15 @@
       );
       pocket.note = `stood down: ${client.replacement(entry)?.mime}`;
 
+      /**
+       * And the work it was showing went somewhere before it stood down.
+       * A kernel's output must not quietly take text its author never
+       * stored -- nobody chose that, it just happened to them.
+       */
+      const ended = client.replacement(entry);
+      if (ended?.kept == null) throw new Error("stood down without keeping the text");
+      harness.expect(await client.reads(entry, ended.kept)).toBe("readable\n");
+
       /** Not corrupted, and not repaired: the document is left as it was. */
       harness.expect(client.text(entry)).toBe("readable\n");
       harness.expect(client.speaks(entry)).toBe(false);
@@ -823,6 +832,123 @@
       harness.expect(pocket.text.split("typed then closed").length - 1).toBe(1);
       await client.take(entry);
       await client.rebuildable();
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="treats two tabs of one browser as two clients"
+  body={async (harness) => {
+    /**
+     * Two tabs is not an exotic case -- people open them constantly -- and
+     * "it happens to work" is not a claim worth making without a test.
+     *
+     * They are the same user on the same machine, so they share what a
+     * machine shares: local storage, keyed by entry. Nothing may assume it is
+     * the only client here.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "twotabs", "one file\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      const second = await joined(harness);
+      await client.open(entry);
+      await second.open(entry);
+      await until("both tabs to carry the file", () =>
+        client.text(entry).includes("one file") && second.text(entry).includes("one file"),
+      );
+
+      client.type(entry, client.text(entry) + "from the first tab\n");
+      await until("the second tab to see the first", () =>
+        second.text(entry).includes("from the first tab"),
+      );
+      second.type(entry, second.text(entry) + "from the second tab\n");
+      await until("the first tab to see the second", () =>
+        client.text(entry).includes("from the second tab"),
+      );
+
+      const said = (who: Collaborator, needle: string) =>
+        who.text(entry).split(needle).length - 1;
+      harness.expect(said(client, "from the first tab")).toBe(1);
+      harness.expect(said(second, "from the second tab")).toBe(1);
+
+      await until("the room to speak", () => second.speaks(entry));
+      const stored = await second.store(entry);
+      if (stored.held) throw new Error(`the second tab would not store: ${stored.why}`);
+      await announce(step(id, "twotabs", "stored"));
+
+      pocket.text = client.text(entry);
+      pocket.note = "two tabs, one file";
+      await second.take(entry);
+      await second.rebuildable();
+    } else {
+      await client.open(entry);
+      await awaiting(step(id, "twotabs", "stored"));
+      await until("both tabs' work to arrive", () =>
+        client.text(entry).includes("from the first tab") &&
+        client.text(entry).includes("from the second tab"),
+      );
+      pocket.text = client.text(entry);
+      pocket.note = "saw both tabs";
+      const count = (needle: string) => pocket.text.split(needle).length - 1;
+      harness.expect(count("from the first tab")).toBe(1);
+      harness.expect(count("from the second tab")).toBe(1);
+    }
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <p><b>{pocket.who}</b>: {pocket.note}</p>
+    <pre>{pocket.text}</pre>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="keeps what was on screen when the file is deleted underneath it"
+  body={async (harness) => {
+    /**
+     * The deletion case, which had no coverage at all. A file going away is
+     * somebody else's decision, and it must not take unstored work with it --
+     * the room stands down, and what it was showing is recoverable.
+     */
+    const pocket = harness.set(new Pocket());
+    pocket.who = browser();
+    const client = await joined(harness);
+    const entry = await sharedFile(client, "deleted", "still here\n");
+    const id = await workspace();
+
+    if (playing("ada")) {
+      await client.open(entry);
+      await until("the room to carry the file", () => client.text(entry).includes("still here"));
+      client.type(entry, client.text(entry) + "typed but never stored\n");
+      const showing = client.text(entry);
+      await announce(step(id, "deleted", "open"));
+
+      await awaiting(step(id, "deleted", "gone"));
+      await until(
+        "the room to be told the file is gone",
+        () => client.replacement(entry) !== undefined,
+      );
+
+      const ended = client.replacement(entry);
+      harness.expect(ended?.mime).toBe(null);
+      if (ended?.kept == null) throw new Error("the file went and took the work with it");
+      harness.expect(await client.reads(entry, ended.kept)).toBe(showing);
+      harness.expect(client.speaks(entry)).toBe(false);
+      pocket.note = "stood down, work kept";
+      pocket.text = showing;
+    } else {
+      await awaiting(step(id, "deleted", "open"));
+      await client.workspace.remove("deleted.py").settled;
+      await announce(step(id, "deleted", "gone"));
+      pocket.note = "deleted it";
     }
   }}
 >

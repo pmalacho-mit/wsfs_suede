@@ -98,9 +98,13 @@ export type Workspace = {
    * For a client whose text has reached nobody else. The token it presents is
    * not consumed and nothing rebases under it, so the write that eventually
    * shares the work presents the same one.
+   *
+   * BY ENTRY, NOT BY PATH, and that is the case it exists for: a file being
+   * deleted underneath somebody is exactly when their unstored work needs
+   * keeping, and by then it has no path to name.
    */
   keep: (
-    path: paths.Path,
+    entry: Id,
     content: string | Uint8Array,
     mime?: string,
   ) => Submitting;
@@ -147,12 +151,16 @@ export const connect = (options: Options): Workspace => {
   let index = paths.index(shown.view);
 
   /**
-   * Transactions the server recorded without applying them.
+   * Every transaction this client sent that the server answered.
    *
-   * A refusal and a draft both leave a row that names what was ASKED, and
-   * both are rebuildable from it -- but neither is ever an entry's version,
-   * so the confirmed map that `unsettled` reads has no way to know about
-   * them and would call them unreachable for ever.
+   * The confirmed map says what each entry is at NOW, which is a different
+   * question from what the server can rebuild, and three things fall through
+   * the gap: a draft, a refusal, and an applied write that a later write has
+   * since superseded. None of them is any entry's current version; all three
+   * are on the server and rebuildable from it.
+   *
+   * An answer is the proof. Whatever the server decided, it wrote the
+   * transaction down before saying so.
    *
    * Held in memory only. A reload loses it, which understates what the server
    * can rebuild rather than overstating it.
@@ -227,8 +235,8 @@ export const connect = (options: Options): Workspace => {
       content.remember(request.transaction, heldAs(payload, mime));
     recomputed();
     const response = await transport.submit(workspace, request);
+    recorded.add(request.transaction);
     if (settledHere(response)) {
-      recorded.add(request.transaction);
       if (response.rejected && response.reason === UNSOUND) sync.nudge();
       bytes.forget(queue.evict([request.transaction]));
       recomputed();
@@ -299,7 +307,7 @@ export const connect = (options: Options): Workspace => {
         payload,
         mime,
       );
-      if (settledHere(answer)) recorded.add(transaction);
+      recorded.add(transaction);
       return answer;
     })();
     return { transaction, settled };
@@ -363,8 +371,11 @@ export const connect = (options: Options): Workspace => {
         : written(entry, payload, mime);
     },
 
-    keep: (path, payload, mime = TEXT) =>
-      written(entryAt(path), payload, mime, true),
+    keep: (entry, payload, mime = TEXT) => {
+      const held = shown.view.get(entry);
+      if (held === undefined) throw new Error(`No such entry: ${entry}`);
+      return written(held, payload, mime, true);
+    },
 
     create: (path, payload, mime = TEXT) => created(path, payload, mime),
 
@@ -426,8 +437,9 @@ export const connect = (options: Options): Workspace => {
      * was showing, so a token standing in the confirmed map is exactly the
      * question "has the server told me about this", asked completely.
      *
-     * Plus what was recorded without being applied -- refusals and drafts.
-     * Neither is ever an entry's version, and the server can rebuild both.
+     * Plus everything the server has answered for, which the confirmed map
+     * cannot speak to: drafts, refusals, and writes a later write has moved
+     * past.
      */
     unsettled: (transactions) => {
       const confirmed = new Set<Transaction>(recorded);

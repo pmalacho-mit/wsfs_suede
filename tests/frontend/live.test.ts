@@ -211,7 +211,8 @@ describeLive("a workspace against a live backend", () => {
     await created;
     await settledWhen(workspace, () => workspace.unsettled([born]).length === 0);
 
-    const { transaction, settled } = workspace.keep("kept.py", "x typed alone");
+    const entry = workspace.index().at("kept.py")!.id;
+    const { transaction, settled } = workspace.keep(entry, "x typed alone");
     expect(workspace.unsettled([transaction])).toEqual([transaction]);
 
     await settled;

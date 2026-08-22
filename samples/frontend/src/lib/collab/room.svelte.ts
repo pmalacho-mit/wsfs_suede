@@ -60,11 +60,14 @@ export type Persist = (
   doc: Y.Doc,
 ) => { loaded: Promise<void>; stop: () => Promise<void> };
 
-/** What a write that was not text did to a room showing text. */
+/** What ended a room that was showing text. */
 export type Replacement = {
   entry: string;
   at: contract.Version;
-  mime: string;
+  /** The mime the file became, or `null` when it was deleted instead. */
+  mime: string | null;
+  /** Where the text it was showing went, so that it is not lost with the room. */
+  kept: contract.Transaction | null;
 };
 
 /**
@@ -244,7 +247,7 @@ export class Room {
   async #told(transaction: contract.Transaction) {
     const held = await this.held.workspace.at(this.entry, transaction);
     if (held.kind === "binary") {
-      this.replaced = { entry: this.entry, at: transaction, mime: held.mime };
+      await this.standDown(transaction, held.mime);
       return;
     }
     await this.catchUp();
@@ -279,8 +282,8 @@ export class Room {
    */
   send(path: string): Sending {
     if (this.replaced !== undefined)
-      return this.#kept(path, "the file stopped being this room's text");
-    if (!this.speaks) return this.#kept(path, this.#whyNot);
+      return this.#kept("the file stopped being this room's text");
+    if (!this.speaks) return this.#kept(this.#whyNot);
 
     const { transaction, settled } = this.held.workspace.write(
       path,
@@ -306,9 +309,9 @@ export class Room {
    * -- or have the server carry it into their documents, where this client's
    * own copy would arrive and say it twice.
    */
-  #kept(path: string, why: string): Held {
+  #kept(why: string): Held {
     const { transaction, settled } = this.held.workspace.keep(
-      path,
+      this.entry,
       this.text.toString(),
     );
     return { held: true, why, draft: transaction, settled };
@@ -359,8 +362,31 @@ export class Room {
    * file. This is the same conclusion reached one step earlier, by a caller
    * that already has the bytes in its hand and knows they are not text.
    */
-  tookAway(at: contract.Version, mime: string) {
-    this.replaced = { entry: this.entry, at, mime };
+  tookAway(at: contract.Version, mime: string): Promise<void> {
+    return this.standDown(at, mime);
+  }
+
+  /**
+   * The file stopped being this room's text, and the room goes quiet.
+   *
+   * WHAT WAS ON SCREEN IS PUT SOMEWHERE FIRST. A room holding a `Y.Text` has
+   * nothing to merge bytes into and nothing to say about a file that is gone,
+   * so this is terminal -- and terminal without keeping the text would mean a
+   * deletion or a kernel's output silently taking work its author never
+   * stored. Nobody chose that; it just happened to them.
+   */
+  async standDown(at: contract.Version, mime: string | null): Promise<void> {
+    if (this.replaced !== undefined) return;
+    const kept = await this.#keepWhatWasShowing();
+    this.replaced = { entry: this.entry, at, mime, kept };
+  }
+
+  async #keepWhatWasShowing(): Promise<contract.Transaction | null> {
+    const showing = this.text.toString();
+    if (showing.length === 0) return null;
+    const { transaction, settled } = this.held.workspace.keep(this.entry, showing);
+    await settled;
+    return transaction;
   }
 
   attach(): Promise<void> {
@@ -456,6 +482,10 @@ export class Rooms {
   ) {
     this.#watching = workspace.watch((changes) => {
       for (const change of changes) {
+        if (change.kind === "removed") {
+          void this.held.get(change.entry)?.standDown(change.by, null);
+          continue;
+        }
         if (change.kind !== "written") continue;
         this.held.get(change.entry)?.heard(change.by);
       }
