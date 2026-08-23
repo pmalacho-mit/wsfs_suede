@@ -323,7 +323,7 @@ export class Room {
       this.#missed = true;
       return;
     }
-    void this.#told(transaction);
+    void this.#told(transaction).catch(() => this.#findOut());
   }
 
   /**
@@ -339,6 +339,28 @@ export class Room {
       return;
     }
     await this.catchUp();
+  }
+
+  /**
+   * The read that would have said whether this file is still text did not
+   * come back.
+   *
+   * Routinely benign: the token can name a write of this client's own that
+   * the server has not issued as a version yet, and reading a version nobody
+   * has heard of is refused. So the answer is to ASK AGAIN -- have the server
+   * bring the room up to whatever the file now says -- rather than to stand
+   * down, which would leave the room mute for ever over a request that was
+   * never going to be answered.
+   *
+   * Standing down is what happens when even that cannot be answered, because
+   * then there is genuinely nothing this room knows.
+   */
+  async #findOut(): Promise<void> {
+    try {
+      await this.catchUp();
+    } catch {
+      this.#missed = true;
+    }
   }
 
   /**

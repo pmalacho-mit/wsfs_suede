@@ -14,7 +14,7 @@
   import type { Workspace } from "$wsfs";
   import type { KernelPool, OpenFile } from "./Workspace.svelte";
   import type { Payload } from "../../../../release/frontend/content";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   type Params = {
     opened: OpenFile;
@@ -27,12 +27,32 @@
 
   let binary = $state<Extract<Payload, { kind: "binary" }>>();
 
+  /**
+   * Whether this panel is still on screen.
+   *
+   * A read is a round trip and a panel can be closed during one -- a tab
+   * shutting, a workspace being put away, a test ending. The read then fails
+   * against a workspace nobody is holding any more, and answering it would
+   * be answering to nothing.
+   */
+  let showing = true;
+  onDestroy(() => (showing = false));
+
   const read = () => {
-    params.workspace.read(params.opened.path).then((content) => {
-      if (!content) return;
-      if (content.kind === "text") params.opened.share(content.text);
-      else binary = content;
-    });
+    params.workspace
+      .read(params.opened.path)
+      .then((content) => {
+        if (!showing || !content) return;
+        if (content.kind === "text") params.opened.share(content.text);
+        else binary = content;
+      })
+      /**
+       * Caught, because an uncaught one is a console error that says nothing
+       * anybody can act on. Nothing is lost by failing here: content is
+       * re-fetchable, the panel goes on showing what it has, and the view
+       * says "Opening ..." for as long as it has nothing at all.
+       */
+      .catch(() => undefined);
   };
 
   /**
