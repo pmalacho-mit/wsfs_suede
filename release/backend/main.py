@@ -55,7 +55,7 @@ from .contract import (
     TextContentResponse,
 )
 from .controller import ControllerRegistry, WorkspaceController
-from .liveblocks import LiveblocksRooms
+from .collaboration import ICollaboration
 from .models import BlobContentRow, Models, TextContentRow
 from .keeper import Keeper, WsfsFiles, RememberedRooms
 from .service import Workspaces
@@ -117,7 +117,7 @@ class Backend:
         heartbeat_seconds: float,
         grace_seconds: float,
         max_blob_bytes: int,
-        liveblocks: LiveblocksRooms,
+        liveblocks: ICollaboration,
     ) -> "Backend":
         schema = Workspaces.over(models)
         return cls(
@@ -130,7 +130,7 @@ class Backend:
             heartbeat_seconds=heartbeat_seconds,
             max_blob_bytes=max_blob_bytes,
             keeper=Keeper(
-                liveblocks=liveblocks,
+                collaboration=liveblocks,
                 files=WsfsFiles(schema, database),
                 standings=RememberedRooms(schema.models, database),
             ),

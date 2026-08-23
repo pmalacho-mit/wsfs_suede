@@ -27,7 +27,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ...release.backend.blobs import FilesystemBlobs
 from ...release.backend.main import Backend, create_router
 from ...release.backend.models import build_models
-from ...release.backend.liveblocks import LiveblocksRooms
+from ...release.backend.collaboration import Liveblocks
 from ...wsfs_suede__sqlmodel_utils_suede.associations import WithID
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 from ...wsfs_suede__sqlmodel_utils_suede.tablenames import tablename
@@ -232,7 +232,7 @@ def create_sample_app(
         heartbeat_seconds=heartbeat_seconds,
         grace_seconds=grace_seconds,
         max_blob_bytes=max_blob_bytes,
-        liveblocks=LiveblocksRooms(secret),
+        liveblocks=Liveblocks(secret),
     )
 
     def _rooms():
