@@ -14,6 +14,8 @@
   import { offline } from "./offline";
   import Workspace from "./Workspace.svelte";
   import WorkspaceFrame from "./shell/WorkspaceFrame.svelte";
+  import WorkspacePane from "./shell/WorkspacePane.svelte";
+  import type { Faltering } from "$wsfs";
 
   const LAYOUT = {
     notebooks: {
@@ -34,6 +36,9 @@
         bytes: inMemory(),
       });
     }
+
+    /** Set by the test that asks what a notice does to the layout. */
+    storage = $state<Faltering>();
 
     dispose() {
       this.workspace.stop();
@@ -113,3 +118,64 @@
     </WorkspaceFrame>
   </div>
 {/snippet}
+
+<!--
+  The arrangement, not the panels. What broke was a notice slot ABOVE the
+  workspace: optional, and laid out as a two-track grid, so with no notice the
+  workspace landed in the `auto` track and was zero high. The header looked
+  perfectly fine and everything below it was gone -- which no test measuring
+  panels against each other could see, because there were no panels.
+-->
+<Sweater
+  name="the workspace fills what is under the header, notice or no notice"
+  body={async ({ set, container, expect, capture, delay, onAbort }) => {
+    onAbort(resetMode);
+    setMode("light");
+    const pocket = set(new Pocket());
+    onAbort(() => pocket.dispose());
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (named(pocket.workspace).length > 0) break;
+      await delay({ milliseconds: 100 });
+    }
+    await delay({ frames: 2 });
+
+    const pane = container.querySelector("[data-region='workspace-pane']")!;
+    const body = container.querySelector("[data-region='workspace-body']")!;
+    const shell = container.querySelector("[data-region='shell']")!;
+
+    /** Most of the pane, not a sliver of it, and certainly not nothing. */
+    const filling = (held: Element) =>
+      held.getBoundingClientRect().height / pane.getBoundingClientRect().height;
+    expect(pane.getBoundingClientRect().height).toBeGreaterThan(100);
+    expect(filling(body)).toBeGreaterThan(0.9);
+    expect(filling(shell)).toBeGreaterThan(0.9);
+
+    /** And with a notice, which is the case the layout was written for. */
+    pocket.storage = {
+      says: "work that has not been sent is not being written down",
+      full: false,
+    };
+    await delay({ frames: 2 });
+    const said = container.querySelector("[data-region='storage-trouble']");
+    expect(said).not.toBeNull();
+    expect(said!.getBoundingClientRect().height).toBeGreaterThan(0);
+    /** The workspace gives up the notice's height and keeps the rest. */
+    expect(filling(body)).toBeGreaterThan(0.7);
+    expect(filling(shell)).toBeGreaterThan(0.7);
+
+    await capture("png").uri;
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <div class="h-[36rem] w-full">
+      <WorkspaceFrame title="Workspace Example" event="Example" course="Example">
+        <WorkspacePane
+          workspace={pocket.workspace}
+          liveblocks={pocket.liveblocks}
+          storage={pocket.storage}
+        />
+      </WorkspaceFrame>
+    </div>
+  {/snippet}
+</Sweater>
