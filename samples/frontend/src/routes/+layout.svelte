@@ -1,14 +1,9 @@
 <script lang="ts">
   import "../app.css";
-  import { ModeWatcher } from "mode-watcher";
-  import { Toaster } from "$lib/components/ui/sonner";
+  import Layout from "../../../../release/frontend/svelte/Layout.svelte";
 
   let { children } = $props();
 </script>
 
-<!-- The mode is settled before the first paint, so nothing flashes light on
-     its way to dark. -->
-<ModeWatcher />
-<Toaster position="top-center" richColors closeButton />
-
+<Layout />
 {@render children()}

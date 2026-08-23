@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
 
-  import WorkspaceFrame from "$lib/shell/WorkspaceFrame.svelte";
-  import WorkspacePane from "$lib/shell/WorkspacePane.svelte";
-  import { solo } from "$lib/liveblocks";
+  import WorkspaceFrame from "../../../../release/frontend/svelte/shell/WorkspaceFrame.svelte";
+  import WorkspacePane from "../../../../release/frontend/svelte/shell/WorkspacePane.svelte";
+  import { solo } from "$lib/harness/liveblocks";
   import {
     connect,
     http,
@@ -51,7 +51,9 @@
    */
   const cannotBeSent = (count: number) =>
     toast.error(
-      count === 1 ? "A change could not be sent" : `${count} changes could not be sent`,
+      count === 1
+        ? "A change could not be sent"
+        : `${count} changes could not be sent`,
       {
         description:
           "They were queued here and can no longer be read back. Anything you typed and did not see arrive may need typing again.",
@@ -64,7 +66,8 @@
       method: "POST",
       headers: { "X-User-Email": email },
     });
-    if (!response.ok) throw new Error(`could not open a project: ${response.status}`);
+    if (!response.ok)
+      throw new Error(`could not open a project: ${response.status}`);
     return ((await response.json()) as { id: string }).id;
   };
 

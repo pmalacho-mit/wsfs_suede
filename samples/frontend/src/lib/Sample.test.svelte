@@ -18,10 +18,9 @@
 
   import FileTree, {
     Model as FileTreeModel,
-  } from "../../../../release/frontend/components/FileTree.svelte";
-  import Shell from "$lib/Workspace.svelte";
-  import type { Client } from "$lib/testing.svelte";
-  import { drivable, solo } from "$lib/liveblocks";
+  } from "../../../../release/frontend/svelte/FileTree.svelte";
+  import Shell from "../../../../release/frontend/svelte/Workspace.svelte";
+  import { drivable, solo } from "./harness/liveblocks";
   import {
     alongside,
     clickRow,
@@ -39,7 +38,8 @@
     selected,
     tabs,
     until,
-  } from "$lib/testing.svelte";
+    type Client,
+  } from "./harness/testing.svelte";
 
   /**
    * A room with nobody else in it, and a connection the test can answer for.

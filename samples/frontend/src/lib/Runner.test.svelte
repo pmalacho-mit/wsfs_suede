@@ -1,10 +1,12 @@
 <script lang="ts">
   import Sweater from "sweater-vest-suede/Sweater.svelte";
-  import Runner, { type Outcome } from "./Runner.svelte";
-  import { WarmPool } from "../../../../release/frontend/components/pool";
+  import Runner, {
+    type Outcome,
+  } from "../../../../release/frontend/svelte/Runner.svelte";
+  import { WarmPool } from "../../../../release/frontend/svelte/pool";
   import { Kernel } from "wsfs_suede.python-web-kernel-suede";
   import fs from "wsfs_suede.python-web-kernel-suede/fs";
-  import { nameOf } from "$lib/paths";
+  import { nameOf } from "../../../../release/frontend/svelte/paths";
 
   /** Unclosed on purpose: the point is a run that ends badly. */
   const BROKEN = `print("hello world"`;

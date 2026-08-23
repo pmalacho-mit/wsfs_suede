@@ -10,16 +10,16 @@
   import Sweater from "sweater-vest-suede/Sweater.svelte";
   import { resetMode, setMode } from "mode-watcher";
   import { connect, inMemory, type Workspace as Client } from "$wsfs";
-  import { solo } from "$lib/liveblocks";
-  import { offline } from "./offline";
-  import Workspace from "./Workspace.svelte";
-  import WorkspaceFrame from "./shell/WorkspaceFrame.svelte";
-  import WorkspacePane from "./shell/WorkspacePane.svelte";
+  import { solo } from "./harness/liveblocks";
+  import { offline } from "./harness/offline";
+  import Workspace from "../../../../release/frontend/svelte/Workspace.svelte";
+  import WorkspaceFrame from "../../../../release/frontend/svelte/shell/WorkspaceFrame.svelte";
+  import WorkspacePane from "../../../../release/frontend/svelte/shell/WorkspacePane.svelte";
   import type { Faltering } from "$wsfs";
 
   const LAYOUT = {
     notebooks: {
-      "analysis.py": 'import readings\n\nprint(readings.mean())\n',
+      "analysis.py": "import readings\n\nprint(readings.mean())\n",
       "scratch.py": 'print("hello")\n',
     },
     data: { "readings.csv": "day,value\n1,3.2\n2,4.1\n" },
@@ -72,7 +72,9 @@
     }
 
     for (const region of ["explorer", "documents", "assistant"])
-      expect(container.querySelector(`[data-region='${region}']`)).not.toBeNull();
+      expect(
+        container.querySelector(`[data-region='${region}']`),
+      ).not.toBeNull();
     expect(named(pocket.workspace)).toContain("notebooks/analysis.py");
     expect(named(pocket.workspace)).toContain("data/readings.csv");
 
@@ -169,7 +171,11 @@
 >
   {#snippet vest(pocket: Pocket)}
     <div class="h-[36rem] w-full">
-      <WorkspaceFrame title="Workspace Example" event="Example" course="Example">
+      <WorkspaceFrame
+        title="Workspace Example"
+        event="Example"
+        course="Example"
+      >
         <WorkspacePane
           workspace={pocket.workspace}
           liveblocks={pocket.liveblocks}
