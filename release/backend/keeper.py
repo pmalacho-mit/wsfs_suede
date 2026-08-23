@@ -7,7 +7,14 @@ place that has a lock to settle it with.
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from typing import Protocol, final
+from uuid import UUID
+
+from sqlmodel import col, select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
+
 
 from .rooms import (
     Carry,
@@ -22,6 +29,9 @@ from .rooms import (
     seeded,
     standing_of,
 )
+from .models import RoomRow, Models
+from .resolve import resolve_content
+from .service import Workspaces
 
 
 class Liveblocks(Protocol):
@@ -42,6 +52,7 @@ class Standings(Protocol):
 
     async def standing(self, entry: str) -> tuple[bool, str | None]:
         """Whether the room has been created, and where its text stands."""
+        ...
 
     async def remember(self, entry: str, base: str | None) -> None: ...
 
@@ -144,7 +155,9 @@ class Keeper:
         await self._standings.remember(entry, base)
 
     async def _settle(self, entry: str, file: Held) -> None:
-        room = standing_of(await self._liveblocks.document(entry), await self._standing(entry))
+        room = standing_of(
+            await self._liveblocks.document(entry), await self._standing(entry)
+        )
         await self._act(entry, plan(room, file))
         await self._moved(entry, file.version)
 
@@ -188,3 +201,92 @@ class Keeper:
         if standing_of(live, None).text == change.after:
             return None
         return carried(live, change)
+
+
+class RememberedRooms:
+    """The room table, as the keeper wants it.
+
+    Read through the keeper's own cache, so this is touched when a room is
+    first asked about and when it moves -- not on the path that repeats.
+    """
+
+    def __init__(self, models: Models, database: Database) -> None:
+        self._models = models
+        self._database = database
+
+    async def standing(self, entry: str) -> tuple[bool, str | None]:
+        async with self._database.session() as session:
+            held = await self._held(session, UUID(entry))
+            if held is None:
+                return (False, None)
+            return (True, None if held.base is None else str(held.base))
+
+    async def remember(self, entry: str, base: str | None) -> None:
+        async with self._database.session() as session:
+            held = await self._held(session, UUID(entry))
+            if held is None:
+                held = self._models.room(entry_id=UUID(entry), base=None)
+            held.base = None if base is None else UUID(base)
+            session.add(held)
+            await session.commit()
+
+    async def _held(self, session: AsyncSession, entry: UUID) -> RoomRow | None:
+        rooms = self._models.room
+        return (
+            await session.exec(select(rooms).where(col(rooms.entry_id) == entry))
+        ).first()
+
+
+@final
+class WsfsFiles:
+    """What wsfs says a file holds, for a keeper that knows only entries."""
+
+    def __init__(self, workspace_schema: Workspaces, database: Database) -> None:
+        self._workspace_schema = workspace_schema
+        self._database = database
+
+    async def now(self, entry: str) -> Held | None:
+        async with self._database.session() as session:
+            held = await self._held(session, UUID(entry))
+            if held is None:
+                return None
+            if not self._is_text(held):
+                return None
+            return Held(text=await self._text_of(session, held), version=str(held.id))
+
+    async def at(self, entry: str, version: str) -> str:
+        async with self._database.session() as session:
+            held = await self._held(session, UUID(entry), UUID(version))
+            if held is None or not self._is_text(held):
+                return ""
+            return await self._text_of(session, held)
+
+    async def _held(
+        self, session: AsyncSession, entry: UUID, version: UUID | None = None
+    ):
+        workspace = await self._workspace_of(session, entry)
+        if workspace is None:
+            return None
+        return await resolve_content(
+            self._workspace_schema, session, workspace, entry, version
+        )
+
+    def _is_text(self, held: object) -> bool:
+        return isinstance(held, self._workspace_schema.models.text_content)
+
+    async def _text_of(self, session: AsyncSession, held) -> str:
+        return await self._workspace_schema.text.at(
+            session, held.entry_id, held.position
+        )
+
+    async def _workspace_of(self, session: AsyncSession, entry: UUID) -> UUID | None:
+        """An entry belongs to exactly one workspace, so nobody need be told.
+
+        None when the server has never heard of it, which is ordinary rather
+        than exceptional: a client shows a file the moment it is asked for and
+        opens its room straight away, so the room can be asked about before
+        the create it belongs to has landed.
+        """
+        rows = self._workspace_schema.models.entry
+        found = (await session.exec(select(rows).where(col(rows.id) == entry))).first()
+        return None if found is None else found.workspace_id

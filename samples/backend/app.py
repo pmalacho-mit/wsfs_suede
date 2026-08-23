@@ -24,14 +24,13 @@ from fastapi import Path as APIPath
 from sqlmodel import Field, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from wsfs_suede.release.backend.blobs import FilesystemBlobs
-from wsfs_suede.release.backend.main import Backend, create_router
-from wsfs_suede.release.backend.models import build_models
-from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.associations import WithID
-from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
-from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.tablenames import tablename
-
-from wsfs_suede.samples.backend.hosting import keeper_over
+from ...release.backend.blobs import FilesystemBlobs
+from ...release.backend.main import Backend, create_router
+from ...release.backend.models import build_models
+from ...release.backend.liveblocks import LiveblocksRooms
+from ...wsfs_suede__sqlmodel_utils_suede.associations import WithID
+from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
+from ...wsfs_suede__sqlmodel_utils_suede.tablenames import tablename
 
 
 class Account(WithID, tablename("plural"), table=True):
@@ -45,28 +44,6 @@ class Project(WithID, tablename("plural"), table=True):
     """The host's workspaces, with whatever else a host would keep here."""
 
     name: str = Field(default="", nullable=False)
-
-
-class Room(tablename("plural"), table=True):
-    """One entry's shared room, as this host knows it.
-
-    Two facts, and both are here because the alternative is asking the
-    collaboration server.
-
-    `entry_id` existing at all means the room has been CREATED there. That is
-    permanent -- nothing here ever destroys a room -- so it is worth knowing
-    once rather than checking. Held in a table rather than in memory because a
-    restart would otherwise pay for the answer again on every file anybody
-    opens.
-
-    `base` is which stored version the room's text descends from. It changes
-    every time somebody saves, which is exactly why it must not live in the
-    shared document: advancing it there is a write, and every client that
-    heard about the save would have to be told.
-    """
-
-    entry_id: UUID = Field(primary_key=True)
-    base: UUID | None = Field(default=None, nullable=True)
 
 
 MODELS = build_models(user_table=Account, workspace_table=Project)
@@ -124,7 +101,9 @@ def create_sample_app(
     MEETING_TTL = 600.0
 
     def _live() -> None:
-        stale = [key for key, (_, at) in met.items() if time.monotonic() - at > MEETING_TTL]
+        stale = [
+            key for key, (_, at) in met.items() if time.monotonic() - at > MEETING_TTL
+        ]
         for key in stale:
             del met[key]
 
@@ -241,13 +220,10 @@ def create_sample_app(
         """
         return {"base": await _rooms().ensure(str(entry_id))}
 
-    def _rooms():
-        secret = os.environ.get("LIVEBLOCKS_SECRET_KEY")
-        if not secret:
-            raise HTTPException(503, "this host was started without a Liveblocks key")
-        if not hasattr(app.state, "rooms"):
-            app.state.rooms = keeper_over(backend, secret, Room)
-        return app.state.rooms
+    secret = os.environ.get("LIVEBLOCKS_SECRET_KEY")
+
+    if not secret:
+        raise Exception("LIVEBLOCKS_SECRET_KEY must be set")
 
     backend = Backend.over(
         MODELS,
@@ -256,7 +232,14 @@ def create_sample_app(
         heartbeat_seconds=heartbeat_seconds,
         grace_seconds=grace_seconds,
         max_blob_bytes=max_blob_bytes,
+        liveblocks=LiveblocksRooms(secret),
     )
+
+    def _rooms():
+        if not hasattr(app.state, "rooms"):
+            app.state.rooms = backend.keeper
+        return app.state.rooms
+
     app.include_router(create_router(backend=backend, authorize=authorize))
     app.state.wsfs = backend
     return app

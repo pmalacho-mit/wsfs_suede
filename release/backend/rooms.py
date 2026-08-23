@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterator, Union
+from typing import Any, Iterator, Union
 
 from fast_diff_match_patch import diff
 
@@ -114,7 +114,7 @@ def plan(room: Standing, file: Held) -> Plan:
 # -- reading and writing a room --------------------------------------------------------
 
 
-def _opened(update: bytes) -> Doc:
+def _opened(update: bytes) -> Doc[Any]:
     doc = Doc()
     doc[CONTENT] = Text()
     if update:

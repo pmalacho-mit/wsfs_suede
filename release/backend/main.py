@@ -55,9 +55,12 @@ from .contract import (
     TextContentResponse,
 )
 from .controller import ControllerRegistry, WorkspaceController
+from .liveblocks import LiveblocksRooms
 from .models import BlobContentRow, Models, TextContentRow
+from .keeper import Keeper, WsfsFiles, RememberedRooms
 from .service import Workspaces
 from .stream import Emitted
+from .resolve import resolve_content
 
 TOKEN_TTL = timedelta(seconds=60)
 
@@ -102,6 +105,7 @@ class Backend:
     registry: ControllerRegistry
     heartbeat_seconds: float
     max_blob_bytes: int
+    keeper: Keeper
 
     @classmethod
     def over(
@@ -113,6 +117,7 @@ class Backend:
         heartbeat_seconds: float,
         grace_seconds: float,
         max_blob_bytes: int,
+        liveblocks: LiveblocksRooms,
     ) -> "Backend":
         schema = Workspaces.over(models)
         return cls(
@@ -124,6 +129,11 @@ class Backend:
             ),
             heartbeat_seconds=heartbeat_seconds,
             max_blob_bytes=max_blob_bytes,
+            keeper=Keeper(
+                liveblocks=liveblocks,
+                files=WsfsFiles(schema, database),
+                standings=RememberedRooms(schema.models, database),
+            ),
         )
 
     @property
@@ -330,94 +340,6 @@ async def apply_within(
         return outcome, events
 
 
-# -- content ------------------------------------------------------------------------
-
-
-async def resolve_content(
-    backend: Backend,
-    session: AsyncSession,
-    workspace_id: UUID,
-    entry_id: UUID,
-    content_id: UUID | None,
-) -> Any:
-    """The write a content token names.
-
-    A client holds `content_version` in its metadata and fetches with it
-    directly -- the token IS the write, so there is nothing to translate.
-    """
-    entry = await session.get(backend.models.entry, entry_id)
-    known = entry is not None and entry.workspace_id == workspace_id
-
-    held = None
-    if known:
-        held = (
-            await _newest_write(backend, session, workspace_id, entry_id)
-            if content_id is None
-            else await _written(backend, session, content_id)
-        )
-        if held is not None and held.entry_id != entry_id:
-            held = None
-
-    if held is None and content_id is not None:
-        held = await _refused_write(backend, session, workspace_id, entry_id, content_id)
-
-    if held is None:
-        raise HTTPException(404, "no such entry" if not known else "entry has no such content")
-    return held
-
-
-async def _written(
-    backend: Backend, session: AsyncSession, content_id: UUID
-) -> TextContentRow | BlobContentRow | None:
-    return await session.get(
-        backend.models.text_content, content_id
-    ) or await session.get(backend.models.blob_content, content_id)
-
-
-async def _refused_write(
-    backend: Backend,
-    session: AsyncSession,
-    workspace_id: UUID,
-    entry_id: UUID,
-    content_id: UUID,
-) -> Any | None:
-    """A write this server declined, asked for by the transaction that sent it.
-
-    Answered at the same address as an accepted one, because a client holding
-    a transaction id should not have to know which way the answer went to ask
-    what it said -- and the reason it is asking is usually that it does not.
-
-    Newest of its transaction, which matters only for a request re-sent after
-    a dropped connection: refused twice, two rows, and the one this client was
-    holding when it gave up is the later.
-    """
-    models = backend.models
-    for refused in models.refused_content:
-        found = (
-            await session.exec(
-                select(refused)
-                .where(
-                    col(refused.workspace_id) == workspace_id,
-                    col(refused.transaction) == content_id,
-                    col(refused.entry_id) == entry_id,
-                )
-                .order_by(desc(col(refused.timestamp)))
-            )
-        ).first()
-        if found is not None:
-            return found
-    return None
-
-
-async def _newest_write(
-    backend: Backend, session: AsyncSession, workspace_id: UUID, entry_id: UUID
-) -> TextContentRow | BlobContentRow | None:
-    node = await backend.schema.tree.node(session, workspace_id, entry_id)
-    if node is None or node.content is None:
-        return None
-    return await _written(backend, session, node.content.version)
-
-
 async def content_response(
     backend: Backend, session: AsyncSession, held: Any
 ) -> Response:
@@ -430,9 +352,7 @@ async def content_response(
     models = backend.models
     if isinstance(held, models.refused_text):
         body = TextContentResponse(
-            content=await refusals.text_of(
-                session, models, backend.schema.text, held
-            ),
+            content=await refusals.text_of(session, models, backend.schema.text, held),
             version=held.transaction,
         )
         return JSONResponse(
@@ -648,7 +568,7 @@ def create_router(
                 backend,
                 session,
                 await resolve_content(
-                    backend, session, workspace_id, entry_id, content
+                    backend.schema, session, workspace_id, entry_id, content
                 ),
             )
 
@@ -664,9 +584,9 @@ def create_router(
         and its own record of what it was holding went with it.
         """
         async with database.session() as session:
-            return StrandedDrafts(drafts=await refusals.stranded(
-                session, backend.models, workspace_id
-            ))
+            return StrandedDrafts(
+                drafts=await refusals.stranded(session, backend.models, workspace_id)
+            )
 
     @router.post("/workspaces/{workspace_id}/drafts/cleared", status_code=204)
     async def clear_drafts(
@@ -680,7 +600,9 @@ def create_router(
         snapshot may still name it.
         """
         async with database.session() as session:
-            await refusals.clear(session, backend.models, workspace_id, body.transactions)
+            await refusals.clear(
+                session, backend.models, workspace_id, body.transactions
+            )
             await session.commit()
 
     @router.post("/workspaces/{workspace_id}/reconstruction")
