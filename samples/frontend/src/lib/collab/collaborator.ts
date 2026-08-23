@@ -21,27 +21,26 @@ import {
   contract,
   http,
   keeping,
-  rooms,
   type Keeping,
   type Transport,
   type Workspace,
 } from "$wsfs";
 
 import { emailOf, type Part } from "./collaboration";
-import { IndexeddbPersistence, storeState } from "y-indexeddb";
 
 import {
   Rooms,
   become,
-  type Persist,
   type Replacement,
   type Room,
-  type Host,
   type Written,
-} from "./room.svelte";
+} from "../../../../../release/frontend/svelte/room.svelte";
 
-export { become } from "./room.svelte";
-export type { Replacement, Written } from "./room.svelte";
+import {
+  hosted,
+  persisting,
+  untilSynchronized,
+} from "../../../../../release/frontend/svelte/collaborator";
 
 type LiveblocksClient = ReturnType<typeof createClient>;
 
@@ -62,108 +61,6 @@ export const clientAs = (email: string): LiveblocksClient =>
     },
   });
 
-/**
- * Liveblocks, as `Rooms` wants it.
- *
- * The document is handed IN rather than taken from the provider -- see
- * `room.svelte.ts`. A document owned by the provider would be destroyed with
- * it, which is precisely the thing a network lapse must not do.
- */
-/**
- * Asking the host to make an entry's room exist and say what the file says.
- *
- * Idempotent, and the only way a room is ever filled. The browsers used to
- * elect one of themselves to do it, which is a race no client can settle.
- */
-const settling = async (entry: string) => {
-  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}`, { method: "POST" });
-  if (!answer.ok) throw new Error(`settling ${entry}: ${answer.status}`);
-  return ((await answer.json()) as { base: string | null }).base;
-};
-
-/**
- * Asking the host to fill a room now, so opening the file later is instant.
- *
- * Answered before the work is done, on purpose: nobody is waiting for it.
- * Creating a room, asking what it holds and filling it costs a second or two,
- * and the only alternative to paying it here is paying it in front of
- * whoever opens the file first.
- */
-export const warming = async (entry: string): Promise<void> => {
-  await fetch(`/rooms/${encodeURIComponent(entry)}/warm`, { method: "POST" });
-};
-
-/**
- * Telling the host a member of this room wrote the file.
- *
- * Cheap on purpose, and it is what makes everybody else's settle free: the
- * room already holds the text, so the host only has to be told where the file
- * now stands rather than go and look.
- */
-const storedFromRoom = async (entry: string, version: string) => {
-  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/stored`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ version }),
-  });
-  if (!answer.ok) throw new Error(`stored ${entry}: ${answer.status}`);
-};
-
-const synchronized = (provider: LiveblocksYjsProvider) =>
-  provider.getStatus() === "synchronized";
-
-/**
- * Settles once Liveblocks has confirmed everything this client is holding.
- *
- * Subscribed rather than polled, and it is the answer `#settling` used to
- * guess at with 600ms. What matters is that the SERVER has the changes, not
- * that other browsers have applied them: the host reads a room through the
- * same REST API, so once Liveblocks has them, a read will see them.
- */
-const handedOver = (liveblocks: LiveblocksClient, provider: LiveblocksYjsProvider) =>
-  new Promise<void>((done) => {
-    if (synchronized(provider)) return done();
-    const stop = liveblocks.events.syncStatus.subscribe(() => {
-      if (!synchronized(provider)) return;
-      stop();
-      done();
-    });
-  });
-
-/**
- * This machine's own copy, kept under the entry's id.
- *
- * Keyed by entry rather than by session so that the next tab to open the same
- * file finds it -- which is the whole point: work reaches here the moment it
- * is typed, and outlives the tab that typed it.
- */
-export const persisting: Persist = (entry, doc) => {
-  const kept = new IndexeddbPersistence(`wsfs:${entry}`, doc);
-  return {
-    loaded: kept.whenSynced.then(() => undefined),
-    stop: async () => {
-      await storeState(kept, true);
-      await kept.destroy();
-    },
-  };
-};
-
-const handingOver = async (entry: string, update: Uint8Array) => {
-  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/updates`, {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: update as BodyInit,
-  });
-  if (!answer.ok) throw new Error(`handing over ${entry}: ${answer.status}`);
-};
-
-/** Everything a room asks of this host, in one place. */
-export const hosted: Host = {
-  settle: settling,
-  stored: storedFromRoom,
-  handOver: handingOver,
-};
-
 export const enteringWith = (liveblocks: LiveblocksClient) =>
   ((entry, doc) => {
     const entered = liveblocks.enterRoom(entry);
@@ -171,8 +68,9 @@ export const enteringWith = (liveblocks: LiveblocksClient) =>
     return {
       provider: Object.assign(provider, {
         ahead: () => provider.getStatus() === "synchronizing",
-        handedOver: () => handedOver(liveblocks, provider),
-        watch: (changed: () => void) => liveblocks.events.syncStatus.subscribe(changed),
+        handedOver: () => untilSynchronized(liveblocks, provider),
+        watch: (changed: () => void) =>
+          liveblocks.events.syncStatus.subscribe(changed),
       }),
       leave: () => entered.leave(),
     };
@@ -189,21 +87,37 @@ export const enteringWith = (liveblocks: LiveblocksClient) =>
  * A refusal, not a hang: a socket that is not there fails, and a client that
  * waited for ever on one would be a different bug than the one being tested.
  */
-export const switchable = (wire: Transport): Transport & { reachable: (now: boolean) => void } => {
+export const switchable = (
+  wire: Transport,
+): Transport & { reachable: (now: boolean) => void } => {
   let reaching = true;
   const reach = () => {
     if (!reaching) throw new Error("the server cannot be reached");
   };
   return {
     reachable: (now) => (reaching = now),
-    initialize: (workspace, replayed) => (reach(), wire.initialize(workspace, replayed)),
+    initialize: (workspace, replayed) => (
+      reach(),
+      wire.initialize(workspace, replayed)
+    ),
     submit: (workspace, request) => (reach(), wire.submit(workspace, request)),
-    content: (workspace, entry, version) => (reach(), wire.content(workspace, entry, version)),
-    store: (workspace, digest, bytes, mime) => (reach(), wire.store(workspace, digest, bytes, mime)),
-    cleared: (workspace, transactions) => (reach(), wire.cleared(workspace, transactions)),
+    content: (workspace, entry, version) => (
+      reach(),
+      wire.content(workspace, entry, version)
+    ),
+    store: (workspace, digest, bytes, mime) => (
+      reach(),
+      wire.store(workspace, digest, bytes, mime)
+    ),
+    cleared: (workspace, transactions) => (
+      reach(),
+      wire.cleared(workspace, transactions)
+    ),
     follow: (workspace, token, reading) => {
       if (!reaching) {
-        queueMicrotask(() => reading.failed(new Error("the server cannot be reached")));
+        queueMicrotask(() =>
+          reading.failed(new Error("the server cannot be reached")),
+        );
         return { close: () => {} };
       }
       return wire.follow(workspace, token, reading);
@@ -287,11 +201,16 @@ export class Collaborator {
    * reporting is a machine that never came back.
    */
   async stranded(): Promise<string[]> {
-    const answer = await fetch(`${BACKEND}/workspaces/${this.workspaceId}/drafts`, {
-      headers: { "X-User-Email": this.email },
-    });
+    const answer = await fetch(
+      `${BACKEND}/workspaces/${this.workspaceId}/drafts`,
+      {
+        headers: { "X-User-Email": this.email },
+      },
+    );
     if (!answer.ok) throw new Error(`stranded: ${answer.status}`);
-    const { drafts } = (await answer.json()) as { drafts: { transaction: string }[] };
+    const { drafts } = (await answer.json()) as {
+      drafts: { transaction: string }[];
+    };
     return drafts.map(({ transaction }) => transaction);
   }
 
@@ -411,7 +330,10 @@ export class Collaborator {
   async take(entry: string): Promise<contract.Versions> {
     const open = this.rooms.get(entry) !== undefined;
     const showing = open ? this.text(entry) : null;
-    const versions = { ...this.snapshot(entry), ...(await this.#putSomewhere(entry)) };
+    const versions = {
+      ...this.snapshot(entry),
+      ...(await this.#putSomewhere(entry)),
+    };
     this.took.push({ versions, showing });
     return versions;
   }
@@ -456,11 +378,15 @@ export class Collaborator {
     showing: string | null,
   ): Promise<void> {
     const [answer] = await this.rebuild([versions]);
-    if (answer === undefined) throw new Error(`snapshot ${at} came back with nothing`);
+    if (answer === undefined)
+      throw new Error(`snapshot ${at} came back with nothing`);
     if (answer.unresolved.length > 0)
-      throw new Error(`snapshot ${at} unresolved: ${JSON.stringify(answer.unresolved)}`);
+      throw new Error(
+        `snapshot ${at} unresolved: ${JSON.stringify(answer.unresolved)}`,
+      );
     if (showing === null) return;
-    const said = answer.content?.type === "text" ? answer.content.content : undefined;
+    const said =
+      answer.content?.type === "text" ? answer.content.content : undefined;
     if (said !== showing)
       throw new Error(
         `snapshot ${at} at ${versions.content_version} rebuilt as ` +
@@ -481,7 +407,8 @@ export class Collaborator {
 
   snapshot(entry: string): contract.Versions {
     const held = this.workspace.entries().get(entry);
-    if (held === undefined) throw new Error(`${entry} is not in this workspace`);
+    if (held === undefined)
+      throw new Error(`${entry} is not in this workspace`);
     return {
       id: held.id,
       name_version: held.name_version,
@@ -525,7 +452,9 @@ export class Collaborator {
       },
     );
     if (!answer.ok)
-      throw new Error(`reconstruction: ${answer.status} ${await answer.text()}`);
+      throw new Error(
+        `reconstruction: ${answer.status} ${await answer.text()}`,
+      );
     return ((await answer.json()) as contract.ReconstructionResponse).entries;
   }
 

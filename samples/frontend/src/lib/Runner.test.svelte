@@ -1,7 +1,7 @@
 <script lang="ts">
   import Sweater from "sweater-vest-suede/Sweater.svelte";
   import Runner, { type Outcome } from "./Runner.svelte";
-  import { WarmPool } from "./pool";
+  import { WarmPool } from "../../../../release/frontend/components/pool";
   import { Kernel } from "wsfs_suede.python-web-kernel-suede";
   import fs from "wsfs_suede.python-web-kernel-suede/fs";
   import { nameOf } from "$lib/paths";
@@ -42,7 +42,15 @@
 
 <Sweater
   name="reports a run that ended badly to whoever is listening"
-  body={async ({ set, container, expect, capture, delay, definition, withUserFocus }) => {
+  body={async ({
+    set,
+    container,
+    expect,
+    capture,
+    delay,
+    definition,
+    withUserFocus,
+  }) => {
     const pocket = set(new Pocket());
     await delay({ frames: 2 });
     await capture("png").uri;

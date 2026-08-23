@@ -22,13 +22,12 @@ import { kInternal, ServerMsgCode } from "@liveblocks/core";
 import type { createClient } from "@liveblocks/client";
 import { LiveblocksYjsProvider } from "@liveblocks/yjs";
 
-import type { Enter } from "./collab/room.svelte";
+import type { Enter } from "../../../../release/frontend/components/room.svelte";
 import * as Y from "yjs";
 
 type Client = ReturnType<typeof createClient>;
 
-const base64 = (bytes: Uint8Array) =>
-  btoa(String.fromCharCode(...bytes));
+const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 
 /** What an empty document looks like on the wire, computed once. */
 const NOTHING = new Y.Doc();
@@ -42,7 +41,8 @@ const channel = <T>() => {
   const listeners = new Set<Listener<T>>();
   return {
     subscribe: (listener: Listener<T>) => (
-      listeners.add(listener), () => listeners.delete(listener)
+      listeners.add(listener),
+      () => listeners.delete(listener)
     ),
     say: (event: T) => listeners.forEach((listener) => listener(event)),
   };
@@ -128,7 +128,6 @@ export const solo = (): Client => {
     },
   } as unknown as Client;
 };
-
 
 /**
  * A room a test drives, rather than one it pretends to be.

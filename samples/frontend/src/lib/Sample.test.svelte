@@ -16,7 +16,9 @@
    */
   import { Sweater } from "sweater-vest-suede";
 
-  import FileTree, { Model as FileTreeModel } from "$lib/FileTree.svelte";
+  import FileTree, {
+    Model as FileTreeModel,
+  } from "../../../../release/frontend/components/FileTree.svelte";
   import Shell from "$lib/Workspace.svelte";
   import type { Client } from "$lib/testing.svelte";
   import { drivable, solo } from "$lib/liveblocks";
@@ -77,7 +79,10 @@
     const model = editor.getModel()!;
     const line = model.getLineCount();
     editor.focus();
-    editor.setPosition({ lineNumber: line, column: model.getLineMaxColumn(line) });
+    editor.setPosition({
+      lineNumber: line,
+      column: model.getLineMaxColumn(line),
+    });
     editor.trigger("keyboard", "type", { text });
   };
 
@@ -93,8 +98,10 @@
   const shared = async (take: any, path: string) =>
     await until(
       `${path} to be shared`,
-      () => take().entries.find((one: any) => one.path === path)?.stage === "open",
-      () => JSON.stringify(take().entries.find((one: any) => one.path === path)),
+      () =>
+        take().entries.find((one: any) => one.path === path)?.stage === "open",
+      () =>
+        JSON.stringify(take().entries.find((one: any) => one.path === path)),
       45_000,
     );
 
@@ -117,7 +124,8 @@
   };
 
   /** Wait for a client to hold `path`, whoever's client it is. */
-  const holds = (client: Client, path: string) => () => client.paths.includes(path);
+  const holds = (client: Client, path: string) => () =>
+    client.paths.includes(path);
 
   const menuOn = async (row: HTMLElement) => {
     const { top, left } = row.getBoundingClientRect();
@@ -176,7 +184,9 @@
   }}
 >
   {#snippet vest(_p: Pocket)}
-    <p class="note">Origin: {typeof window === "undefined" ? "?" : window.origin}</p>
+    <p class="note">
+      Origin: {typeof window === "undefined" ? "?" : window.origin}
+    </p>
   {/snippet}
 </Sweater>
 
@@ -227,8 +237,10 @@
 
     await workspace.workspace.create("anchor.md", "").settled;
     const { root } = await harness.definition("root");
-    await until("the anchor is drawn", () => !!rowFor(root, "anchor.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the anchor is drawn",
+      () => !!rowFor(root, "anchor.md"),
+      () => drawn(root).join(" | "),
     );
 
     await menuOn(rowFor(root, "anchor.md")!);
@@ -267,8 +279,10 @@
 
     await workspace.workspace.create("before.md", "x").settled;
     const { root } = await harness.definition("root");
-    await until("the file is drawn", () => !!rowFor(root, "before.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "before.md"),
+      () => drawn(root).join(" | "),
     );
     await until("the other client has it", holds(other, "before.md"), () =>
       other.paths.join(" | "),
@@ -308,8 +322,10 @@
 
     await workspace.workspace.create("doomed.md", "x").settled;
     const { root } = await harness.definition("root");
-    await until("the file is drawn", () => !!rowFor(root, "doomed.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "doomed.md"),
+      () => drawn(root).join(" | "),
     );
     await until("the other client has it", holds(other, "doomed.md"), () =>
       other.paths.join(" | "),
@@ -350,8 +366,10 @@
     // One entry, so there is plenty of empty tree below it to click on.
     await workspace.workspace.create("ledger.md", "").settled;
     const { root } = await harness.definition("root");
-    await until("the first entry is drawn", () => !!rowFor(root, "ledger.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the first entry is drawn",
+      () => !!rowFor(root, "ledger.md"),
+      () => drawn(root).join(" | "),
     );
 
     await menuOnEmptySpace(region(root, "tree")!);
@@ -394,8 +412,10 @@
 
     await workspace.workspace.create("beacon.md", "").settled;
     const { root } = await harness.definition("root");
-    await until("the first entry is drawn", () => !!rowFor(root, "beacon.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the first entry is drawn",
+      () => !!rowFor(root, "beacon.md"),
+      () => drawn(root).join(" | "),
     );
 
     await menuOnEmptySpace(region(root, "tree")!);
@@ -435,9 +455,13 @@
     await workspace.workspace.folder("shelf").settled;
 
     const { root } = await harness.definition("root");
-    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
-    await until("the tree drew the workspace", () => !!rowFor(root, "main.py"), () =>
-      drawn(root).join(" | "),
+    await until("the three regions", laidOut(root), () =>
+      regions(root).join(" | "),
+    );
+    await until(
+      "the tree drew the workspace",
+      () => !!rowFor(root, "main.py"),
+      () => drawn(root).join(" | "),
     );
 
     const explorer = box(root, "explorer");
@@ -481,16 +505,26 @@
     await workspace.workspace.create("essay.md", "hello").settled;
 
     const { root } = await harness.definition("root");
-    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
-    await until("the file is drawn", () => !!rowFor(root, "essay.md"), () =>
-      drawn(root).join(" | "),
+    await until("the three regions", laidOut(root), () =>
+      regions(root).join(" | "),
+    );
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "essay.md"),
+      () => drawn(root).join(" | "),
     );
 
     await clickRow(rowFor(root, "essay.md")!);
 
-    const named = () => tabs(root).find((tab) => tab.textContent?.includes("essay.md"));
-    await until("a tab for the file", () => !!named(), () =>
-      tabs(root).map((tab) => tab.textContent).join(" | "),
+    const named = () =>
+      tabs(root).find((tab) => tab.textContent?.includes("essay.md"));
+    await until(
+      "a tab for the file",
+      () => !!named(),
+      () =>
+        tabs(root)
+          .map((tab) => tab.textContent)
+          .join(" | "),
     );
 
     // In the MIDDLE region: the tree hands the path to the dock, and the dock
@@ -529,7 +563,9 @@
     harness.onAbort(console.stop);
 
     const { root } = await harness.definition("root");
-    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
+    await until("the three regions", laidOut(root), () =>
+      regions(root).join(" | "),
+    );
 
     // Right-click the empty explorer -> Add file.
     await menuOnEmptySpace(region(root, "tree")!);
@@ -556,8 +592,10 @@
       await userEvent.keyboard("sketch.py{Enter}");
     });
 
-    await until("the file exists", () => workspace.paths.includes("sketch.py"), () =>
-      workspace.paths.join(" | "),
+    await until(
+      "the file exists",
+      () => workspace.paths.includes("sketch.py"),
+      () => workspace.paths.join(" | "),
     );
 
     // And it opened, in the middle region, with its empty content: a real
@@ -565,7 +603,10 @@
     await until(
       "a tab for the file",
       () => tabs(root).some((tab) => tab.textContent?.includes("sketch.py")),
-      () => tabs(root).map((tab) => tab.textContent).join(" | "),
+      () =>
+        tabs(root)
+          .map((tab) => tab.textContent)
+          .join(" | "),
     );
     await until(
       "the editor mounted",
@@ -613,8 +654,10 @@
 
     await workspace.workspace.create("kept.md", "").settled;
     const { root } = await harness.definition("root");
-    await until("the first entry is drawn", () => !!rowFor(root, "kept.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the first entry is drawn",
+      () => !!rowFor(root, "kept.md"),
+      () => drawn(root).join(" | "),
     );
 
     await menuOnEmptySpace(region(root, "tree")!);
@@ -623,10 +666,16 @@
       await userEvent.keyboard("{Enter}");
     });
 
-    await until("the draft is gone", () => renaming(root) === undefined, () => "still naming");
+    await until(
+      "the draft is gone",
+      () => renaming(root) === undefined,
+      () => "still naming",
+    );
     harness.expect(drawn(root)).toEqual(["kept.md"]);
     harness.expect(other.paths).toEqual(["kept.md"]);
-    harness.expect(console.complaints().join(" ")).toContain("Name cannot be empty");
+    harness
+      .expect(console.complaints().join(" "))
+      .toContain("Name cannot be empty");
     void harness.capture("png", tall);
   }}
 >
@@ -658,8 +707,10 @@
 
     await workspace.workspace.create("taken.md", "first").settled;
     const { root } = await harness.definition("root");
-    await until("the first entry is drawn", () => !!rowFor(root, "taken.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the first entry is drawn",
+      () => !!rowFor(root, "taken.md"),
+      () => drawn(root).join(" | "),
     );
     await until("the other client has it", holds(other, "taken.md"), () =>
       other.paths.join(" | "),
@@ -671,7 +722,11 @@
       await userEvent.keyboard("taken.md{Enter}");
     });
 
-    await until("the draft is gone", () => renaming(root) === undefined, () => "still naming");
+    await until(
+      "the draft is gone",
+      () => renaming(root) === undefined,
+      () => "still naming",
+    );
     // One entry, still, and the one that was already there keeps its content.
     harness.expect(drawn(root)).toEqual(["taken.md"]);
     harness.expect(other.paths).toEqual(["taken.md"]);
@@ -704,9 +759,13 @@
 
     await workspace.workspace.create("draft.md", "before").settled;
     const { root } = await harness.definition("root");
-    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
-    await until("the file is drawn", () => !!rowFor(root, "draft.md"), () =>
-      drawn(root).join(" | "),
+    await until("the three regions", laidOut(root), () =>
+      regions(root).join(" | "),
+    );
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "draft.md"),
+      () => drawn(root).join(" | "),
     );
 
     await clickRow(rowFor(root, "draft.md")!);
@@ -724,7 +783,10 @@
     // does. Monaco's own textarea cannot be driven from here: it lives in a
     // shadow root, so `document.activeElement` is the host and user-event
     // types at that instead.
-    await until("the editor handed itself over", () => pocket.editor !== undefined);
+    await until(
+      "the editor handed itself over",
+      () => pocket.editor !== undefined,
+    );
     // Focused, because typing is what stores a version and focus is how a
     // person is told apart from an update arriving from the room.
     pocket.editor!.focus();
@@ -791,12 +853,16 @@
 
     // Two things for the tree to lose: an expanded folder, and a focused row.
     await clickRow(rowFor(root, "box")!);
-    await until("the folder is open", () => !!rowFor(root, "box/inner.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the folder is open",
+      () => !!rowFor(root, "box/inner.md"),
+      () => drawn(root).join(" | "),
     );
     await clickRow(rowFor(root, "keep.md")!);
-    await until("a focused row", () => focused(root) === "keep.md", () =>
-      String(focused(root)),
+    await until(
+      "a focused row",
+      () => focused(root) === "keep.md",
+      () => String(focused(root)),
     );
 
     // Somebody else moves the folder. ONE change reaches this client -- the
@@ -804,13 +870,17 @@
     // because the tree is holding ids rather than re-deriving paths.
     await other.workspace.move("box", "crate").settled;
 
-    await until("the folder followed", () => !!rowFor(root, "crate"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the folder followed",
+      () => !!rowFor(root, "crate"),
+      () => drawn(root).join(" | "),
     );
     // Still DRAWN, which means the folder is still open: a reset would have
     // closed it, and closing it is how the old tree lost the user's place.
-    await until("what was inside it followed too", () => !!rowFor(root, "crate/inner.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "what was inside it followed too",
+      () => !!rowFor(root, "crate/inner.md"),
+      () => drawn(root).join(" | "),
     );
     harness.expect(rowFor(root, "box")).toBeUndefined();
     harness.expect(focused(root)).toBe("keep.md");
@@ -837,8 +907,10 @@
 
     await workspace.workspace.create("told.md", "x").settled;
     const { root, tree } = await harness.definition("root", "tree");
-    await until("the file is drawn", () => !!rowFor(root, "told.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "told.md"),
+      () => drawn(root).join(" | "),
     );
 
     // What the workspace said about the announced path, AT the moment it was
@@ -860,16 +932,20 @@
       await userEvent.click(action("Rename"));
       await userEvent.keyboard("{Control>}a{/Control}heard.md{Enter}");
     });
-    await until("the rename was announced", () => asked.length > 0, () =>
-      asked.join(" | "),
+    await until(
+      "the rename was announced",
+      () => asked.length > 0,
+      () => asked.join(" | "),
     );
 
     await menuOn(rowFor(root, "heard.md")!);
     await harness.withUserFocus(async (userEvent) => {
       await userEvent.click(action("Delete"));
     });
-    await until("the delete was announced", () => asked.length > 1, () =>
-      asked.join(" | "),
+    await until(
+      "the delete was announced",
+      () => asked.length > 1,
+      () => asked.join(" | "),
     );
 
     // Told where it IS, and told it is gone -- both already true, so a
@@ -899,46 +975,62 @@
     await workspace.workspace.create("behind.md", "two").settled;
 
     const { root } = await harness.definition("root");
-    await until("both drawn", () => !!rowFor(root, "front.md") && !!rowFor(root, "behind.md"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "both drawn",
+      () => !!rowFor(root, "front.md") && !!rowFor(root, "behind.md"),
+      () => drawn(root).join(" | "),
     );
 
     // Opening one highlights its row.
     await clickRow(rowFor(root, "front.md")!);
-    await until("the row is highlighted", () => selected(root) === "front.md", () =>
-      String(selected(root)),
+    await until(
+      "the row is highlighted",
+      () => selected(root) === "front.md",
+      () => String(selected(root)),
     );
 
     // Opening another moves the highlight, because the front moved.
     await clickRow(rowFor(root, "behind.md")!);
-    await until("the highlight followed", () => selected(root) === "behind.md", () =>
-      String(selected(root)),
+    await until(
+      "the highlight followed",
+      () => selected(root) === "behind.md",
+      () => String(selected(root)),
     );
     await until(
       "both files are open",
       () => tabs(root).length === 2,
-      () => tabs(root).map((tab) => tab.textContent).join(" | "),
+      () =>
+        tabs(root)
+          .map((tab) => tab.textContent)
+          .join(" | "),
     );
 
     // Closing the one in front lets its row go, and hands the highlight to
     // whatever came forward -- not to nothing.
     closeTab(tabs(root).find((tab) => tab.textContent?.includes("behind.md"))!);
-    await until("the front went back", () => selected(root) === "front.md", () =>
-      `${selected(root)} of ${tabs(root).length}`,
+    await until(
+      "the front went back",
+      () => selected(root) === "front.md",
+      () => `${selected(root)} of ${tabs(root).length}`,
     );
 
     // And the last one closing leaves nothing highlighted, so the row can be
     // clicked to open it again.
     closeTab(tabs(root).find((tab) => tab.textContent?.includes("front.md"))!);
-    await until("nothing is highlighted", () => selected(root) === undefined, () =>
-      String(selected(root)),
+    await until(
+      "nothing is highlighted",
+      () => selected(root) === undefined,
+      () => String(selected(root)),
     );
 
     await clickRow(rowFor(root, "front.md")!);
     await until(
       "clicking it opens it again",
       () => tabs(root).some((tab) => tab.textContent?.includes("front.md")),
-      () => tabs(root).map((tab) => tab.textContent).join(" | "),
+      () =>
+        tabs(root)
+          .map((tab) => tab.textContent)
+          .join(" | "),
     );
     harness.expect(selected(root)).toBe("front.md");
     void harness.capture("png", tall);
@@ -970,9 +1062,13 @@
     await workspace.workspace.create("hidden.md", "two").settled;
 
     const { root } = await harness.definition("root");
-    await until("the three regions", laidOut(root), () => regions(root).join(" | "));
-    await until("both drawn", () => !!rowFor(root, "seen.md") && !!rowFor(root, "hidden.md"), () =>
-      drawn(root).join(" | "),
+    await until("the three regions", laidOut(root), () =>
+      regions(root).join(" | "),
+    );
+    await until(
+      "both drawn",
+      () => !!rowFor(root, "seen.md") && !!rowFor(root, "hidden.md"),
+      () => drawn(root).join(" | "),
     );
 
     const offered = () =>
@@ -983,23 +1079,29 @@
     harness.expect(offered()).toEqual([]);
 
     await clickRow(rowFor(root, "seen.md")!);
-    await until("the open file is offered", () => offered().join() === "seen.md", () =>
-      offered().join(" | "),
+    await until(
+      "the open file is offered",
+      () => offered().join() === "seen.md",
+      () => offered().join(" | "),
     );
 
     // Opened on top of it, in the same group. One panel per group is on
     // screen, so the first is now open and NOT visible -- which is the
     // distinction the assistant needs and "which file is open" cannot make.
     await clickRow(rowFor(root, "hidden.md")!);
-    await until("the one in front replaces it", () => offered().join() === "hidden.md", () =>
-      offered().join(" | "),
+    await until(
+      "the one in front replaces it",
+      () => offered().join() === "hidden.md",
+      () => offered().join(" | "),
     );
 
     // And it keeps up as the layout moves, rather than being worked out when
     // somebody finally asks.
     closeTab(tabs(root).find((tab) => tab.textContent?.includes("hidden.md"))!);
-    await until("the one behind comes back", () => offered().join() === "seen.md", () =>
-      offered().join(" | "),
+    await until(
+      "the one behind comes back",
+      () => offered().join() === "seen.md",
+      () => offered().join(" | "),
     );
     void harness.capture("png", tall);
   }}
@@ -1029,12 +1131,17 @@
 
     await workspace.workspace.create("draft.py", "start").settled;
     const { root, take } = await harness.definition("root", "take");
-    await until("the file is drawn", () => !!rowFor(root, "draft.py"), () =>
-      drawn(root).join(" | "),
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "draft.py"),
+      () => drawn(root).join(" | "),
     );
 
     await clickRow(rowFor(root, "draft.py")!);
-    await until("the editor handed itself over", () => pocket.editor !== undefined);
+    await until(
+      "the editor handed itself over",
+      () => pocket.editor !== undefined,
+    );
     pocket.editor!.focus();
     await until(
       "the editor opened on the file",
@@ -1045,12 +1152,9 @@
     // Every token, not just the content one: this is what makes a snapshot
     // enough to rebuild the filesystem as it stood.
     const before = take().entries.find((held: any) => held.path === "draft.py");
-    harness.expect(Object.keys(before.versions).sort()).toEqual([
-      "content",
-      "deleted",
-      "name",
-      "parent",
-    ]);
+    harness
+      .expect(Object.keys(before.versions).sort())
+      .toEqual(["content", "deleted", "name", "parent"]);
     harness.expect(before.dirty).toBe(false);
     harness.expect(before.stored).toBeUndefined();
 
@@ -1072,7 +1176,8 @@
     const resolved = take({ resolveDirty: true }).entries.find(
       (held: any) => held.path === "draft.py",
     );
-    if (resolved.dirty) throw new Error(`still dirty -- ${JSON.stringify(resolved)}`);
+    if (resolved.dirty)
+      throw new Error(`still dirty -- ${JSON.stringify(resolved)}`);
     harness.expect(typeof resolved.stored).toBe("string");
     harness.expect(resolved.versions.content).not.toBe(resolved.stored);
 
@@ -1110,7 +1215,9 @@
   .note {
     margin: 0;
     padding: 0.5rem;
-    font: 12px ui-monospace, monospace;
+    font:
+      12px ui-monospace,
+      monospace;
   }
 
   /* The shell fills what it is given; a report card is not a viewport. */
