@@ -15,7 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
-
+from .collaboration import ICollaboration
 from .rooms import (
     Carry,
     Change,
@@ -57,11 +57,12 @@ class Standings(Protocol):
     async def remember(self, entry: str, base: str | None) -> None: ...
 
 
+@final
 class Keeper:
     def __init__(
-        self, *, liveblocks: Liveblocks, files: Files, standings: Standings
+        self, *, collaboration: ICollaboration, files: Files, standings: Standings
     ) -> None:
-        self._liveblocks = liveblocks
+        self._collaboration = collaboration
         self._files = files
         self._standings = standings
         self._alone: dict[str, asyncio.Lock] = {}
@@ -130,7 +131,7 @@ class Keeper:
         """
         async with self._alone_with(entry):
             await self._created_once(entry)
-            await self._liveblocks.send(entry, update)
+            await self._collaboration.send(entry, update)
 
     def _alone_with(self, entry: str) -> asyncio.Lock:
         """One entry at a time, and only against itself.
@@ -150,13 +151,13 @@ class Keeper:
         created, base = await self._remembered(entry)
         if created:
             return
-        await self._liveblocks.create(entry)
+        await self._collaboration.create(entry)
         self._known[entry] = (True, base)
         await self._standings.remember(entry, base)
 
     async def _settle(self, entry: str, file: Held) -> None:
         room = standing_of(
-            await self._liveblocks.document(entry), await self._standing(entry)
+            await self._collaboration.document(entry), await self._standing(entry)
         )
         await self._act(entry, plan(room, file))
         await self._moved(entry, file.version)
@@ -165,7 +166,7 @@ class Keeper:
         if isinstance(wanted, Settled):
             return
         if isinstance(wanted, Seed):
-            await self._liveblocks.send(entry, seeded(wanted.text))
+            await self._collaboration.send(entry, seeded(wanted.text))
             return
         if isinstance(wanted, Rebase):
             return  # the room already says it; only this host had to be told
@@ -184,10 +185,10 @@ class Keeper:
             before=await self._files.at(entry, wanted.since),
             after=now.text,
         )
-        live = await self._liveblocks.document(entry)
+        live = await self._collaboration.document(entry)
         update = self._closing(live, change)
         if update is not None:
-            await self._liveblocks.send(entry, update)
+            await self._collaboration.send(entry, update)
 
     def _closing(self, live: bytes, change: Change) -> bytes | None:
         """What to send, decided against the read it is built on.

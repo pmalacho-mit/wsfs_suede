@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from typing import final
+
 import httpx
 
 
 API = "https://api.liveblocks.io"
 
 
-class LiveblocksRooms:
+@final
+class Liveblocks:
     """Liveblocks over plain HTTP, as the token mint already reaches it.
 
     Not through the published SDK: it asserts the shape of the secret before
