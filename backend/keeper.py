@@ -34,12 +34,6 @@ from .resolve import resolve_content
 from .service import Workspaces
 
 
-class Liveblocks(Protocol):
-    async def create(self, room: str) -> None: ...
-    async def document(self, room: str) -> bytes: ...
-    async def send(self, room: str, update: bytes) -> None: ...
-
-
 class Files(Protocol):
     async def now(self, entry: str) -> Held | None:
         """What the file says, or None when it is not text a room can hold."""
@@ -204,6 +198,7 @@ class Keeper:
         return carried(live, change)
 
 
+@final
 class RememberedRooms:
     """The room table, as the keeper wants it.
 

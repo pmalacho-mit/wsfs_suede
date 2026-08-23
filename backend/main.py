@@ -39,7 +39,7 @@ from fastapi import (
 from fastapi import Path as APIPath
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import delete, func
-from sqlmodel import col, desc, select
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
@@ -59,7 +59,6 @@ from .contract import (
     Rejection,
     RoomStanding,
     RoomStored,
-    Stranded,
     StrandedDrafts,
     StreamEvent,
     Submitted,
@@ -67,7 +66,7 @@ from .contract import (
 )
 from .controller import ControllerRegistry, WorkspaceController
 from .collaboration import ICollaboration
-from .models import BlobContentRow, Models, TextContentRow
+from .models import Models
 from .keeper import Keeper, WsfsFiles, RememberedRooms
 from .service import Workspaces
 from .stream import Emitted
