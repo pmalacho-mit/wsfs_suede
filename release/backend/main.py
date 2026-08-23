@@ -26,7 +26,16 @@ from datetime import timedelta
 from typing import Annotated, Any, final
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+)
 from fastapi import Path as APIPath
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import delete, func
@@ -48,6 +57,8 @@ from .contract import (
     Refusal,
     Rejected,
     Rejection,
+    RoomStanding,
+    RoomStored,
     Stranded,
     StrandedDrafts,
     StreamEvent,
@@ -668,5 +679,122 @@ def create_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # -- rooms -------------------------------------------------------------------------
+
+    #
+    # One entry's shared document, kept in step with its file by the only party
+    # with a lock to settle it. A client cannot: a document that has not synced
+    # looks exactly like an empty one, so two arrivals both believe the room is
+    # theirs to fill, and a CRDT merges two inserts rather than noticing they
+    # say the same thing.
+    #
+    # UNDER A WORKSPACE, for the same reason the blob routes are. `authorize`
+    # answers exactly one question -- may this caller reach this workspace --
+    # and an entry id in a path is not that question. Being let into one
+    # workspace does not make an entry in another one yours, so each of these
+    # asks separately. `updates` is the route that makes this matter: it puts
+    # bytes a caller supplies into a document other people are reading.
+
+    async def held(workspace_id: UUID, entry_id: UUID) -> None:
+        """That this workspace is the one this entry belongs to.
+
+        The same two lines `resolve_content` opens with, and for the same
+        reason: an entry belongs to exactly one workspace, so nobody has to be
+        told which -- but it does have to be checked.
+        """
+        async with database.session() as session:
+            entry = await session.get(backend.models.entry, entry_id)
+        if entry is None or entry.workspace_id != workspace_id:
+            raise HTTPException(404, "no such entry in this workspace")
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}")
+    async def ensure_room(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> RoomStanding:
+        """Make this entry's room exist and say what the file says.
+
+        Idempotent, and the only way a room is ever filled. Free when there is
+        nothing to do, which is the common case by a wide margin: the common
+        reason to ask is that somebody just saved and every other client with
+        the file open heard about it.
+
+        A null base is not a failure. It is what a file that is not text a
+        room can hold answers -- bytes written over it, or a deletion -- and
+        the caller's own read is the first moment anybody could know that.
+        """
+        await held(workspace_id, entry_id)
+        standing = await backend.keeper.ensure(str(entry_id))
+        return RoomStanding(base=None if standing is None else UUID(standing))
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}/warm", status_code=202)
+    async def warm_room(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        later: BackgroundTasks,
+        _: UUID = Depends(authorize),
+    ) -> None:
+        """Fill this room now, so that opening the file later is instant.
+
+        Creating a room, asking what it holds and filling it is three calls to
+        the collaboration server and takes a second or two. Somebody opening a
+        file waits for all of it, because an editor bound to a room that has
+        not been filled shows an empty document and then saves that over the
+        real file.
+
+        Nobody is waiting when a file is CREATED, so that is where this
+        belongs -- whether a person made it or a workspace was cloned for one.
+        Answered before the work starts, because the answer is not the point.
+        """
+        await held(workspace_id, entry_id)
+        later.add_task(backend.keeper.ensure, str(entry_id))
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}/stored", status_code=204)
+    async def room_stored(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        body: RoomStored,
+        _: UUID = Depends(authorize),
+    ) -> None:
+        """A member of this room wrote the file.
+
+        The cheap half of the whole design: this host is told where the file
+        now stands instead of every client that hears about the write asking
+        the collaboration server what the room contains. One POST here, and
+        everybody else's settle finds nothing to do.
+        """
+        await held(workspace_id, entry_id)
+        await backend.keeper.stored(str(entry_id), str(body.version))
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}/updates", status_code=204)
+    async def hand_over(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        request: Request,
+        _: UUID = Depends(authorize),
+    ) -> Response:
+        """Put a client's own document update into the room for it.
+
+        The one thing a client cannot do for itself when it can reach this
+        host and not the collaboration server. Its work is already kept as a
+        draft and cannot be lost -- but nobody else would see it until that
+        connection came back, which can be a long time and is not a good
+        enough reason.
+
+        FORWARDED, NOT INTERPRETED. The update carries its own identities, so
+        it merges exactly once however many routes it arrives by, including
+        this client's own connection when that returns.
+
+        Sized like a blob, and for the same reason: this is the one route here
+        whose body a caller chooses the length of.
+        """
+        await held(workspace_id, entry_id)
+        size = declared_size(request)
+        if size is None or size > backend.max_blob_bytes:
+            return JSONResponse({"rejected": True, "reason": "too large"}, 413)
+        await backend.keeper.hand_over(str(entry_id), await request.body())
+        return Response(status_code=204)
 
     return router
