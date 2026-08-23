@@ -416,6 +416,26 @@ class Versions(BaseModel):
     content_version: UUID | None = None
 
 
+class RoomStanding(BaseModel):
+    """Where a room's text stands, as this host remembers it."""
+
+    base: UUID | None
+    """The stored write the room's text descends from, or null when nobody has
+    filled it yet -- which is also the answer for a file that is not text a
+    room can hold."""
+
+
+class RoomStored(BaseModel):
+    """A member of this room wrote the file.
+
+    Told rather than discovered: the room already holds the text, so the only
+    thing that changed is where this host believes it stands. Knowing that is
+    what makes every other client's settle cost nothing.
+    """
+
+    version: UUID
+
+
 class ReconstructionRequest(BaseModel):
     entries: list[Versions]
 
