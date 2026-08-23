@@ -151,18 +151,30 @@ export const pump = (wiring: Wiring): Pump => {
   const staged = async (
     entry: Id,
     payload: string | Uint8Array,
-  ): Promise<{ held: string | Uint8Array; content: Digest; basis?: Transaction }> => {
+  ): Promise<{
+    held: string | Uint8Array;
+    content: Digest;
+    basis?: Transaction;
+  }> => {
     const chain = queue.chain(entry);
     const tail = chain[chain.length - 1];
     if (!isText(payload) || tail === undefined || !isElided(tail.request))
       return { held: payload, content: await digestOf(payload) };
     const before = await textOf(tail, queue, bytes);
     const delta = chained(before, payload);
-    return {
-      held: delta,
-      content: await digestOf(delta),
-      basis: tail.request.transaction,
-    };
+    /**
+     * A delta is only worth having if it is smaller. A rewrite diffs to
+     * remove-everything/insert-everything, and JSON-encoding that is bigger
+     * than the text it describes -- so chaining it would cost space AND make
+     * the write unreadable if its predecessor were ever lost.
+     */
+    return delta.length >= payload.length
+      ? { held: payload, content: await digestOf(payload) }
+      : {
+          held: delta,
+          content: await digestOf(delta),
+          basis: tail.request.transaction,
+        };
   };
 
   /**
@@ -246,7 +258,6 @@ export const pump = (wiring: Wiring): Pump => {
      * correctness. See `refusals` on the backend.
      */
     const predecessor = ahead?.request.transaction ?? null;
-
 
     return {
       ...request,
