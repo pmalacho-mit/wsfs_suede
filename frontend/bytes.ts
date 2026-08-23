@@ -10,9 +10,12 @@ export type Digest = string;
 
 export type Store = {
   /**
+   * @param content
    * `at` is the digest when the caller has already computed it -- which it
    * has whenever it needed to write the row that NAMES these bytes before
    * storing them. Hashing a payload twice is the only alternative.
+   * @param at
+   * @returns
    */
   put: (content: Uint8Array | string, at?: Digest) => Promise<Digest>;
   read: (digest: Digest) => Promise<Uint8Array | undefined>;
@@ -41,7 +44,9 @@ const hex = (buffer: ArrayBuffer) =>
  * of undefined, which says nothing about the cause. Anything that needs
  * another kind of key can pass its own `Store`.
  */
-export const digestOf = async (content: Uint8Array | string): Promise<Digest> => {
+export const digestOf = async (
+  content: Uint8Array | string,
+): Promise<Digest> => {
   if (typeof crypto === "undefined" || crypto.subtle === undefined) {
     throw new Error(
       "crypto.subtle is unavailable, so content cannot be hashed. " +
@@ -49,7 +54,9 @@ export const digestOf = async (content: Uint8Array | string): Promise<Digest> =>
         "or reach it on localhost.",
     );
   }
-  return hex(await crypto.subtle.digest("SHA-256", bytesOf(content) as BufferSource));
+  return hex(
+    await crypto.subtle.digest("SHA-256", bytesOf(content) as BufferSource),
+  );
 };
 
 /**
@@ -58,20 +65,20 @@ export const digestOf = async (content: Uint8Array | string): Promise<Digest> =>
  * anywhere a user can reach.
  */
 export const inMemory = (): Store => {
-  const held = new Map<Digest, Uint8Array>();
+  const bytesByDigest = new Map<Digest, Uint8Array>();
   return {
     put: async (content, at) => {
       const digest = at ?? (await digestOf(content));
-      held.set(digest, bytesOf(content));
+      bytesByDigest.set(digest, bytesOf(content));
       return digest;
     },
-    read: async (digest) => held.get(digest),
+    read: async (digest) => bytesByDigest.get(digest),
     text: async (digest) => {
-      const bytes = held.get(digest);
+      const bytes = bytesByDigest.get(digest);
       return bytes === undefined ? undefined : decoder.decode(bytes);
     },
     forget: async (digests) => {
-      for (const digest of digests) held.delete(digest);
+      for (const digest of digests) bytesByDigest.delete(digest);
     },
   };
 };
