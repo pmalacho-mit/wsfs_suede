@@ -8,6 +8,7 @@
     connect,
     http,
     type Faltering,
+    type Keeping,
     type Reclamation,
     type Workspace as Client,
     startPersistence,
@@ -51,6 +52,7 @@
    */
   let room = $state<Reclamation>({ phase: "idle" });
   let unwatch: (() => void) | undefined;
+  let kept: Keeping | undefined;
 
   /**
    * Queued work whose bytes are gone. An event, not a state -- it happened
@@ -123,7 +125,19 @@
   };
 
   onMount(start);
-  onDestroy(() => (unwatch?.(), workspace?.stop()));
+  /**
+   * Put down, and then waited for.
+   *
+   * A page that is navigating away can wait for the queue's bookkeeping to
+   * reach the disk, and a page that is being killed cannot -- so the one that
+   * can, does. Without it an answer still on its way is simply lost, and the
+   * next visit calls work that is safely on the server unsettled.
+   */
+  onDestroy(() => {
+    unwatch?.();
+    workspace?.stop();
+    void kept?.flushed();
+  });
 </script>
 
 <!-- The frame fills whatever it is given, so the page is what says "all of

@@ -191,6 +191,18 @@ export type Persistence = {
    * Reported through the same `watch` as `faltering`, because a consumer is
    * watching one thing: whether the work it is holding is safe.
    */
+  /**
+   * Settles once everything asked for so far has reached the disk.
+   *
+   * The queue's own writes are fire-and-forget, because the copy in memory is
+   * already right and making the outbox wait on a disk would pay at the wrong
+   * time. That is fine while the page lives and wrong at the moment it stops:
+   * a teardown that CAN wait -- a panel closing, a workspace being put away,
+   * a tab reloading itself -- and does not, throws away answers that were on
+   * their way. A tab that is killed cannot wait, and that is inherent; one
+   * that is closing tidily has no excuse.
+   */
+  flushed: () => Promise<void>;
   reclamation: () => Reclamation;
   /** Make room now. Answers what it found; one pass at a time, per origin. */
   reclaim: () => Promise<Reclamation>;
@@ -489,6 +501,9 @@ export const persistenceMechanism = async (
     kept,
     faltering: () => faltering,
     watch: (changed) => (watchers.add(changed), () => watchers.delete(changed)),
+    flushed: async () => {
+      await writing;
+    },
     reclamation: () => reclamation,
     reclaim,
     restored: {

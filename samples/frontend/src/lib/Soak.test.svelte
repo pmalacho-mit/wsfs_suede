@@ -79,7 +79,7 @@
     const pocket: Pocket = harness.set(new Pocket());
     pocket.who = "one client, many rounds";
 
-    const SEED = 20260824;
+    const SEED = 7;
     const ROUNDS = 40;
     const roll = rolling(SEED);
     const pick = <T,>(from: T[]): T => from[Math.floor(roll() * from.length)]!;
@@ -221,8 +221,25 @@
       const kept = await client.store(entry);
       if (!kept.held) return { what: `draft ${at} was not held` };
       drafted.push({ transaction: kept.draft!, says: `draft ${at}` });
+
+      /**
+       * And then it stops being a draft, which is the design rather than a
+       * surprise: coming back, the host carries what this document holds into
+       * the room, and the next store writes it to the file. The draft was
+       * never a copy to be discarded -- it was the same work, waiting.
+       *
+       * So what this client believes has to move too. An earlier version of
+       * this test did not, and reported the draft's line as "in the file and
+       * not expected" -- which was the soak being wrong and the product being
+       * right, and is why the failure names lines rather than truncating two
+       * strings.
+       */
       await client.comeBack(entry);
-      return { what: `kept draft ${at}` };
+      await until("the room to speak again", () => client.speaks(entry), 30_000);
+      const stored = await client.store(entry);
+      if (!stored.held) accepted.push(stored.transaction);
+      believed = client.text(entry);
+      return { what: `kept draft ${at}, then shared it`, said: believed };
     };
 
     /** Somebody asks for an older version back. */
@@ -288,9 +305,25 @@
       }
     }
 
-    /** 1. The file holds what the last accepted change said it holds. */
+    /**
+     * 1. The file holds what the last accepted change said it holds.
+     *
+     * Reported as which LINES differ rather than as two truncated strings: a
+     * soak's whole value is telling you what went missing, and "expected
+     * 'line 0\nrace…' to be 'line 0\nrace…'" tells you nothing at all.
+     */
     const finally_ = await client.reads(entry);
-    harness.expect(finally_).toBe(believed);
+    if (finally_ !== believed) {
+      const held = new Set(finally_.split("\n").filter(Boolean));
+      const wanted_ = new Set(believed.split("\n").filter(Boolean));
+      const missing = [...wanted_].filter((line) => !held.has(line));
+      const extra = [...held].filter((line) => !wanted_.has(line));
+      throw new Error(
+        `the file and this client disagree -- missing from the file: ` +
+          `${missing.join(" | ") || "(none)"}; in the file and not expected: ` +
+          `${extra.join(" | ") || "(none)"}`,
+      );
+    }
 
     /**
      * 2. Everything answered is still accounted for. `unsettled` is the
@@ -302,8 +335,15 @@
       "every accepted transaction to be settled",
       () => client.workspace.unsettled(accepted).length === 0,
       60_000,
+      () => {
+        const loose = client.workspace.unsettled(accepted);
+        const when = loose.map((one) => {
+          const at = accepted.indexOf(one);
+          return `${one.slice(-6)} (accepted ${at} of ${accepted.length})`;
+        });
+        return `${loose.length} still unsettled: ${when.join(", ")}`;
+      },
     );
-    harness.expect(client.workspace.unsettled(accepted)).toEqual([]);
 
     /**
      * 3. Every draft is still readable, and says what was typed into it.

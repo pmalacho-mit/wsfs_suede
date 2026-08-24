@@ -257,7 +257,10 @@ export class Collaborator {
     );
   }
 
+  readonly held: Keeping;
+
   constructor(part: Part, workspaceId: string, held: Keeping) {
+    this.held = held;
     this.part = part;
     this.workspaceId = workspaceId;
     this.email = emailOf(part);
@@ -575,5 +578,13 @@ export class Collaborator {
   async dispose(): Promise<void> {
     await this.rooms.dispose();
     this.workspace.stop();
+    /**
+     * And wait for the queue's own bookkeeping to reach the disk.
+     *
+     * This teardown CAN wait, so not waiting would throw away answers that
+     * were on their way -- and the next client to open would call work that
+     * is safely on the server unsettled.
+     */
+    await this.held.flushed();
   }
 }
