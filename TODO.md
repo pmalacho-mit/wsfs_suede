@@ -203,3 +203,35 @@ silent until the first write, which happened twice.
     text. A binary round trip through `crypto.subtle` and the workspace-scoped
     blob routes is the gap
 ```
+
+## 7. Reading your own write
+
+```
+[ ] A CLIENT CAN READ A FILE AND BE TOLD WHAT IT SAID BEFORE THE WRITE IT JUST
+    MADE. `workspace.write`/`shares` mints the transaction and returns
+    synchronously, but the view that `read` answers from is derived from the
+    OUTBOX -- `effective.of(map, queue.entries())` -- and the row does not
+    join the queue until the payload has been hashed and stored. Between
+    those two moments the file still says the old thing to its own author.
+
+    Reproduce: type into a file, close the tab, and click it open again in
+    the same frame. The panel opens on the text from before, and anything
+    typed on top of that is written over the newer version. The UI soak in
+    `Sample.test.svelte` does exactly this, which is why it now waits a beat
+    before reopening -- see the comment there.
+
+    Not fixed because the fix is in the write pump, where the ordering is the
+    most safety-critical in the codebase: the row is captured before the
+    bytes on purpose (bytes with no row are work gone unnoticed), the row
+    carries the content digest, and the delta chain reads the tail. The two
+    candidates:
+
+      - capture the queue row synchronously and fill in its digest after, so
+        the view has something to overlay from the first instant
+      - keep a small "issued, not yet queued" overlay in `workspace.ts` that
+        `recomputed` folds in and `flight.write` clears
+
+    Both are real changes to how the outbox is written and want a second
+    pair of eyes rather than an overnight commit.
+```
+
