@@ -342,6 +342,12 @@ export const connect = (options: Options): Workspace => {
     remembered: content.remember,
     token: (entry) => map.get(entry)?.content_version ?? null,
     unsound: () => sync.nudge(),
+    /**
+     * The same door Initialize reports through. Which path FINDS the loss is
+     * an accident of whether the stream happened to drop, so a consumer that
+     * implements one has implemented both.
+     */
+    lost: options.lost,
   });
 
   const written = (

@@ -40,7 +40,15 @@ import {
   type Write,
 } from "./contract";
 import { offset } from "./minted";
-import { chained, isElided, textOf, type Entry, type Queue } from "./outbox";
+import {
+  chained,
+  isElided,
+  LostBytes,
+  textOf,
+  type Entry,
+  type Queue,
+  type Unreadable,
+} from "./outbox";
 
 export type Wiring = {
   queue: Queue;
@@ -55,6 +63,8 @@ export type Wiring = {
   token: (entry: Id) => Version | null;
   /** This client's state cannot be reconciled by rebasing; start over. */
   unsound: () => void;
+  /** Queued work whose bytes are gone: it can never be sent, however often. */
+  lost?: (entries: Unreadable[]) => void;
 };
 
 export type Pump = {
@@ -158,9 +168,27 @@ export const pump = (wiring: Wiring): Pump => {
   }> => {
     const chain = queue.chain(entry);
     const tail = chain[chain.length - 1];
+    const whole = async () => ({
+      held: payload,
+      content: await digestOf(payload),
+    });
     if (!isText(payload) || tail === undefined || !isElided(tail.request))
-      return { held: payload, content: await digestOf(payload) };
-    const before = await textOf(tail, queue, bytes);
+      return whole();
+
+    /**
+     * A tail whose bytes are gone cannot be diffed against, and refusing on
+     * its account would stop the person typing over a write that is already
+     * lost. Stored whole instead: the tail is no more readable than it was,
+     * `drain` still drops it on the way out, and this write does not need it.
+     */
+    let before: string;
+    try {
+      before = await textOf(tail, queue, bytes);
+    } catch (reason) {
+      if (!(reason instanceof LostBytes)) throw reason;
+      return whole();
+    }
+
     const delta = chained(before, payload);
     /**
      * A delta is only worth having if it is smaller. A rewrite diffs to
@@ -169,7 +197,7 @@ export const pump = (wiring: Wiring): Pump => {
      * the write unreadable if its predecessor were ever lost.
      */
     return delta.length >= payload.length
-      ? { held: payload, content: await digestOf(payload) }
+      ? whole()
       : {
           held: delta,
           content: await digestOf(delta),
@@ -326,6 +354,24 @@ export const pump = (wiring: Wiring): Pump => {
         try {
           outgoing = await materialised(item, chain[at - 1]);
         } catch (error) {
+          /**
+           * Bytes that are GONE, rather than a store that refused. Retrying
+           * cannot help and this is the only place that finds out: Initialize
+           * names and drops these, but a client whose stream is healthy never
+           * reaches Initialize, so without this the entry stops here and is
+           * retried identically for ever.
+           *
+           * `continue`, not `return`, and it cascades on its own: evicting
+           * hands the write behind this one the digest it was holding, so
+           * that one fails the same way on the next turn and is dropped too,
+           * until the poison is out and the rest of the chain goes.
+           */
+          if (error instanceof LostBytes) {
+            released(queue.evict([error.transaction]));
+            wiring.lost?.([{ transaction: error.transaction, why: error.message }]);
+            abandoned(error);
+            continue;
+          }
           /**
            * Never left this machine, and nothing about the item changed:
            * `materialised` writes the whole text down before it re-points the
