@@ -22,7 +22,7 @@ import secrets
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any, final
 from uuid import UUID
 
@@ -45,13 +45,24 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
+from . import history as history_of
+from . import records
+from . import tutor as tutoring
+from .minted import minted_at
 from . import reconstruct, refusals, service
 from .blobs import Blobs
 from .contract import (
+    Answering,
+    Asked,
+    Asking,
     Clearing,
     Create,
+    Executed,
+    Executions,
+    History,
     InitializeRequest,
     InitializeResponse,
+    Occurrence,
     ReconstructionRequest,
     ReconstructionResponse,
     Refusal,
@@ -59,10 +70,13 @@ from .contract import (
     Rejection,
     RoomStanding,
     RoomStored,
+    SnapshotEntry,
+    SnapshotTaken,
     StrandedDrafts,
     StreamEvent,
     Submitted,
     TextContentResponse,
+    Transcript,
 )
 from .controller import ControllerRegistry, WorkspaceController
 from .collaboration import ICollaboration
@@ -116,6 +130,7 @@ class Backend:
     heartbeat_seconds: float
     max_blob_bytes: int
     keeper: Keeper
+    answering: tutoring.Tutoring
 
     @classmethod
     def over(
@@ -128,6 +143,7 @@ class Backend:
         grace_seconds: float,
         max_blob_bytes: int,
         liveblocks: ICollaboration,
+        tutor: tutoring.ITutor,
     ) -> "Backend":
         schema = Workspaces.over(models)
         return cls(
@@ -144,6 +160,7 @@ class Backend:
                 files=WsfsFiles(schema, database),
                 standings=RememberedRooms(schema.models, database),
             ),
+            answering=tutoring.Tutoring(tutor, now),
         )
 
     @property
@@ -582,6 +599,95 @@ def create_router(
                 ),
             )
 
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/history")
+    async def history(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        before: datetime | None = None,
+        limit: int = 10,
+        user: UUID = Depends(authorize),
+    ) -> History:
+        """What this file has said, newest first.
+
+        Scoped to the CALLER for everything except what the workspace
+        accepted: a draft is work that reached nobody, so the author is the
+        only person who has ever seen it, and listing somebody else's would
+        publish typing they never shared.
+
+        Paged by `before` rather than by an offset, because rows arrive while
+        somebody is reading and an offset would show one twice or skip one.
+        """
+        async with database.session() as session:
+            versions, more = await history_of.of_entry(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                user,
+                before,
+                max(1, min(limit, 100)),
+            )
+            return History(versions=versions, more=more)
+
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/executions")
+    async def executions(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        limit: int = 20,
+        _: UUID = Depends(authorize),
+    ) -> Executions:
+        """What running this file has produced, newest first."""
+        async with database.session() as session:
+            rows = await records.executions_of(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                max(1, min(limit, 200)),
+            )
+            return Executions(
+                executions=[
+                    Executed(
+                        transaction=row.id,
+                        snapshot=row.snapshot,
+                        entry=row.entry_id,
+                        at=Occurrence(
+                            minted=minted_at(row.id),
+                            offset=row.utc_offset,
+                            accepted=row.timestamp,
+                        ),
+                        outputs=row.outputs,
+                        ok=row.ok,
+                    )
+                    for row in rows
+                ]
+            )
+
+    @router.get("/workspaces/{workspace_id}/snapshots/{snapshot_id}")
+    async def snapshot_taken(
+        workspace_id: Annotated[UUID, APIPath()],
+        snapshot_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> SnapshotTaken:
+        """Which entries a snapshot named, and at which versions."""
+        async with database.session() as session:
+            rows = await records.entries_in(
+                session, backend.models, workspace_id, snapshot_id
+            )
+            return SnapshotTaken(
+                snapshot=snapshot_id,
+                entries=[
+                    SnapshotEntry(
+                        entry=row.entry_id,
+                        name_version=row.name_version,
+                        parent_version=row.parent_version,
+                        deleted_version=row.deleted_version,
+                        content_version=row.content_version,
+                    )
+                    for row in rows
+                ],
+            )
+
     @router.get("/workspaces/{workspace_id}/drafts")
     async def stranded_drafts(
         workspace_id: Annotated[UUID, APIPath()],
@@ -678,6 +784,138 @@ def create_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # -- the tutor ---------------------------------------------------------------------
+
+    @router.post("/workspaces/{workspace_id}/chat")
+    async def ask(
+        workspace_id: Annotated[UUID, APIPath()],
+        request: Asking,
+        user: UUID = Depends(authorize),
+    ) -> Asked:
+        """Put a question to the tutor, and say where to hear the answer.
+
+        TWO CALLS, NOT ONE. Answering takes seconds and a request should not,
+        so this records the question, starts the work and returns -- and the
+        stream below attaches to work that is already under way. A client that
+        never attaches changes nothing: the answer is written down when it
+        finishes, because a person who asks and closes the tab has still
+        asked.
+
+        ASKING TWICE IS ANSWERED ONCE. The message id is the client's, so a
+        retried request finds its own question already here. It still gets a
+        token, because the reason to retry is usually that the first answer
+        never arrived.
+        """
+        async with database.session() as session:
+            said = await tutoring.prompt(
+                session,
+                backend.models,
+                backend.schema.text,
+                workspace_id,
+                user,
+                request,
+                until=now(),
+            )
+            if not await tutoring.already_asked(session, backend.models, request.message):
+                for row in tutoring.rows_for(
+                    backend.models, workspace_id, user, request
+                ):
+                    session.add(row)
+                await session.commit()
+
+        async def record(text: str, failure: str | None, model: str) -> None:
+            """Written in a session of its own.
+
+            The request's is long closed by the time an answer finishes -- that
+            is the whole shape of this -- so the generation opens its own.
+            """
+            async with database.session() as writing:
+                writing.add(
+                    backend.models.answered(
+                        message_id=request.message,
+                        workspace_id=workspace_id,
+                        user_id=user,
+                        text=text,
+                        model=model,
+                        failure=failure,
+                    )
+                )
+                await writing.commit()
+
+        return Asked(
+            message=request.message,
+            token=backend.answering.start(said, record),
+        )
+
+    @router.get(
+        "/workspaces/{workspace_id}/chat/stream",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "model": Answering,
+                "content": {"text/event-stream": {}},
+                "description": (
+                    "One `data:` line per delta, then one saying it ended."
+                    " Declared so a client can be generated against it."
+                ),
+            }
+        },
+    )
+    async def hear(
+        workspace_id: Annotated[UUID, APIPath()],
+        token: str,
+        _: UUID = Depends(authorize),
+    ) -> StreamingResponse:
+        """The answer, as it is written.
+
+        The token names a generation running in this process rather than a
+        durable fact, so it is not spent by being read: a page that reloaded
+        mid-answer picks the same one up again. What retires it is the answer
+        being old, not somebody having heard it.
+        """
+        generation = backend.answering.claim(token)
+        if generation is None:
+            raise HTTPException(404, "nothing is being answered under that token")
+
+        async def written() -> AsyncIterator[str]:
+            async for delta in generation.follow():
+                yield sent(Answering(type="delta", delta=delta).model_dump(mode="json"))
+            yield sent(
+                Answering(
+                    type="ended",
+                    text=generation.text,
+                    failure=generation.failure,
+                ).model_dump(mode="json")
+            )
+
+        return StreamingResponse(
+            written(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.get("/workspaces/{workspace_id}/chat")
+    async def conversation(
+        workspace_id: Annotated[UUID, APIPath()],
+        before: datetime | None = None,
+        limit: int = 10,
+        user: UUID = Depends(authorize),
+    ) -> Transcript:
+        """This person's conversation here, newest first.
+
+        Scoped to the caller as well as the workspace: a workspace can have
+        more than one person in it, and what somebody asked a tutor is theirs.
+        """
+        async with database.session() as session:
+            return await tutoring.transcript(
+                session,
+                backend.models,
+                workspace_id,
+                user,
+                before,
+                max(1, min(limit, 100)),
+            )
 
     # -- rooms -------------------------------------------------------------------------
 

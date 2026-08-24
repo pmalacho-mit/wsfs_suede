@@ -278,7 +278,7 @@ export class Room {
    * in flight, and nothing good follows from that -- see `rooms.speaking`.
    */
   get speaks(): boolean {
-    return this.trouble === undefined;
+    return this.#withheld === undefined;
   }
 
   /**
@@ -288,17 +288,47 @@ export class Room {
    * nobody should be told so -- and because the alternative to one answer is
    * two, one for the rule and one for the banner, drifting apart.
    */
-  get trouble(): Trouble | undefined {
+  /**
+   * Why this room may not write the file back, if it may not.
+   *
+   * The rule, whole. `speaks` is this being absent, and `trouble` is the part
+   * of it worth interrupting somebody about -- which is not the same set, and
+   * conflating them is what made the editor jump on every keystroke.
+   */
+  get #withheld(): (Trouble & { sayable: boolean }) | undefined {
     if (this.replaced !== undefined)
-      return { says: "this file is not text any more", passing: false };
+      return {
+        says: "this file is not text any more",
+        passing: false,
+        sayable: true,
+      };
     if (this.#ahead)
-      return { says: "still handing over what you typed", passing: true };
+      return {
+        says: "still handing over what you typed",
+        passing: true,
+        /**
+         * NOT SAID. This is the healthy path: it is true for a fraction of a
+         * second after every burst of typing, and it means the client is
+         * doing exactly what it should. Telling somebody about it while they
+         * type is noise -- and a notice that appears and disappears that
+         * often is worse than noise if it moves anything.
+         */
+        sayable: false,
+      };
     if (rooms.speaking({ attached: this.attached, behind: this.#missed }))
       return undefined;
     return {
       says: this.attached ? "catching up" : "not reaching anybody",
       passing: true,
+      sayable: true,
     };
+  }
+
+  /** What is worth telling the person at the keyboard, if anything. */
+  get trouble(): Trouble | undefined {
+    const held = this.#withheld;
+    if (held === undefined || !held.sayable) return undefined;
+    return { says: held.says, passing: held.passing };
   }
 
   /**
@@ -438,6 +468,20 @@ export class Room {
     void settled.then((answer) => {
       if (answer.rejected) return;
       this.base = transaction;
+      /**
+       * TOLD AT ONCE, and not after the hand-over, which was tried and is
+       * worse. Waiting until the others really had it sounds safer -- an
+       * unsaid note leaves the host thinking the room is where it last was,
+       * so the next settle fills it from the file. But the note is also what
+       * keeps `base` level with the file, and a room whose base is behind
+       * while its text is ahead is the one case the host CARRIES a change
+       * into: it computes what the file gained since that base and applies
+       * it to a document that already has it, so the line is said twice.
+       *
+       * Losing the note is the cheaper failure. The host compares the room's
+       * text with the file before carrying anything, so a room that already
+       * says it is rebased rather than written to.
+       */
       void this.held.host.stored(this.entry, transaction);
     });
     return { held: false, transaction, settled };
@@ -473,7 +517,23 @@ export class Room {
    */
   async #carriedByTheHost(): Promise<void> {
     if (this.replaced !== undefined) return;
-    await this.held.host.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
+    try {
+      await this.held.host.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
+    } catch {
+      /**
+       * BEST EFFORT, and nothing is lost when it fails.
+       *
+       * This is the route round a collaboration server this client cannot
+       * reach. When the HOST cannot be reached either there is no route left
+       * -- and the work is already where it needs to be: in the document, and
+       * in the draft that was just kept. It goes when a connection comes
+       * back, by whichever road returns first.
+       *
+       * Uncaught, this was an unhandled rejection every time a client lost
+       * both at once, which is not a rare pairing: they are usually the same
+       * network.
+       */
+    }
   }
 
   /**
@@ -623,7 +683,18 @@ export class Room {
    * the work with it -- and an update still on its way to storage when the
    * document is torn down is exactly that loss.
    */
+  /**
+   * Whether this room is on its way out.
+   *
+   * Set before the flush rather than after it, because the flush is the slow
+   * part and shutting a tab and opening the same file again is something a
+   * person does inside it. Anybody who finds this room in the register during
+   * that window is finding one that is going, and must build its own.
+   */
+  going = false;
+
   async dispose(): Promise<void> {
+    this.going = true;
     this.detach();
     await this.#stopKeeping?.();
     this.#stopKeeping = undefined;
@@ -727,7 +798,10 @@ export class Rooms {
    * theirs to write, and the file ends up saying everything twice.
    */
   async open(entry: string): Promise<Room> {
-    const room = this.held.get(entry) ?? new Room(entry, this);
+    const already = this.held.get(entry);
+    /** Never one that is being put down -- see `Room.going`. */
+    const room =
+      already !== undefined && !already.going ? already : new Room(entry, this);
     this.held.set(entry, room);
     room.opening = "recalling";
     await room.recall();
@@ -754,15 +828,60 @@ export class Rooms {
     return room;
   }
 
+  /**
+   * Put this file's room down.
+   *
+   * OUT OF THE REGISTER FIRST, then closed -- and that order is the whole
+   * point. Closing a room flushes what it is holding, which takes as long as
+   * a write to storage takes, and shutting a tab and opening the same file
+   * again is something a person does inside that. Deleting afterwards deleted
+   * whatever was registered by THEN, which was the room the reopen had just
+   * made: the file ended up with a live room and an editor bound to it that
+   * the register did not know about, so nothing told it when the file
+   * changed, no write was allowed to go around it, and the next close found
+   * nothing to close and never flushed it.
+   *
+   * Taking it out first also means a reopen during the flush builds a fresh
+   * room rather than adopting one that is being put down.
+   */
   async close(entry: string): Promise<void> {
-    await this.held.get(entry)?.dispose();
-    this.held.delete(entry);
+    const room = this.held.get(entry);
+    if (room === undefined) return;
+    await room.dispose();
+    /**
+     * ONLY IF IT IS STILL THIS ROOM.
+     *
+     * Closing flushes what the room was holding, which takes as long as a
+     * write to storage takes, and shutting a tab and opening the same file
+     * again is something a person does inside that. Deleting whatever was
+     * registered by THEN deleted the room the reopen had just made: the file
+     * ended up with a live room and an editor bound to it that the register
+     * did not know about, so nothing told it when the file changed, the next
+     * close found nothing to close and never flushed it, and -- worst --
+     * writing text around the document stopped being refused, which is the
+     * one rule that keeps the editor's buffer from being saved over the file.
+     *
+     * Removed after the flush rather than before it for that last reason: for
+     * as long as anything here is holding this file, text must not go round
+     * it.
+     */
+    if (this.held.get(entry) === room) this.held.delete(entry);
   }
 
   async dispose(): Promise<void> {
     this.#gone = true;
     this.#watching();
-    await Promise.all([...this.held.values()].map((room) => room.dispose()));
+    /**
+     * ALL of them, whatever any one of them does.
+     *
+     * Each room's last act is to flush what it is holding, and `Promise.all`
+     * would abandon every flush after the first rejection -- so one room with
+     * a store that had already gone would take the others' unsaved work with
+     * it. Settled rather than all: put every one down, then carry on.
+     */
+    await Promise.allSettled(
+      [...this.held.values()].map((room) => room.dispose()),
+    );
     this.held.clear();
   }
 }

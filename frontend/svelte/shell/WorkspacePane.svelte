@@ -11,8 +11,8 @@
    * children happen to be there. Being a component is what lets a test render
    * it both ways and measure.
    */
-  import type { Faltering, Reclamation, Workspace as Client } from "../../";
-  import Workspace from "../Workspace.svelte";
+  import type { Faltering, Reclamation, Workspace as WSFS } from "../../";
+  import Workspace, { Model } from "../Workspace.svelte";
   import type { createClient } from "@liveblocks/client";
 
   let {
@@ -21,7 +21,7 @@
     storage,
     room,
   }: {
-    workspace: Client;
+    workspace: WSFS;
     liveblocks: ReturnType<typeof createClient>;
     /** What is wrong with writing the queue down, if anything. */
     storage?: Faltering;
@@ -38,6 +38,8 @@
    * which is why it does not go through the door `lost` uses.
    */
   const shortOf = $derived(room?.phase === "short" ? room : undefined);
+
+  const model = new Model();
 </script>
 
 <div class="flex h-full min-h-0 flex-col" data-region="workspace-pane">
@@ -62,14 +64,14 @@
       data-region="out-of-room"
     >
       There is more unsent work here than this browser will hold. Reconnect so
-      it can be saved, or close a workspace — until then, new changes may not
-      be kept anywhere.
+      it can be saved, or close a workspace — until then, new changes may not be
+      kept anywhere.
       {#if shortOf.workspaces.length > 1}
         Work is waiting in {shortOf.workspaces.length} workspaces.
       {/if}
     </p>
   {/if}
   <div class="min-h-0 flex-1" data-region="workspace-body">
-    <Workspace {workspace} {liveblocks} />
+    <Workspace {workspace} {liveblocks} {model} />
   </div>
 </div>

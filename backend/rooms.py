@@ -197,16 +197,59 @@ def _elsewhere(before: str, live: str):
     return moved
 
 
+def _upto(before: str, live: str):
+    """Where a span ENDING at a position in `before` ends in `live`.
+
+    Not the same question as where the position itself moved to, and the
+    difference is somebody else's typing. A position at the boundary between
+    two matched runs moves FORWARD past anything inserted between them -- so
+    using it as an exclusive end would delete that insertion along with the
+    span. This answers with the end of the run the span was in, which is the
+    last character that actually corresponds to what the writer removed.
+    """
+    blocks = SequenceMatcher(None, before, live, autojunk=False).get_matching_blocks()
+
+    def ending(at: int) -> int:
+        reached = 0
+        for starts, lands, size in blocks:
+            if at <= starts:
+                break
+            if at <= starts + size:
+                return lands + (at - starts)
+            reached = lands + size
+        return reached
+
+    return ending
+
+
 def _carry(text: Text, change: Change) -> None:
     """Apply `change` to `text` as edits, latest first.
 
     Latest first so that earlier positions stay valid as it goes, which is the
     whole of the bookkeeping this would otherwise need.
     """
-    moved = _elsewhere(change.before, str(text))
+    live = str(text)
+    moved = _elsewhere(change.before, live)
+    ending = _upto(change.before, live)
     for edit in sorted(_edits(change), key=lambda edit: edit.at, reverse=True):
         at = moved(edit.at)
         if edit.remove:
-            del text[at : at + edit.remove]
+            """BOTH ENDS are moved, not the start plus a length.
+
+            `remove` counts characters in `before`, and the room has drifted
+            from `before` -- so the same span is a different length here, and
+            adding the old one walks off the end of somebody else's text. It
+            did: pycrdt PANICS rather than raising ("couldn't remove 65
+            elements, only 49 were removed"), which took the room's whole
+            settle with it.
+
+            Moving the end instead deletes the region that CORRESPONDS to
+            what the writer deleted. It cannot run past the text, because
+            `_elsewhere` never answers beyond it, and it does not eat a
+            neighbour's insertion the way a fixed count does.
+            """
+            end = ending(edit.at + edit.remove)
+            if end > at:
+                del text[at:end]
         if edit.insert:
             text.insert(at, edit.insert)

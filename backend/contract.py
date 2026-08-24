@@ -38,6 +38,8 @@ class Operation(str, enum.Enum):
     REPARENT = "reparent"
     MOVE = "move"
     WRITE = "write"
+    SNAPSHOT = "snapshot"
+    EXECUTE = "execute"
 
 
 class Kind(str, enum.Enum):
@@ -242,8 +244,50 @@ class Write(Transacted):
     """
 
 
+class Seen_(BaseModel):
+    """One entry as a snapshot found it: the four tokens that ARE the entry."""
+
+    id: UUID
+    name_version: UUID
+    parent_version: UUID
+    deleted_version: UUID
+    content_version: UUID | None = None
+
+
+class Snapshot(Transacted):
+    """A claim that the workspace looked like this.
+
+    NOT A MUTATION. It changes nothing about any entry, so it presents no
+    token, cannot conflict, and is not in the event stream. What it can be
+    refused for is naming a version that was never issued -- a claim about a
+    state that never existed is not worth keeping.
+
+    `id` is inherited and unused: a snapshot is about the workspace rather
+    than about one entry. It carries the transaction's own id so that dedup,
+    the outbox and `utc_offset` all work exactly as they do for everything
+    else.
+    """
+
+    op: Literal[Operation.SNAPSHOT] = Operation.SNAPSHOT
+    entries: list[Seen_]
+
+
+class Execute(Transacted):
+    """One run of one file, against a snapshot, and what came out.
+
+    Refused when the snapshot is unknown, because output whose subject cannot
+    be named is not evidence of anything.
+    """
+
+    op: Literal[Operation.EXECUTE] = Operation.EXECUTE
+    snapshot: UUID
+    outputs: list[Any] = Field(default_factory=list)
+    ok: bool = True
+
+
 Submitted = Annotated[
-    Create | Delete | Rename | Reparent | Move | Write, Field(discriminator="op")
+    Create | Delete | Rename | Reparent | Move | Write | Snapshot | Execute,
+    Field(discriminator="op"),
 ]
 """Everything a client can submit -- and everything it can queue. Creates are
 no longer online-only, because the client already knows the id."""
@@ -446,6 +490,80 @@ class Clearing(BaseModel):
     transactions: list[UUID]
 
 
+class Standing(str, enum.Enum):
+    """Where one version of a file stands.
+
+    Three, not two, because a draft is neither of the others: not what the
+    workspace holds, and not the system declining -- it is a client saying it
+    could not share this yet. Telling a user their own caution was a refusal
+    would report it as a failure.
+    """
+
+    APPLIED = "applied"
+    DRAFT = "draft"
+    REFUSED = "refused"
+
+
+class Version(BaseModel):
+    """One thing this file has said, and where that stands."""
+
+    transaction: UUID
+    at: Occurrence
+    standing: Standing
+    kind: Kind
+
+    size: int | None = None
+    """Characters for text, bytes for a blob, null when neither is known.
+
+    A refused write is stored as a delta against what came before it, so its
+    stored length is the size of an edit script rather than of the file. Null
+    says so instead of reporting a number that means something else.
+    """
+
+    why: str | None = None
+    """The refusal's reason, for a version the system declined. Null for a
+    draft, whose reason is always the same one and is already its standing."""
+
+
+class History(BaseModel):
+    versions: list[Version]
+
+    more: bool
+    """Whether asking again with an earlier `before` would find any.
+
+    Answered by fetching one more row than was asked for, so saying it costs
+    a row rather than a count over the whole history.
+    """
+
+
+class Executed(BaseModel):
+    """One recorded run, as it is read back."""
+
+    transaction: UUID
+    snapshot: UUID
+    entry: UUID
+    at: Occurrence
+    outputs: list[Any]
+    ok: bool
+
+
+class Executions(BaseModel):
+    executions: list[Executed]
+
+
+class SnapshotEntry(BaseModel):
+    entry: UUID
+    name_version: UUID
+    parent_version: UUID
+    deleted_version: UUID
+    content_version: UUID | None = None
+
+
+class SnapshotTaken(BaseModel):
+    snapshot: UUID
+    entries: list[SnapshotEntry]
+
+
 class Stranded(BaseModel):
     """A draft whose work is still only where it was typed."""
 
@@ -575,3 +693,89 @@ class TextContentResponse(BaseModel):
     content: str
     version: UUID
     """The content token this text was fetched at."""
+
+
+# -- the tutor ------------------------------------------------------------------------
+
+
+class Attaching(BaseModel):
+    """One file put in front of the tutor, and which of its runs came too."""
+
+    entry: UUID
+    executions: list[UUID] = Field(default_factory=list, max_length=50)
+    """Named individually rather than "the last few", because what matters is
+    what the person was looking at, and only they know that."""
+
+
+class Asking(BaseModel):
+    """A question, and everything needed to answer it in context."""
+
+    message: UUID
+    """Minted by the client, so asking twice is answered rather than asked
+    twice -- the same reason every other id here is."""
+
+    text: str = Field(min_length=1, max_length=32_000)
+
+    snapshot: UUID | None = None
+    """The workspace as it stood when this was asked.
+
+    Nullable because a snapshot is a transaction like any other and can be
+    refused, or never sent at all. See `ChatAskedRow.snapshot`.
+    """
+
+    attached: list[Attaching] = Field(default_factory=list, max_length=50)
+    offset: int | None = None
+
+
+class Asked(BaseModel):
+    """Where to listen for the answer.
+
+    The message id comes back too, though the client minted it: a client that
+    asked twice is told which question this is the answer to, rather than
+    having to assume.
+    """
+
+    message: UUID
+    token: str
+
+
+class Attached(BaseModel):
+    entry: UUID
+    executions: list[Executed] = Field(default_factory=list)
+
+
+class Turn(BaseModel):
+    """One exchange, as the panel reads it back."""
+
+    message: UUID
+    at: Occurrence
+    text: str
+    snapshot: UUID | None = None
+    attached: list[Attached] = Field(default_factory=list)
+    answer: str | None = None
+    """What the tutor said, or null if it never finished saying it."""
+    failure: str | None = None
+    model: str | None = None
+
+
+class Transcript(BaseModel):
+    turns: list[Turn]
+    """Newest first, like every other paged read here."""
+
+    more: bool
+    """Whether there is anything older. See `History.more`."""
+
+
+class Answering(BaseModel):
+    """One line of the answer stream.
+
+    TWO KINDS, and the second is not a courtesy. A delta is a piece; `ended`
+    carries the whole text and whatever went wrong, so a client that joined
+    late, missed a frame, or wants to check what it assembled has the answer
+    itself rather than only the pieces of it.
+    """
+
+    type: Literal["delta", "ended"]
+    delta: str = ""
+    text: str = ""
+    failure: str | None = None

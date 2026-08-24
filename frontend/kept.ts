@@ -45,8 +45,9 @@ export type Restored = {
   entries: Entry[];
   /**
    * Answers the confirmed map cannot speak to: drafts, refusals, and writes a
-   * later write has moved past. Everything else it holds is redundant with the
-   * snapshot and is dropped on arrival -- see `Kept.redundant`.
+   * later write has moved past -- and every answer besides, because which of
+   * those a transaction IS changes as the workspace moves on. Kept whole for
+   * that reason: see the note on `recorded` in `workspace.ts`.
    */
   recorded: Transaction[];
 };
@@ -78,15 +79,12 @@ export type Kept = {
   moved: (change: Change) => void;
   /** The server answered these, and no stream event may ever mention them. */
   answered: (transactions: Transaction[]) => void;
-  /** The confirmed map speaks for these now, so keeping them says nothing. */
-  redundant: (transactions: Iterable<Transaction>) => void;
 };
 
 /** Kept nowhere. What a consumer gets by saying nothing, and what tests use. */
 export const nowhere: Kept = {
   moved: () => {},
   answered: () => {},
-  redundant: () => {},
 };
 
 /**
@@ -109,9 +107,6 @@ export const remembering = (restored: Restored = nothing) => {
     },
     answered: (transactions) => {
       for (const transaction of transactions) recorded.add(transaction);
-    },
-    redundant: (transactions) => {
-      for (const transaction of transactions) recorded.delete(transaction);
     },
   };
 
