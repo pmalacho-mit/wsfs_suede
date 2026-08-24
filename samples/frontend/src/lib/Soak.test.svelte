@@ -43,6 +43,8 @@
 
   class Pocket {
     who = $state("");
+    note = $state("");
+    text = $state("");
     rounds = $state(0);
     log = $state<string[]>([]);
     verdict = $state("");
@@ -54,11 +56,16 @@
     what: string,
     ready: () => boolean | Promise<boolean>,
     within = 30_000,
+    /** What was there instead, which is the only evidence a failure leaves. */
+    seen?: () => string,
   ) => {
     const deadline = Date.now() + within;
     for (;;) {
       if (await ready()) return;
-      if (Date.now() > deadline) throw new Error(`waited ${within}ms for ${what}`);
+      if (Date.now() > deadline)
+        throw new Error(
+          `waited ${within}ms for ${what}${seen ? ` -- saw ${seen()}` : ""}`,
+        );
       await wait(100);
     }
   };
@@ -229,6 +236,158 @@
           <li>{line}</li>
         {/each}
       </ul>
+    </div>
+  {/snippet}
+</Sweater>
+
+<script lang="ts" module>
+  import {
+    agree,
+    announce,
+    awaiting,
+    browser,
+    other,
+    playing,
+    step,
+  } from "./harness/collaboration";
+</script>
+
+<Sweater
+  name="two people typing into one file lose nothing between them"
+  body={async (harness: any) => {
+    /**
+     * The claim collaboration has to make, put under load: everything either
+     * person typed is in the file at the end.
+     *
+     * Each round both append a line only they write, so a lost edit is a
+     * missing line rather than a subtle difference somebody has to squint at
+     * -- and the CRDT is what has to make both survive, since neither client
+     * ever sees the other's line before writing its own.
+     *
+     * The network is taken away from one of them as they work, because that
+     * is when merging is actually hard: an edit made while detached arrives
+     * after edits that were made later.
+     */
+    const pocket: Pocket = harness.set(new Pocket());
+    pocket.who = browser();
+
+    const ROUNDS = 12;
+    const id = await agree("soak-pair", `pair-${Date.now()}`);
+    const workspaceId = await agree(
+      "soak-pair-workspace",
+      await project("ada@example.com"),
+    );
+
+    const client = await Collaborator.opened(me(), workspaceId);
+    harness.onAbort(() => client.dispose());
+
+    /** Ada makes the file; Grace waits to be told which it is. */
+    const key = step(id, "pair", "entry");
+    let entry: string;
+    if (playing("ada")) {
+      const made = client.workspace.create("pair.py", "start\n");
+      await made.settled;
+      entry = made.entry;
+      await announce(key, entry);
+    } else {
+      entry = await awaiting(key);
+    }
+    await until(
+      "the file to arrive",
+      async () => client.workspace.entries().has(entry),
+      30_000,
+    );
+
+    await client.open(entry);
+    await until("the room to carry the file", () =>
+      client.text(entry).includes("start"),
+    );
+
+    const mine = playing("ada") ? "ada" : "grace";
+    for (let round = 0; round < ROUNDS; round += 1) {
+      /**
+       * Appended to what THIS client currently sees, which is the honest
+       * thing an editor does -- neither of them waits to be told what the
+       * other just typed.
+       */
+      /**
+       * Zero-padded so no marker is a prefix of another: counting
+       * occurrences of "ada 1" would also count "ada 10".
+       */
+      client.type(
+        entry,
+        `${client.text(entry)}${mine}-${String(round).padStart(2, "0")}\n`,
+      );
+
+      /** One of them loses the room for a round, alternately. */
+      const detaching = round % 4 === (playing("ada") ? 1 : 3);
+      if (detaching) client.goOffline(entry);
+
+      await announce(step(id, "pair", `typed-${round}-${mine}`));
+      await awaiting(step(id, "pair", `typed-${round}-${playing("ada") ? "grace" : "ada"}`));
+
+      if (detaching) await client.comeBack(entry);
+
+      /** Ada stores on even rounds, Grace on odd ones. */
+      if (playing("ada") === (round % 2 === 0)) {
+        await until("the room to speak", () => client.speaks(entry), 30_000);
+        const stored = await client.store(entry);
+        if (stored.held) pocket.note = `round ${round} kept: ${stored.why}`;
+      }
+      pocket.note = `round ${round} done`;
+    }
+
+    /** Everybody back, and everything shared. */
+    await announce(step(id, "pair", "typed-everything"));
+    await awaiting(step(id, "pair", "typed-everything"));
+
+    const wanted: string[] = [];
+    for (let round = 0; round < ROUNDS; round += 1)
+      wanted.push(
+        `ada-${String(round).padStart(2, "0")}`,
+        `grace-${String(round).padStart(2, "0")}`,
+      );
+
+    await until(
+      "every line either of them typed to be in this document",
+      () => wanted.every((line) => client.text(entry).includes(line)),
+      60_000,
+      () =>
+        `missing ${wanted.filter((line) => !client.text(entry).includes(line)).join(", ")}`,
+    );
+
+    /** And once it is stored, the FILE says all of it too. */
+    await until("the room to speak", () => client.speaks(entry), 30_000);
+    const stored = await client.store(entry);
+    if (stored.held) throw new Error(`would not store: ${stored.why}`);
+    await announce(step(id, "pair", `stored-${mine}`));
+    await awaiting(step(id, "pair", `stored-${playing("ada") ? "grace" : "ada"}`));
+
+    await until(
+      "the file to hold every line",
+      async () => {
+        const held = await client.reads(entry);
+        return wanted.every((line) => held.includes(line));
+      },
+      60_000,
+    );
+
+    /** Each line exactly once: merging twice is as bad as losing one. */
+    const held = await client.reads(entry);
+    for (const line of wanted)
+      harness.expect(held.split(line).length - 1).toBe(1);
+
+    pocket.text = held.split("\n").slice(0, 6).join("\n");
+    pocket.verdict = `${wanted.length} lines, all present, none doubled`;
+    await client.take(entry);
+    await client.rebuildable();
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <div class="p-3 font-mono text-xs">
+      <p><b>{pocket.who}</b> — {pocket.note}</p>
+      <p>{pocket.verdict}</p>
+      <pre>{pocket.text}</pre>
     </div>
   {/snippet}
 </Sweater>
