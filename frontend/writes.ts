@@ -202,10 +202,27 @@ export const pump = (wiring: Wiring): Pump => {
       /**
        * Row first, bytes second, and no `await` between the check and the
        * capture. Bytes with no row are work that is gone unnoticed; a row
-       * with no bytes is work that is gone and says so.
+       * with no bytes is work that is gone and SAYS so, which `presenting`
+       * can report and drop.
+       *
+       * That is the right order for a tab that dies, and the wrong thing to
+       * leave behind when the store simply REFUSES. This row is the entry's
+       * chain tail, so the next write diffs against it, cannot read it, and
+       * throws -- and so does every write to that file after it, for the life
+       * of the page. Saying "the work is gone" is not the same as being right
+       * to leave a poisoned tail behind, so the row comes back with it.
        */
-      queue.capture({ ...request, offset: offset() }, content, basis);
-      await bytes.put(held, content);
+      const captured = queue.capture(
+        { ...request, offset: offset() },
+        content,
+        basis,
+      );
+      try {
+        await bytes.put(held, content);
+      } catch (reason) {
+        released(queue.evict([captured.request.transaction]));
+        throw reason;
+      }
       return;
     }
   };
@@ -227,11 +244,26 @@ export const pump = (wiring: Wiring): Pump => {
       const text = await textOf(item, queue, bytes);
       body = { type: "text", content: text };
       if (item.basis !== undefined) {
-        /** Row first here too, for the same reason it is first everywhere. */
+        /**
+         * BYTES FIRST HERE, and the asymmetry with `chainedIn` is the point.
+         *
+         * There the row is the only record that the user asked for anything,
+         * so it goes first. Here the row already exists and is already
+         * readable -- as a delta against the write in front of it -- so
+         * nothing is recorded only in the bytes at any moment, and the order
+         * is chosen by what a refusal costs instead.
+         *
+         * `promote` re-points the row at whole text AND deletes the basis, so
+         * running it first and then failing to store destroys both readings
+         * of a write that was valid and durable a moment earlier. Run last it
+         * cannot fail, and until it runs the delta is still the truth.
+         *
+         * The cost is an orphaned payload if this dies in between: a leak,
+         * not a loss. See TODO.md.
+         */
         const whole = await digestOf(text);
-        const freed = queue.promote(request.transaction, whole);
         await bytes.put(text, whole);
-        released(freed);
+        released(queue.promote(request.transaction, whole));
       }
     }
 
@@ -283,9 +315,32 @@ export const pump = (wiring: Wiring): Pump => {
         const transaction = item.request.transaction;
         sent.add(transaction);
 
+        const abandoned = (error: unknown) => {
+          sent.delete(transaction);
+          failed.get(transaction)?.(error);
+          owed.delete(transaction);
+          failed.delete(transaction);
+        };
+
+        let outgoing: Submitted;
+        try {
+          outgoing = await materialised(item, chain[at - 1]);
+        } catch (error) {
+          /**
+           * Never left this machine, and nothing about the item changed:
+           * `materialised` writes the whole text down before it re-points the
+           * row at it, so a store that refused leaves the delta that was
+           * already there. Still queued, still readable, tried again on the
+           * next drain. This entry stops here so nothing behind it overtakes
+           * it.
+           */
+          abandoned(error);
+          return;
+        }
+
         let answer: Response;
         try {
-          answer = await wiring.send(await materialised(item, chain[at - 1]));
+          answer = await wiring.send(outgoing);
         } catch (error) {
           /**
            * Nothing was answered, so nothing is known -- least of all whether
@@ -293,10 +348,7 @@ export const pump = (wiring: Wiring): Pump => {
            * and this entry stops here so that what is behind it cannot
            * overtake it.
            */
-          sent.delete(transaction);
-          failed.get(transaction)?.(error);
-          owed.delete(transaction);
-          failed.delete(transaction);
+          abandoned(error);
           return;
         }
 
@@ -353,7 +405,11 @@ export const pump = (wiring: Wiring): Pump => {
           wiring.announced();
           void drain(entry);
         } catch (error) {
-          /** Never queued, so there is nothing to take back -- only to say. */
+          /**
+           * Nothing is queued. Either the capture never happened, or the
+           * bytes it named could not be stored and `chainedIn` took the row
+           * back with them -- so there is nothing here to undo, only to say.
+           */
           failed.get(request.transaction)?.(error);
           owed.delete(request.transaction);
           failed.delete(request.transaction);
