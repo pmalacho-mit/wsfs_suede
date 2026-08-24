@@ -1138,6 +1138,64 @@
 </Sweater>
 
 <Sweater
+  name="typing into a file that is closed before its room opens is not lost"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("hasty.md", "before").settled;
+    const { root } = await harness.definition("root");
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "hasty.md"),
+      () => drawn(root).join(" | "),
+    );
+
+    await clickRow(rowFor(root, "hasty.md")!);
+    await until(
+      "the editor handed itself over",
+      () => pocket.editor !== undefined,
+    );
+    pocket.editor!.focus();
+    await until(
+      "the editor opened on the file",
+      () => pocket.editor!.getModel()?.getValue() === "before",
+      () => JSON.stringify(pocket.editor!.getModel()?.getValue()),
+    );
+
+    // Typed and shut, which is what somebody does who came to change one
+    // character. The room may or may not have finished opening by now --
+    // that is the point, and either way the typing has to survive.
+    typeInto(pocket.editor!, " after");
+    closeTab(tabs(root).find((tab) => tab.textContent?.includes("hasty.md"))!);
+
+    await until(
+      "the typing to reach the server",
+      () => texted(other.workspace.holding("hasty.md")) === "before after",
+      () => JSON.stringify(other.workspace.holding("hasty.md")),
+      20_000,
+    );
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={live}
+          entering={liveRoom.entering}
+          onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
+        />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
   name="a snapshot resolves what the user has not stored, in one pass"
   lazy
   body={async (harness) => {

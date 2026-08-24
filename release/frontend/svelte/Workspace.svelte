@@ -365,8 +365,42 @@
 
     #disposed = false;
 
+    /**
+     * Put away anything typed here that is not anywhere else yet.
+     *
+     * Closing a tab is not a decision to throw work away, and this is the one
+     * moment where it was: what a person types lives in the editor's model
+     * until a document holds it, and the model goes with the panel.
+     *
+     * WHEN A DOCUMENT HOLDS IT this is one ordinary store -- the text is
+     * already in the shared document, so there is nothing to carry and no
+     * question of clobbering anybody.
+     *
+     * WHEN NONE DOES YET, which is the fast case -- opened, typed and shut
+     * inside the second or so a room takes to open -- the text is in the
+     * model and nowhere at all. It cannot go by the ordinary write, because a
+     * document is on its way and writing around one is refused. So it goes
+     * the way the document itself would have sent it: this panel is, at this
+     * instant, the only thing holding the file's text, which is exactly what
+     * `shares` is for.
+     *
+     * Not awaited, because a closing panel has nothing to wait with. It does
+     * not need to: the transaction is in the durable outbox before this
+     * returns, and the outbox is what promises delivery.
+     */
+    #putAwayWhatWasTyped() {
+      if (!this.dirty) return;
+      if (this.shared !== undefined) return void this.store();
+      const typed = this.editor?.getModel()?.getValue();
+      if (typed === undefined || typed === this.initialContent) return;
+      void this.workspace
+        .shares(this.id, typed)
+        .settled.catch(() => undefined);
+    }
+
     dispose() {
       if (this.#disposed) return;
+      this.#putAwayWhatWasTyped();
       this.#disposed = true;
       this.cleanup();
       this.userEdits?.dispose();
