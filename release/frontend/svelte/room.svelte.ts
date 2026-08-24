@@ -503,7 +503,23 @@ export class Room {
    */
   async #carriedByTheHost(): Promise<void> {
     if (this.replaced !== undefined) return;
-    await this.held.host.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
+    try {
+      await this.held.host.handOver(this.entry, Y.encodeStateAsUpdate(this.doc));
+    } catch {
+      /**
+       * BEST EFFORT, and nothing is lost when it fails.
+       *
+       * This is the route round a collaboration server this client cannot
+       * reach. When the HOST cannot be reached either there is no route left
+       * -- and the work is already where it needs to be: in the document, and
+       * in the draft that was just kept. It goes when a connection comes
+       * back, by whichever road returns first.
+       *
+       * Uncaught, this was an unhandled rejection every time a client lost
+       * both at once, which is not a rare pairing: they are usually the same
+       * network.
+       */
+    }
   }
 
   /**

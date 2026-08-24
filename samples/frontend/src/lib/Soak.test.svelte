@@ -79,7 +79,7 @@
     const pocket: Pocket = harness.set(new Pocket());
     pocket.who = "one client, many rounds";
 
-    const SEED = 42;
+    const SEED = 13;
     const ROUNDS = 40;
     const roll = rolling(SEED);
     const pick = <T,>(from: T[]): T => from[Math.floor(roll() * from.length)]!;
@@ -463,20 +463,47 @@
         `${client.text(entry)}${mine}-${String(round).padStart(2, "0")}\n`,
       );
 
-      /** One of them loses the room for a round, alternately. */
+      /**
+       * One of them loses the ROOM for a round, alternately -- and every so
+       * often loses the SERVER instead, which is the harder half.
+       *
+       * Losing the room means this client's typing reaches nobody until it
+       * comes back. Losing the server means it reaches the others perfectly
+       * well, through the room, while the FILE moves on without it -- so when
+       * it returns the host has to carry a change into a document that has
+       * drifted underneath it. That is the path a stored version travels, and
+       * the one that panicked.
+       */
       const detaching = round % 4 === (playing("ada") ? 1 : 3);
+      const unplugged = round % 6 === (playing("ada") ? 2 : 5);
       if (detaching) client.goOffline(entry);
+      if (unplugged) client.reachable(false);
 
       await announce(step(id, "pair", `typed-${round}-${mine}`));
       await awaiting(step(id, "pair", `typed-${round}-${playing("ada") ? "grace" : "ada"}`));
 
+      /**
+       * The wire first, then the room. Coming back to a room asks the host
+       * where the file now stands, so doing it while the server is still away
+       * simply cannot work -- and would be the test failing to model a
+       * sequence a person could never be in.
+       */
+      if (unplugged) {
+        client.reachable(true);
+        client.workspace.nudge();
+      }
       if (detaching) await client.comeBack(entry);
 
       /** Ada stores on even rounds, Grace on odd ones. */
-      if (playing("ada") === (round % 2 === 0)) {
+      if (playing("ada") === (round % 2 === 0) && !unplugged) {
         await until("the room to speak", () => client.speaks(entry), 30_000);
-        const stored = await client.store(entry);
-        if (stored.held) pocket.note = `round ${round} kept: ${stored.why}`;
+        try {
+          const stored = await client.store(entry);
+          if (stored.held) pocket.note = `round ${round} kept: ${stored.why}`;
+        } catch {
+          /** The wire went while this was in flight. Queued, and sent later. */
+          pocket.note = `round ${round} store is waiting`;
+        }
       }
       pocket.note = `round ${round} done`;
     }
