@@ -543,6 +543,8 @@
   import Assistant from "./assistant/Assistant.svelte";
   import { Conversation } from "./assistant/conversation.svelte";
   import { Nudge } from "./assistant/nudge";
+  import { goalOf } from "./assistant/goals";
+  import { settingsFrom, Stuck, type Episode } from "./assistant/stuck";
   import type { Outcome } from "./Runner.svelte";
   import { WithEvents } from "../../../wsfs_suede.with-events-suede";
 
@@ -553,6 +555,7 @@
     entering,
     onEditor,
     onSnapshot,
+    onStuck,
   }: {
     model: Model;
     workspace: Workspace;
@@ -574,11 +577,28 @@
     /** Handed the snapshot taker once there is one, for anything outside
      *  this component that needs to describe what the user is looking at. */
     onSnapshot?: (take: (options?: Taking) => Snapshot) => void;
+    /**
+     * Every stuck episode, whatever became of it.
+     *
+     * Handed out rather than sent anywhere, because where it goes is a host's
+     * decision and not this component's -- and because the ones that were
+     * randomized into silence are the half a study cannot do without.
+     */
+    onStuck?: (episode: Episode) => void;
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
 
   const conversation = new Conversation();
+
+  /**
+   * Watching for somebody who is stuck.
+   *
+   * Built here rather than inside `onAPI` so it exists for the whole life of
+   * the panel -- a person can be idle before the dock has finished laying
+   * itself out, and that minute counts.
+   */
+  let stuck = $state<Stuck | undefined>(undefined);
   const nudge = new Nudge();
 
   /**
@@ -588,6 +608,29 @@
    */
   const stuckOn = ({ because }: Extract<Outcome, { ok: false }>) =>
     `My last run ended in an error:\n\n\`\`\`\n${because}\n\`\`\`\n\nCan you help me work out why?`;
+
+  /**
+   * How long between passes over the time-based rules.
+   *
+   * Short relative to the shortest rule, so "three minutes idle" is three
+   * minutes rather than three minutes and however long a tick happens to be.
+   */
+  const TICK = 5_000;
+
+  /**
+   * What the person is asked on their behalf, given why they look stuck.
+   *
+   * Phrased as THEM asking, because that is what the panel will show and what
+   * the tutor will answer -- and because a question that opens by telling
+   * somebody a system decided they were stuck is a worse question.
+   */
+  const becauseOf = (episode: Episode) => {
+    if (episode.rule === "the same error twice")
+      return `I keep getting the same error -- ${episode.detail}. Can you help me work out why?`;
+    if (episode.rule === "no progress")
+      return "I think I am stuck on this. Can you point me at what to try next?";
+    return "I am not sure what to do next here. Can you help me get started?";
+  };
 
   const snippets = { explorer, dock, assistant };
   const tabs = { file: FileView };
@@ -720,6 +763,12 @@
            * of this setup runs.
            */
           ask: (text: string) => void askTheTutor(text),
+          /**
+           * The chat box counts as working too. Idleness is about a PERSON,
+           * not about a pane, so somebody composing a long question to the
+           * tutor is not idle -- and used to be told so after three minutes.
+           */
+          typed: () => stuck?.acted(),
         },
         {
           size: 340,
@@ -846,6 +895,37 @@
       workspace,
       (entry) => workspace.index().of(entry) ?? entry,
     );
+
+    /**
+     * The stuck watcher, and the one tick that drives its time-based rules.
+     *
+     * A single interval rather than a timer per rule: the rules are questions
+     * about elapsed time, so asking them together on a coarse tick is both
+     * simpler and cheaper than three timers being reset by every keystroke.
+     * The tick is short relative to the shortest rule so that "three minutes"
+     * means three minutes and not three-and-a-tick.
+     */
+    const held = new Stuck({
+      settings: settingsFrom(
+        typeof window === "undefined" ? "" : window.location.search,
+      ),
+      offer: (episode, forMs) =>
+        nudge.offer(() => void askTheTutor(becauseOf(episode)), forMs),
+      record: (episode) => onStuck?.(episode),
+      looking: () => {
+        const open = snapshot().visible.find((one) => one.type !== "folder");
+        if (open === undefined) return undefined;
+        const showing = openFiles.get(open.entry)?.sharedText;
+        return showing === undefined
+          ? undefined
+          : { path: open.path, text: showing.source };
+      },
+      goalFor: goalOf,
+      judging: (asking) => workspace.tutor.progressing(asking),
+    });
+    stuck = held;
+    const ticking = setInterval(() => held.check(), TICK);
+    cleanup.add(() => (held.stop(), clearInterval(ticking)));
     onSnapshot?.(snapshot);
 
     const kernelPool = new WarmPool<Kernel>({
@@ -857,12 +937,20 @@
     });
 
     /**
-     * A run that ended badly is the only reason to offer help, and typing
-     * again is the only reason needed to withdraw it.
+     * A run is one of the things `Stuck` watches, and the only one that can
+     * fire the repeated-error rule.
+     *
+     * NOT AN OFFER IN ITSELF any more. A failing run used to prompt every
+     * time, which is both more often than the protocol allows and a worse
+     * signal than the protocol asks for: one error is somebody working, and
+     * the SAME error twice is somebody stuck. Whether anything is said is
+     * decided in one place now -- see `stuck.ts`.
      */
     const finished = (outcome: Outcome) => {
-      if (outcome.ok) return nudge.withdraw();
-      nudge.offer(() => void askTheTutor(stuckOn(outcome)));
+      if (outcome.ok) nudge.withdraw();
+      stuck?.ran(
+        outcome.ok ? { ok: true } : { ok: false, because: outcome.because },
+      );
     };
 
     /**
@@ -957,7 +1045,11 @@
 
     const editorProps: EditorHooks = {
       onEditor,
-      onUserEdit: () => nudge.withdraw(),
+      /**
+       * Typing is the clearest evidence somebody is not stuck: it withdraws
+       * an offer that is already up, and it is what the idle rule counts.
+       */
+      onUserEdit: () => (nudge.withdraw(), held.acted()),
     };
 
     /**
@@ -1086,19 +1178,21 @@
 {/snippet}
 
 {#snippet assistant({
-  params: { snapshot, conversation, ask },
+  params: { snapshot, conversation, ask, typed },
 }: PanelProps<
   "grid",
   {
     snapshot: () => Snapshot;
     conversation: Conversation;
     ask: (text: string) => void;
+    typed: () => void;
   }
 >)}
   <div class="h-full min-h-0 border-l" data-region="assistant">
     <Assistant
       {conversation}
       onAsk={ask}
+      oninput={typed}
       attached={snapshot().visible.map(({ path, executions, entry }) => ({
         entry,
         path,

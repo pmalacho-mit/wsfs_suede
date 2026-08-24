@@ -16,6 +16,8 @@ import {
   type Asked,
   type Asking,
   type Body,
+  type Judged,
+  type Judging,
   type Id,
   type Metadata,
   type Response,
@@ -175,6 +177,13 @@ export type Workspace = {
     ask: (asking: Omit<Asking, "message"> & { message?: Id }) => Promise<Asked>;
     hear: (token: string) => AsyncIterable<Answering>;
     said: (asking: { before?: string; limit?: number }) => Promise<Transcript>;
+    /**
+     * Whether a program has moved toward its goal.
+     *
+     * Here with the tutor because it is the same model answering, and NOT a
+     * conversation: no transcript goes in and none comes out. See the route.
+     */
+    progressing: (asking: Judging) => Promise<Judged>;
   };
   /**
    * Record that the workspace looked like this.
@@ -635,6 +644,7 @@ export const connect = (options: Options): Workspace => {
         }),
       hear: (token) => transport.hear(workspace, token),
       said: (asking) => transport.conversation(workspace, asking),
+      progressing: (asking) => transport.progress(workspace, asking),
     },
 
     room: {

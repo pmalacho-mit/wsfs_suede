@@ -212,6 +212,7 @@ export const switchable = (
     ),
     ask: (workspace, asking) => (reach(), wire.ask(workspace, asking)),
     hear: (workspace, token) => wire.hear(workspace, token),
+    progress: (workspace, asking) => (reach(), wire.progress(workspace, asking)),
     conversation: (workspace, asking) => (
       reach(),
       wire.conversation(workspace, asking)

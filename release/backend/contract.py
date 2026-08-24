@@ -779,3 +779,16 @@ class Answering(BaseModel):
     delta: str = ""
     text: str = ""
     failure: str | None = None
+
+
+class Judging(BaseModel):
+    """Two versions of one program, and what it was meant to do."""
+
+    goal: str = Field(min_length=1, max_length=8_000)
+    before: str = Field(default="", max_length=200_000)
+    after: str = Field(default="", max_length=200_000)
+
+
+class Judged(BaseModel):
+    progressing: bool
+    why: str = ""

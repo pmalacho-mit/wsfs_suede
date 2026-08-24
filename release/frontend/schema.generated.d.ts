@@ -321,6 +321,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Progress
+         * @description Whether a student has got anywhere since a few minutes ago.
+         *
+         *     NOT A QUESTION, and not part of anybody's conversation: no transcript
+         *     goes in and no turn comes out. It is one measurement, asked on a timer
+         *     by the client that is watching somebody work -- which is why it does
+         *     not stream, does not take a message id, and is not recorded. What is
+         *     recorded is the episode, and only if the answer is no.
+         *
+         *     Answered synchronously because the caller has nobody waiting on it.
+         */
+        post: operations["progress_wsfs_workspaces__workspace_id__progress_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}": {
         parameters: {
             query?: never;
@@ -704,6 +732,34 @@ export interface components {
             applied: string[];
             /** Rejected */
             rejected: components["schemas"]["Rejection"][];
+        };
+        /** Judged */
+        Judged: {
+            /** Progressing */
+            progressing: boolean;
+            /**
+             * Why
+             * @default
+             */
+            why: string;
+        };
+        /**
+         * Judging
+         * @description Two versions of one program, and what it was meant to do.
+         */
+        Judging: {
+            /** Goal */
+            goal: string;
+            /**
+             * Before
+             * @default
+             */
+            before: string;
+            /**
+             * After
+             * @default
+             */
+            after: string;
         };
         /**
          * Kind
@@ -1785,6 +1841,41 @@ export interface operations {
                 content: {
                     "text/event-stream": unknown;
                     "application/json": components["schemas"]["Answering"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    progress_wsfs_workspaces__workspace_id__progress_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Judging"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Judged"];
                 };
             };
             /** @description Validation Error */

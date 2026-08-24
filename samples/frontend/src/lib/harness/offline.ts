@@ -72,6 +72,7 @@ export const offline = (layout: Layout): Transport => {
     },
     hear: async function* () {},
     conversation: async () => ({ turns: [], more: false }),
+    progress: async () => ({ progressing: true, why: "" }),
     /** Nothing was ever kept here, so there is nothing to say has reached anybody. */
     cleared: async () => {},
     follow: () => ({ close: () => {} }),
