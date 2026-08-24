@@ -466,15 +466,38 @@
    * the workspace has been asked for it. `materialized` covers that by asking
    * the TREE what is already drawn rather than asking the mapping.
    */
+  /**
+   * Fill this file's room, once the file is one the server has heard of.
+   *
+   * Warming names an entry the host has to look up, and a create is an id and
+   * an intention until it is accepted -- so asking straight away asks about a
+   * file that does not exist yet, and is answered as such.
+   *
+   * NOTHING DEPENDS ON IT. Warming early only makes opening the file instant
+   * later; a create that is refused, or a host that cannot be reached, costs
+   * whoever opens it the second they would have waited anyway. So this is the
+   * one call here that is allowed to fail quietly -- but not to fail loudly,
+   * which is what it did when it was left floating.
+   */
+  const warmOnceMade = async (submission: Submitting & { entry: Id }) => {
+    try {
+      if ((await submission.settled).rejected) return;
+      await warmRoom(workspace, submission.entry);
+    } catch {
+      /* Opening the file is slower, and only the first time. */
+    }
+  };
+
   const add = (path: string) => {
     const isFolder = path.endsWith("/");
-    const { entry } = submissions.trackUntilSettled(
+    const submission = submissions.trackUntilSettled(
       isFolder ? workspace.folder(path) : workspace.create(path, ""),
     );
+    const { entry } = submission;
     model.performAndDeferAnyAnnouncements(() => mapping.set(entry, path));
     if (!isFolder) {
       awaiting.add(entry);
-      warmRoom(workspace, entry);
+      void warmOnceMade(submission);
     }
   };
 
