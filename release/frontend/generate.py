@@ -67,7 +67,7 @@ def _stub() -> "FastAPI":
                 liveblocks=cast(ICollaboration, _absent),
             ),
             authorize=never_asked,
-        )
+        ).router
     )
     return app
 
