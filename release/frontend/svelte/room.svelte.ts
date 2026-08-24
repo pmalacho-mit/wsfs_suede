@@ -792,7 +792,17 @@ export class Rooms {
   async dispose(): Promise<void> {
     this.#gone = true;
     this.#watching();
-    await Promise.all([...this.held.values()].map((room) => room.dispose()));
+    /**
+     * ALL of them, whatever any one of them does.
+     *
+     * Each room's last act is to flush what it is holding, and `Promise.all`
+     * would abandon every flush after the first rejection -- so one room with
+     * a store that had already gone would take the others' unsaved work with
+     * it. Settled rather than all: put every one down, then carry on.
+     */
+    await Promise.allSettled(
+      [...this.held.values()].map((room) => room.dispose()),
+    );
     this.held.clear();
   }
 }

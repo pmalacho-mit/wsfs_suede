@@ -102,10 +102,31 @@
     let believed = "line 0\n";
     const accepted: string[] = [made.transaction];
     const acted: Act[] = [];
+    /** Work that reached nobody, and must still be recoverable. */
+    const drafted: { transaction: string; says: string }[] = [];
 
-    /** Ordinary typing, saved the way the editor saves. */
+    /**
+     * Whether a document speaks for this file right now.
+     *
+     * Once one does, text reaches the file THROUGH it -- rule one -- and
+     * writing around it is refused. A session moves in and out of that state
+     * as panels open and close, so this soak has to as well.
+     */
+    const opened = () => client.rooms.get(entry) !== undefined;
+
+    /** Ordinary typing, saved the way whatever is holding the file saves. */
     const typeAndSave = async (at: number): Promise<Act> => {
       const next = `${believed}line ${at}\n`;
+      if (opened()) {
+        client.type(entry, next);
+        await until("the room to speak", () => client.speaks(entry), 30_000);
+        const stored = await client.store(entry);
+        if (stored.held)
+          return { what: `typed line ${at}, kept: ${stored.why}` };
+        believed = next;
+        accepted.push(stored.transaction);
+        return { what: `typed line ${at} into the document`, said: next };
+      }
       const written = client.workspace.write(path, next);
       try {
         const answer = await written.settled;
@@ -115,14 +136,22 @@
           return { what: `typed line ${at}`, said: next };
         }
         return { what: `typed line ${at}, refused: ${answer.reason}` };
-      } catch (reason) {
+      } catch {
         /** The wire was down. Queued, and settled later or not at all. */
         return { what: `typed line ${at}, unsent` };
       }
     };
 
+    /** Put the document down, which a person does by closing the tab. */
+    const closeFile = async (): Promise<Act> => {
+      if (!opened()) return { what: "nothing open to close" };
+      await client.close(entry);
+      return { what: "closed the file" };
+    };
+
     /** The server goes away and comes back while the person keeps working. */
     const offlineSpell = async (at: number): Promise<Act> => {
+      if (opened()) return { what: "a document holds this; not writing around it" };
       client.reachable(false);
       const next = `${believed}offline ${at}\n`;
       const written = client.workspace.write(path, next);
@@ -153,6 +182,49 @@
       return { what: "reloaded the tab" };
     };
 
+    /**
+     * Two writes issued without waiting for the first.
+     *
+     * What somebody typing quickly actually does, and the case the write pump
+     * exists for: both read the same token, so the second would lose a
+     * compare-and-swap against the first if it were not chained behind it.
+     */
+    const race = async (at: number): Promise<Act> => {
+      if (opened()) return { what: "a document holds this; not racing around it" };
+      const first = `${believed}race ${at}a\n`;
+      const second = `${first}race ${at}b\n`;
+      const one = client.workspace.write(path, first);
+      const two = client.workspace.write(path, second);
+      const answers = await Promise.allSettled([one.settled, two.settled]);
+      const landed = answers.every(
+        (held) => held.status === "fulfilled" && !held.value.rejected,
+      );
+      if (!landed) return { what: `raced ${at}, one did not land` };
+      believed = second;
+      accepted.push(one.transaction, two.transaction);
+      return { what: `raced two writes ${at}`, said: second };
+    };
+
+    /**
+     * Typing with the room gone, which is what makes a draft.
+     *
+     * The work reached nobody, so it must not become the file -- and must
+     * still be recoverable, which is the entire reason drafts exist.
+     */
+    const draftSpell = async (at: number): Promise<Act> => {
+      await client.open(entry);
+      await until("the room to carry the file", () =>
+        client.text(entry).includes("line 0") || client.text(entry).length > 0,
+      );
+      client.goOffline(entry);
+      client.type(entry, `${client.text(entry)}draft ${at}\n`);
+      const kept = await client.store(entry);
+      if (!kept.held) return { what: `draft ${at} was not held` };
+      drafted.push({ transaction: kept.draft!, says: `draft ${at}` });
+      await client.comeBack(entry);
+      return { what: `kept draft ${at}` };
+    };
+
     /** Somebody asks for an older version back. */
     const restore = async (): Promise<Act> => {
       const { versions } = await client.workspace.history(entry, { limit: 10 });
@@ -174,15 +246,31 @@
     };
 
     for (let round = 0; round < ROUNDS; round += 1) {
-      const act = pick(["type", "type", "type", "offline", "reload", "restore"]);
+      const act = pick([
+        "type",
+        "type",
+        "type",
+        "race",
+        "offline",
+        "draft",
+        "reload",
+        "restore",
+        "close",
+      ]);
       const done =
         act === "type"
           ? await typeAndSave(round)
-          : act === "offline"
-            ? await offlineSpell(round)
-            : act === "reload"
-              ? await reload()
-              : await restore();
+          : act === "race"
+            ? await race(round)
+            : act === "offline"
+              ? await offlineSpell(round)
+              : act === "draft"
+                ? await draftSpell(round)
+                : act === "reload"
+                  ? await reload()
+                  : act === "close"
+                    ? await closeFile()
+                    : await restore();
       acted.push(done);
       pocket.rounds = round + 1;
       pocket.log = [...acted.slice(-6).map((one) => one.what)];
@@ -218,13 +306,29 @@
     harness.expect(client.workspace.unsettled(accepted)).toEqual([]);
 
     /**
-     * 3. And the server can still hand back what this client was looking at,
+     * 3. Every draft is still readable, and says what was typed into it.
+     *
+     * A draft is work that reached NOBODY -- it is the only kind the server
+     * cannot reconstruct from anything else, so "recorded and recoverable" is
+     * the whole of what it promises.
+     */
+    for (const one of drafted) {
+      const held = await client.workspace.at(entry, one.transaction);
+      harness.expect(held.kind).toBe("text");
+      harness.expect(held.kind === "text" && held.text).toContain(one.says);
+    }
+    harness.expect(client.workspace.unsettled(drafted.map((one) => one.transaction))).toEqual([]);
+
+    /**
+     * 4. And the server can still hand back what this client was looking at,
      * which is the question the whole design exists to answer.
      */
     await client.take(entry);
     await client.rebuildable();
 
-    pocket.verdict = `${ROUNDS} rounds, ${accepted.length} accepted, nothing missing`;
+    pocket.verdict =
+      `${ROUNDS} rounds, ${accepted.length} accepted, ` +
+      `${drafted.length} drafts all readable, nothing missing`;
   }}
 >
   {#snippet vest(pocket: Pocket)}

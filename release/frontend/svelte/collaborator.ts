@@ -90,8 +90,26 @@ export const persisting: Persist = (entry, doc) => {
   return {
     loaded: kept.whenSynced.then(() => undefined),
     stop: async () => {
-      await storeState(kept, true);
-      await kept.destroy();
+      /**
+       * The flush is best effort, and it has to be.
+       *
+       * A store that is already closing -- a second teardown, a browser
+       * tearing the page down around this -- throws from `storeState`, and
+       * that throw used to travel: `Rooms.dispose` waits on all its rooms
+       * together, so one room whose connection had gone abandoned the flush
+       * of every OTHER room beside it. Losing one room's last update is bad;
+       * losing everybody's because of it is the thing worth preventing.
+       */
+      try {
+        await storeState(kept, true);
+      } catch {
+        /** Nothing to do about it, and nothing worth stopping for. */
+      }
+      try {
+        await kept.destroy();
+      } catch {
+        /** Already gone, which is where this was trying to get to. */
+      }
     },
   };
 };
