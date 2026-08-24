@@ -7,6 +7,7 @@ test told it to, which is the whole reason that seam exists.
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Sequence
 
@@ -21,9 +22,13 @@ from wsfs_suede.release.backend.tutor import ITutor, Said, Tutoring
 class Scripted(ITutor):
     """Says what it was told to, one delta at a time, and remembers the ask."""
 
-    def __init__(self, *deltas: str, fails: str | None = None) -> None:
+    def __init__(
+        self, *deltas: str, fails: str | None = None, pause: float = 0.0
+    ) -> None:
         self.deltas = deltas or ("hello",)
         self.fails = fails
+        self.pause = pause
+        """Seconds between deltas, for a test about WHEN they arrive."""
         self.asked: list[Sequence[Said]] = []
 
     @property
@@ -33,6 +38,8 @@ class Scripted(ITutor):
     async def answer(self, said: Sequence[Said]) -> AsyncIterator[str]:
         self.asked.append(list(said))
         for delta in self.deltas:
+            if self.pause:
+                await asyncio.sleep(self.pause)
             yield delta
         if self.fails is not None:
             raise RuntimeError(self.fails)
@@ -433,3 +440,43 @@ async def test_an_answer_can_be_heard_twice(processes):
         first = await heard(api, asked["token"])
         second = await heard(api, asked["token"])
         assert first[-1]["text"] == second[-1]["text"] == "said once"
+
+
+async def test_the_answer_is_flushed_as_it_is_written(processes):
+    """A tutor is a conversation, so the first words have to arrive first.
+
+    The claim is about TIME, which is why this is not simply "three deltas
+    came out": a server that collected the whole answer and sent it at the end
+    would produce exactly the same three. So the tutor pauses between them and
+    this measures when each one lands -- the first must arrive while the last
+    is still being written.
+    """
+    pause = 0.3
+    async with tutored(processes, Scripted("one ", "two ", "three", pause=pause)) as api:
+        asked = await ask(api, text="say three things slowly")
+
+        arrivals: list[tuple[float, str]] = []
+        started = time.monotonic()
+        async with api.http.stream(
+            "GET",
+            f"/wsfs/workspaces/{api.workspace}/chat/stream",
+            params={"token": asked["token"]},
+            headers={"X-User-Email": api.user},
+            timeout=20.0,
+        ) as answer:
+            async for line in answer.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                said = json.loads(line[len("data: ") :])
+                arrivals.append((time.monotonic() - started, said["type"]))
+                if said["type"] == "ended":
+                    break
+
+    deltas = [at for at, kind in arrivals if kind == "delta"]
+    assert len(deltas) == 3, arrivals
+    ended = arrivals[-1][0]
+
+    """The first is out before the last was even produced."""
+    assert deltas[0] < ended - pause, f"first at {deltas[0]:.2f}s, ended {ended:.2f}s"
+    """And they are spread out rather than arriving together."""
+    assert deltas[-1] - deltas[0] > pause, arrivals

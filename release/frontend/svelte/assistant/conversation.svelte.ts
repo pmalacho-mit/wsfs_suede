@@ -30,6 +30,10 @@ export type Attachment = { entry: Id; path: string; executions: string[] };
 
 const PAGE = 10;
 
+/** How many goes a transcript read gets before the panel says it failed. */
+const TRIES = 3;
+const BACKOFF_MS = 400;
+
 /**
  * A turn's two halves, as the panel draws them.
  *
@@ -62,6 +66,18 @@ export class Conversation {
   /** True while a page of older turns is on its way. */
   reading = $state(false);
 
+  /**
+   * Why the transcript could not be read, if it could not be.
+   *
+   * SHOWN RATHER THAN SWALLOWED. This used to be a bare `catch {}`, on the
+   * reasoning that a panel with no history still works -- which is true and
+   * beside the point: the failure is indistinguishable from having never said
+   * anything, so a person whose conversation is right there on the server
+   * sees an empty panel and concludes it was lost. One failed read at load
+   * used to mean empty for the life of the tab.
+   */
+  failed = $state<string | undefined>(undefined);
+
   #workspace: Workspace | undefined;
   #named: (entry: string) => string = (entry) => entry;
   #oldest: string | undefined;
@@ -80,20 +96,40 @@ export class Conversation {
     void this.reload();
   }
 
-  /** The most recent turns, replacing whatever is shown. */
+  /**
+   * The most recent turns, replacing whatever is shown.
+   *
+   * TRIED MORE THAN ONCE. This runs as the workspace is opening, alongside
+   * everything else a page does on load, and one read losing that race left
+   * the panel empty with nothing to say and nothing that would ask again.
+   * Whatever is still wrong after a few goes is reported, and `failed` is
+   * what the panel offers a retry from.
+   */
   async reload() {
     const workspace = this.#workspace;
     if (workspace === undefined || this.reading) return;
     this.reading = true;
+    this.failed = undefined;
     try {
-      const said = await workspace.tutor.said({ limit: PAGE });
-      if (this.#gone) return;
-      this.turns = this.#drawn(said.turns);
-      this.more = said.more;
-      this.#oldest = said.turns.at(-1)?.at.accepted ?? undefined;
-    } catch {
-      /** A transcript that cannot be read is empty rather than broken: the
-       *  panel still works, and asking still records. */
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const said = await workspace.tutor.said({ limit: PAGE });
+          if (this.#gone) return;
+          this.turns = this.#drawn(said.turns);
+          this.more = said.more;
+          this.#oldest = said.turns.at(-1)?.at.accepted ?? undefined;
+          return;
+        } catch (reason) {
+          if (this.#gone) return;
+          if (attempt >= TRIES - 1) {
+            this.failed =
+              reason instanceof Error ? reason.message : String(reason);
+            return;
+          }
+          await new Promise((carry) => setTimeout(carry, BACKOFF_MS * (attempt + 1)));
+          if (this.#gone) return;
+        }
+      }
     } finally {
       this.reading = false;
     }
@@ -113,8 +149,9 @@ export class Conversation {
       this.turns = [...this.#drawn(said.turns), ...this.turns];
       this.more = said.more;
       this.#oldest = said.turns.at(-1)?.at.accepted ?? this.#oldest;
-    } catch {
-      /** Leave what is already shown, and let them try again. */
+    } catch (reason) {
+      /** Leave what is already shown, and say why there is no more of it. */
+      this.failed = reason instanceof Error ? reason.message : String(reason);
     } finally {
       this.reading = false;
     }

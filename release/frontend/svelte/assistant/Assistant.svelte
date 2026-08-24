@@ -86,6 +86,31 @@
 
   <Transcript class="min-h-0 min-w-0">
     <ConversationContent class="gap-6 p-3">
+      {#if conversation.failed}
+        <!--
+          An unreadable transcript must not look like an empty one. What is on
+          the server is still there; this says so, and offers to go again.
+        -->
+        <div
+          class="border-destructive/30 bg-destructive/10 flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+          data-region="transcript-failed"
+        >
+          <p class="text-destructive min-w-0 text-xs">
+            Your earlier conversation could not be loaded. It has not been
+            lost — {conversation.failed}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            class="shrink-0"
+            data-region="transcript-retry"
+            disabled={conversation.reading}
+            onclick={() => conversation.reload()}
+          >
+            {conversation.reading ? "Trying…" : "Try again"}
+          </Button>
+        </div>
+      {/if}
       {#if conversation.more}
         <!-- Seeing this is asking for the page before it; the button is for
              a browser that never fires the observer, and for somebody who

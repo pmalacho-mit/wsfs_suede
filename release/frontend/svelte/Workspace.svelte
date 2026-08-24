@@ -829,7 +829,23 @@
      * starting empty every time somebody opens the workspace. Entries are
      * named here because only this side knows where a file lives.
      */
-    conversation.attach(workspace, (entry) => index.of(entry) ?? entry);
+    /**
+     * Asked FRESH each time rather than closing over one index.
+     *
+     * `index` here used to name the local inside the snapshot builder, which
+     * is a different scope -- so this threw `index is not defined` the moment
+     * it was called, which is when a turn with a file attached to it is drawn.
+     * The throw was caught by the read around it, so the whole transcript came
+     * back as nothing and the panel opened empty on every reload.
+     *
+     * Fresh is also the right answer: a file can be renamed or moved between
+     * a question being asked and it being read back, and what a person wants
+     * to see is where the file is NOW.
+     */
+    conversation.attach(
+      workspace,
+      (entry) => workspace.index().of(entry) ?? entry,
+    );
     onSnapshot?.(snapshot);
 
     const kernelPool = new WarmPool<Kernel>({

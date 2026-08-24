@@ -50,9 +50,11 @@
       ATTACHED,
     );
 
-    constructor(told: any[] = [], more = false) {
+    constructor(told: any[] = [], more = false, breaks = 0) {
       /** A tutor that answers at once and always the same -- see `scripted`. */
       this.tutor = scripted(told, more);
+      /** Broken BEFORE attaching, because attaching is what reads. */
+      this.tutor.breaks(breaks);
       this.conversation.attach(this.tutor.workspace as any, (entry) => entry);
     }
 
@@ -366,6 +368,118 @@
     expect(said, "the panel says it stopped").not.toBeNull();
     expect(said!.textContent).toContain("the model hung up");
     await capture("png").uri;
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    {@render panel(pocket)}
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a long conversation scrolls, and starts at the newest"
+  body={async ({ set, container, expect, delay, capture }) => {
+    /**
+     * The complaint this exists for: ask enough and the answer goes off the
+     * bottom with no way to reach it. A transcript that cannot scroll does not
+     * hide the newest message, it CUTS IT OFF -- so this asserts the panel is
+     * a scroller and that it is looking at the end of the list.
+     */
+    const pocket = set(
+      new Pocket(
+        told(
+          Array.from({ length: 12 }, (_, at) => `question number ${at} about a file`),
+        ),
+      ),
+    );
+    await delay({ frames: 4 });
+    await until("the transcript to arrive", () => bubbles(container).length >= 24);
+    await delay({ frames: 6 });
+
+    const scroller = container.querySelector(
+      "[role='log'] > div",
+    ) as HTMLElement;
+    expect(scroller, "the transcript's scrolling element").not.toBeNull();
+
+    /** More content than room for it, which is the whole premise. */
+    expect(
+      scroller.scrollHeight,
+      `scrollHeight ${scroller.scrollHeight} vs client ${scroller.clientHeight}`,
+    ).toBeGreaterThan(scroller.clientHeight + 20);
+
+    /** And it can actually be moved, which is what `overflow` buys. */
+    scroller.scrollTop = 0;
+    await delay({ frames: 2 });
+    expect(scroller.scrollTop, "scrolled to the top").toBe(0);
+    scroller.scrollTop = scroller.scrollHeight;
+    await delay({ frames: 2 });
+    expect(scroller.scrollTop, "and back to the bottom").toBeGreaterThan(0);
+    await capture("png").uri;
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <div class="bg-background h-[28rem] w-full">
+      <Assistant
+        conversation={pocket.conversation}
+        attached={pocket.attached}
+        onAsk={pocket.ask}
+      />
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a transcript that will not load says so, and tries again"
+  body={async ({ set, container, expect, delay, withUserFocus }) => {
+    /**
+     * The failure this exists for: one unreadable transcript at load used to
+     * be indistinguishable from having never said anything, so somebody whose
+     * conversation was safely on the server saw an empty panel and concluded
+     * it was gone.
+     */
+    /** More failures than the read will tolerate, so it gives up and says so. */
+    const pocket = set(new Pocket(told(["what did I ask before?"]), false, 10));
+    await delay({ frames: 2 });
+
+    await until(
+      "the panel to admit it could not read the transcript",
+      () => !!container.querySelector("[data-region='transcript-failed']"),
+      12_000,
+    );
+    /** Whitespace-normalised: the sentence wraps across lines in the markup. */
+    const said = (container.textContent ?? "").replace(/\s+/g, " ");
+    expect(said).toContain("could not be loaded");
+    expect(said).toContain("It has not been lost");
+
+    /** And going again works, once whatever it was has passed. */
+    pocket.tutor.breaks(0);
+    const retry = container.querySelector(
+      "[data-region='transcript-retry']",
+    ) as HTMLElement;
+    await withUserFocus(async (user) => user.click(retry));
+    await until(
+      "the conversation to arrive on the second try",
+      () => bubbles(container).length >= 2,
+    );
+    expect(container.querySelector("[data-region='transcript-failed']")).toBeNull();
+    expect(bubbles(container)[0]!.textContent).toContain("what did I ask before?");
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    {@render panel(pocket)}
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a read that loses a race is retried rather than left empty"
+  body={async ({ set, container, expect, delay }) => {
+    /** One failure, which is what a page opening everything at once produces
+     *  -- and the read now has more than one go, so nobody sees it. */
+    const pocket = set(new Pocket(told(["still here"]), false, 1));
+    await delay({ frames: 2 });
+
+    await until("the conversation to arrive anyway", () => bubbles(container).length >= 2);
+    expect(container.querySelector("[data-region='transcript-failed']")).toBeNull();
+    expect(pocket.tutor.reads().length).toBeGreaterThanOrEqual(2);
   }}
 >
   {#snippet vest(pocket: Pocket)}

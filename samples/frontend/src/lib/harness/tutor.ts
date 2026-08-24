@@ -24,6 +24,8 @@ export type Scripted = {
   asked: () => { text: string; attached: number; snapshot: string | null }[];
   /** Every read of the transcript, by the cursor it asked from. */
   reads: () => (string | undefined)[];
+  /** Make the next `n` transcript reads fail, as a flaky load would. */
+  breaks: (n: number) => void;
 };
 
 export const scripted = (told: Turn[] = [], more = false): Scripted => {
@@ -31,6 +33,7 @@ export const scripted = (told: Turn[] = [], more = false): Scripted => {
   let failure: string | undefined;
   const asked: { text: string; attached: number; snapshot: string | null }[] = [];
   const reads: (string | undefined)[] = [];
+  let broken = 0;
   const answers = new Map<string, { deltas: string[]; failure?: string }>();
   let next = 0;
 
@@ -39,6 +42,7 @@ export const scripted = (told: Turn[] = [], more = false): Scripted => {
     fails: (why) => (failure = why),
     asked: () => asked,
     reads: () => reads,
+    breaks: (n) => (broken = n),
     workspace: {
       tutor: {
         ask: async (asking) => {
@@ -68,14 +72,18 @@ export const scripted = (told: Turn[] = [], more = false): Scripted => {
             failure: held.failure ?? null,
           };
         },
-        said: async ({ before }) => (
-          reads.push(before),
-          {
-          /** One page, and then whatever the test said comes before it. */
-          turns: before === undefined ? told : [],
-          more: before === undefined ? more : false,
+        said: async ({ before }) => {
+          reads.push(before);
+          if (broken > 0) {
+            broken -= 1;
+            throw new Error("the transcript could not be read");
           }
-        ),
+          return {
+          /** One page, and then whatever the test said comes before it. */
+            turns: before === undefined ? told : [],
+            more: before === undefined ? more : false,
+          };
+        },
       },
     } as Pick<Workspace, "tutor">,
   };
