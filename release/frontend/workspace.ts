@@ -282,10 +282,18 @@ export const connect = (options: Options): Workspace => {
    * An answer is the proof. Whatever the server decided, it wrote the
    * transaction down before saying so.
    *
-   * Written down with the queue, and pruned against every snapshot: an answer
-   * the confirmed map speaks for is one this set need not hold. What survives
-   * is only the three the map cannot answer, which is what makes keeping it
-   * across page loads cost almost nothing.
+   * Written down with the queue, and NEVER PRUNED.
+   *
+   * It used to drop whatever the confirmed map covered, on the reasoning that
+   * a current version is already answered for. That is true exactly until the
+   * next write to that file: the map only ever holds what an entry is at NOW,
+   * so a transaction pruned while it was current became, the moment something
+   * superseded it, a transaction neither the map nor this set could speak for
+   * -- and `unsettled` called work that was safely on the server unsettled,
+   * for ever.
+   *
+   * Which is the opposite of this set's whole purpose. It is three ids per
+   * answer; being complete is worth more than being small.
    */
   const recorded = new Set<Transaction>(restored.recorded);
 
@@ -488,7 +496,6 @@ export const connect = (options: Options): Workspace => {
         answers.forEach(answered);
         bytes.forget(queue.evict(answers));
         map = confirmed.snapshot(snapshot.entries);
-        forgetWhatTheMapNowAnswers();
         recomputed();
         snapshot.entries.forEach(readied);
         flight.resume();
@@ -727,20 +734,6 @@ export const connect = (options: Options): Workspace => {
     stop: sync.stop,
     nudge: sync.nudge,
   };
-
-  /**
-   * A snapshot has just said where every entry stands, so any answer this set
-   * holds that is also a current version is one it is keeping twice. What is
-   * left is the three the map cannot speak to -- drafts, refusals, and writes
-   * a later write moved past -- which is the only reason the set exists.
-   */
-  function forgetWhatTheMapNowAnswers(): void {
-    const spoken = [...recorded].filter((transaction) =>
-      currentVersions().has(transaction),
-    );
-    for (const transaction of spoken) recorded.delete(transaction);
-    if (spoken.length > 0) kept.redundant(spoken);
-  }
 
   function currentVersions(): Set<Transaction> {
     const held = new Set<Transaction>();

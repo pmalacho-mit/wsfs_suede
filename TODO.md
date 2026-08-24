@@ -112,9 +112,11 @@ silent until the first write, which happened twice.
     -- for a workspace nobody is looking at, the rows were queued offline and
     the server has never seen them -- so it buys a `blocked` verdict more than
     it buys space. Worth doing when the space is shown to be there
-[ ] Rows in `answers`. Three ids each, and every reconcile already prunes them
-    to the few a snapshot cannot answer for. Dropping them would cost the
-    accuracy of `unsettled` to save almost nothing
+[ ] Rows in `answers`. Three ids each, and NOT pruned -- pruning them against
+    the confirmed map was a bug, because a transaction the map covers now is
+    one it stops covering the moment something supersedes it. They accumulate
+    for the life of a workspace. Bounding them needs a rule that does not
+    depend on what is current, and there is not an obvious one
 ```
 
 ## 3. Blobs to object storage

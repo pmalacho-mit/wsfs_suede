@@ -313,11 +313,6 @@ export const persistenceMechanism = async (
           transaction,
         });
     },
-    redundant: (transactions) =>
-      remove(
-        ANSWERS,
-        [...transactions].map((one) => keyed(workspace, one)),
-      ),
   };
 
   /**
