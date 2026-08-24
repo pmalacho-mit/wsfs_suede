@@ -28,6 +28,7 @@ from ...release.backend.blobs import FilesystemBlobs
 from ...release.backend.main import Backend, create_router
 from ...release.backend.models import build_models
 from ...release.backend.collaboration import Liveblocks
+from ...release.backend.tutor import ITutor, Said
 from ...wsfs_suede__sqlmodel_utils_suede.associations import WithID
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 from ...wsfs_suede__sqlmodel_utils_suede.tablenames import tablename
@@ -60,6 +61,37 @@ async def enrolled(session: AsyncSession, email: str) -> Account:
 
 
 # pyright: reportUnusedFunction=false
+class _Unwired(ITutor):
+    """The tutor a host with no API key gets.
+
+    Says what is true and stops. The alternative -- refusing to start -- would
+    mean the whole sample, and every browser test in it, needed a paid key to
+    open a file; and the alternative to THAT, pretending to answer, would put
+    made-up tutoring in front of somebody learning.
+    """
+
+    @property
+    def model(self) -> str:
+        return "unwired"
+
+    async def answer(self, said):
+        _ = said
+        yield (
+            "No model is configured for this workspace, so I cannot answer "
+            "properly. Set `CLAUDE_API_KEY` where the server runs and ask "
+            "again."
+        )
+
+
+def _a_tutor() -> ITutor:
+    """The real one when there is a key for it, and an honest one when not."""
+    if not os.environ.get("CLAUDE_API_KEY"):
+        return _Unwired()
+    from ...release.backend.llm import Tutor
+
+    return Tutor()
+
+
 def create_sample_app(
     *,
     database: Database | None = None,
@@ -67,6 +99,7 @@ def create_sample_app(
     heartbeat_seconds: float = 15.0,
     grace_seconds: float = 30.0,
     max_blob_bytes: int = 64 * 1024 * 1024,
+    tutor: ITutor | None = None,
 ) -> FastAPI:
     database = database or Database()
     app = FastAPI(title="wsfs sample host")
@@ -205,6 +238,7 @@ def create_sample_app(
         grace_seconds=grace_seconds,
         max_blob_bytes=max_blob_bytes,
         liveblocks=Liveblocks(secret),
+        tutor=tutor or _a_tutor(),
     )
 
     def _rooms():

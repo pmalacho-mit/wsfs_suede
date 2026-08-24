@@ -4,18 +4,35 @@
   import Assistant from "../../../../../release/frontend/svelte/assistant/Assistant.svelte";
   import { Conversation } from ".../../../../../release/frontend/svelte/assistant/conversation.svelte";
   import { Nudge } from "../../../../../release/frontend/svelte/assistant/nudge";
+  import { scripted } from "../harness/tutor";
 
   const IN_VIEW = ["/notebooks/analysis.py"];
-  const ATTACHED = IN_VIEW.map((path) => ({ path, executions: 0 }));
+  const ATTACHED = IN_VIEW.map((path, at) => ({
+    entry: `entry-${at}`,
+    path,
+    executions: 0,
+  }));
   const STUCK = "My last run ended in an error. Can you help?";
 
   class Pocket {
+    readonly tutor = scripted();
     readonly conversation = new Conversation();
     readonly nudge = new Nudge();
 
+    constructor() {
+      this.conversation.attach(this.tutor.workspace as any, (entry) => entry);
+    }
+
+    ask = (text: string) =>
+      this.conversation.ask(
+        text,
+        ATTACHED.map(({ entry, path }) => ({ entry, path, executions: [] })),
+        "a-snapshot",
+      );
+
     /** What the workspace does when a run fails, minus the workspace. */
     offerHelp() {
-      this.nudge.offer(() => this.conversation.ask(STUCK, IN_VIEW));
+      this.nudge.offer(() => void this.ask(STUCK));
     }
   }
 
@@ -130,7 +147,11 @@
     data-region="toast-stage"
   >
     <Toaster position="top-center" richColors closeButton />
-    <Assistant conversation={pocket.conversation} attached={ATTACHED} />
+    <Assistant
+      conversation={pocket.conversation}
+      attached={ATTACHED}
+      onAsk={pocket.ask}
+    />
   </div>
 {/snippet}
 

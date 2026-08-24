@@ -210,6 +210,12 @@ export const switchable = (
       reach(),
       wire.handOver(workspace, entry, update)
     ),
+    ask: (workspace, asking) => (reach(), wire.ask(workspace, asking)),
+    hear: (workspace, token) => wire.hear(workspace, token),
+    conversation: (workspace, asking) => (
+      reach(),
+      wire.conversation(workspace, asking)
+    ),
     history: (workspace, entry, asking) => (
       reach(),
       wire.history(workspace, entry, asking)

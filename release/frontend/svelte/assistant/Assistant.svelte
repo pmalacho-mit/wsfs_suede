@@ -35,16 +35,20 @@
   import AttachedFiles from "./AttachedFiles.svelte";
   import type { Conversation } from "./conversation.svelte";
   import type { Id } from "../../contract";
+  import { Button } from "../shadcn/ui/button";
 
   let {
     conversation,
     attached,
     oninput,
+    onAsk,
   }: {
     conversation: Conversation;
     /** What goes with the next question, and how much goes with each. */
     attached: { entry: Id; path: string; executions: number }[];
     oninput?: (input: Event) => void;
+    /** Asks, once whoever knows what is on screen has said what that is. */
+    onAsk?: (text: string) => void;
   } = $props();
 
   /** Streamdown's shadcn base leaves lists unmarked. These are the markers. */
@@ -53,11 +57,25 @@
 
   const openers = ["Explain this file", "Why did it fail?", "Write a test"];
 
-  const ask = (text: string) =>
-    conversation.ask(
-      text,
-      attached.map(({ path }) => path),
-    );
+  const ask = (text: string) => onAsk?.(text);
+
+  /**
+   * Asking for older turns when somebody scrolls to the top of them.
+   *
+   * A sentinel and an observer rather than a scroll handler, for the same
+   * reason the version history uses one: it fires once when the top comes into
+   * view instead of on every pixel of every scroll.
+   */
+  let earlier = $state<HTMLElement | undefined>(undefined);
+  $effect(() => {
+    const held = earlier;
+    if (held === undefined || !conversation.more) return;
+    const watching = new IntersectionObserver((entries) => {
+      if (entries.some((one) => one.isIntersecting)) void conversation.earlier();
+    });
+    watching.observe(held);
+    return () => watching.disconnect();
+  });
 </script>
 
 <section
@@ -68,10 +86,34 @@
 
   <Transcript class="min-h-0 min-w-0">
     <ConversationContent class="gap-6 p-3">
+      {#if conversation.more}
+        <!-- Seeing this is asking for the page before it; the button is for
+             a browser that never fires the observer, and for somebody who
+             would rather click than scroll. -->
+        <div bind:this={earlier} class="flex justify-center">
+          <Button
+            variant="outline"
+            size="sm"
+            data-region="earlier"
+            disabled={conversation.reading}
+            onclick={() => conversation.earlier()}
+          >
+            {conversation.reading ? "Loading…" : "Earlier questions"}
+          </Button>
+        </div>
+      {/if}
       {#each conversation.turns as turn (turn.id)}
-        <Message from={turn.from} data-turn={turn.id}>
+        <Message from={turn.from} data-turn={turn.id} data-from={turn.from}>
           <MessageContent>
             <MessageResponse content={turn.text} class={LISTS} />
+            {#if turn.failed}
+              <p
+                class="text-destructive mt-2 text-xs"
+                data-region="answer-failed"
+              >
+                The tutor stopped before finishing: {turn.failed}
+              </p>
+            {/if}
           </MessageContent>
         </Message>
       {:else}

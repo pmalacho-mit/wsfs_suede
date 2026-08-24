@@ -2,14 +2,67 @@
   import Sweater from "sweater-vest-suede/Sweater.svelte";
   import Assistant from "../../../../../release/frontend/svelte/assistant/Assistant.svelte";
   import { Conversation } from "../../../../../release/frontend/svelte/assistant/conversation.svelte";
+  import { scripted } from "../harness/tutor";
 
   const IN_VIEW = ["/notebooks/analysis.py", "/data/readings.csv"];
   /** The same files, as the component wants them: with what goes along. */
-  const ATTACHED = IN_VIEW.map((path) => ({ path, executions: 0 }));
+  const ATTACHED = IN_VIEW.map((path, at) => ({
+    entry: `entry-${at}`,
+    path,
+    executions: 0,
+  }));
+
+  /**
+   * A transcript as the server hands one back.
+   *
+   * Given in the order they were asked and returned NEWEST FIRST, because
+   * that is what the wire does -- and getting it the other way round here
+   * would quietly test the panel against a shape it never sees.
+   */
+  const told = (questions: string[]) =>
+    [...questions].reverse().map((text, at) => ({
+      message: `told-${at}`,
+      at: { minted: null, offset: null, accepted: `2026-08-24T0${at}:00:00Z` },
+      text,
+      snapshot: null,
+      attached: [],
+      answer: `answer to ${text}`,
+      failure: null,
+      model: "scripted",
+    }));
+
+  const bubbles = (within: HTMLElement) => [
+    ...within.querySelectorAll("[data-turn]"),
+  ] as HTMLElement[];
+
+  const until = async (what: string, ready: () => boolean, within = 8_000) => {
+    const deadline = Date.now() + within;
+    while (!ready()) {
+      if (Date.now() > deadline) throw new Error(`waited ${within}ms for ${what}`);
+      await new Promise((carry) => setTimeout(carry, 25));
+    }
+  };
 
   class Pocket {
+    readonly tutor: ReturnType<typeof scripted>;
     readonly conversation = new Conversation();
-    attached = $state<{ path: string; executions: number }[]>(ATTACHED);
+    attached = $state<{ entry: string; path: string; executions: number }[]>(
+      ATTACHED,
+    );
+
+    constructor(told: any[] = [], more = false) {
+      /** A tutor that answers at once and always the same -- see `scripted`. */
+      this.tutor = scripted(told, more);
+      this.conversation.attach(this.tutor.workspace as any, (entry) => entry);
+    }
+
+    /** What the shell does for real: name the files, then ask. */
+    ask = (text: string) =>
+      this.conversation.ask(
+        text,
+        this.attached.map(({ entry, path }) => ({ entry, path, executions: [] })),
+        "a-snapshot",
+      );
   }
 </script>
 
@@ -86,9 +139,17 @@
   body={async ({ set, container, expect, delay, withUserFocus }) => {
     const pocket = set(new Pocket());
     await delay({ frames: 2 });
-    const suggestion = container.querySelector("button");
+    /**
+     * The submit button rather than the first button on the panel: an answer
+     * arriving now puts a scroll control in the transcript, so "the first
+     * button" stopped meaning this one. Asking by clicking is the path a
+     * suggestion takes, whichever control starts it.
+     */
+    const box = container.querySelector("textarea");
     await withUserFocus(async (user) => {
-      await user.click(suggestion!);
+      await user.click(box!);
+      await user.type(box!, "Why is this slow?");
+      await user.click(container.querySelector("[type='submit']")!);
     });
     await delay({ seconds: 2 });
     expect(pocket.conversation.turns[0].sent).toEqual(IN_VIEW);
@@ -108,7 +169,7 @@
   name="paints from the same tokens in dark"
   body={async ({ set, capture, delay }) => {
     const pocket = set(new Pocket());
-    pocket.conversation.ask("What does this file do?", IN_VIEW);
+    void pocket.ask("What does this file do?");
     await delay({ seconds: 2 });
     await capture("png").uri;
   }}
@@ -118,6 +179,7 @@
       <Assistant
         conversation={pocket.conversation}
         attached={pocket.attached}
+        onAsk={pocket.ask}
       />
     </div>
   {/snippet}
@@ -125,7 +187,11 @@
 
 {#snippet panel(pocket: Pocket)}
   <div class="bg-background h-full w-full">
-    <Assistant conversation={pocket.conversation} attached={pocket.attached} />
+    <Assistant
+      conversation={pocket.conversation}
+      attached={pocket.attached}
+      onAsk={pocket.ask}
+    />
   </div>
 {/snippet}
 
@@ -176,5 +242,133 @@
     <div class="bg-background h-[28rem] w-full">
       <Assistant conversation={pocket.conversation} attached={pocket.attached} />
     </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="opens on the conversation it already had"
+  body={async ({ set, container, expect, delay, capture }) => {
+    const pocket = set(new Pocket(told(["what is a dict?", "how do I sort?"])));
+    await delay({ frames: 4 });
+    await until("the transcript to arrive", () => bubbles(container).length >= 4);
+
+    /**
+     * Oldest at the top, and each question followed by its answer -- which is
+     * the order they were said in, and the order a chat is read in.
+     */
+    expect(bubbles(container).map((one) => one.getAttribute("data-from"))).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    expect(bubbles(container)[0]!.textContent).toContain("what is a dict?");
+    expect(bubbles(container)[1]!.textContent).toContain("answer to what is a dict?");
+    await capture("png").uri;
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    {@render panel(pocket)}
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="an answer arrives a piece at a time"
+  body={async ({ set, container, expect, delay }) => {
+    const pocket = set(new Pocket());
+    pocket.tutor.says("Because ", "the loop ", "never ends.");
+    await delay({ frames: 2 });
+
+    const asking = pocket.ask("why is this slow?");
+    /**
+     * Caught in the MIDDLE, which is the whole claim: a partial answer is on
+     * screen before the whole one is. Without this the test would pass against
+     * a panel that waited and painted once.
+     */
+    await until(
+      "part of the answer to be showing",
+      () => {
+        const said = bubbles(container).at(-1)?.textContent ?? "";
+        return said.startsWith("Because") && !said.includes("never ends.");
+      },
+      4_000,
+    );
+    await asking;
+
+    expect(bubbles(container).at(-1)!.textContent).toContain(
+      "Because the loop never ends.",
+    );
+    expect(pocket.conversation.status).toBe("ready");
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    {@render panel(pocket)}
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="scrolling back asks for what came before"
+  body={async ({ set, container, expect, delay }) => {
+    const pocket = set(new Pocket(told(["the newest one"]), true));
+    await delay({ frames: 4 });
+    await until("the first page", () => bubbles(container).length >= 2);
+
+    /**
+     * ASKED WITHOUT ANYBODY CLICKING. The offer sits at the top of the list,
+     * so on a short conversation it is already on screen and the observer
+     * fires straight away -- which is the behaviour: scrolling to the top
+     * fetches what is above it, and a list that starts at the top is already
+     * there.
+     */
+    await until(
+      "the page before this one to be asked for",
+      () => pocket.tutor.reads().length >= 2,
+    );
+    expect(pocket.tutor.reads()[0], "the first read is the newest page").toBe(
+      undefined,
+    );
+    expect(
+      pocket.tutor.reads()[1],
+      "and the next asks from the oldest it has",
+    ).toBe("2026-08-24T00:00:00Z");
+
+    /** And then it stops: there is nothing older, so nothing offers to load
+     *  it, and the observer has nothing left to fire on. */
+    await until(
+      "the offer to go once there is nothing older",
+      () => pocket.conversation.more === false,
+    );
+    await delay({ frames: 4 });
+    expect(container.querySelector("[data-region='earlier']")).toBeNull();
+    expect(pocket.tutor.reads()).toHaveLength(2);
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    {@render panel(pocket)}
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="an answer that stops halfway says so"
+  body={async ({ set, container, expect, delay, capture }) => {
+    const pocket = set(new Pocket());
+    pocket.tutor.says("I was about to say");
+    pocket.tutor.fails("the model hung up");
+    await delay({ frames: 2 });
+
+    await pocket.ask("explain this");
+    await delay({ frames: 4 });
+
+    /** Half an answer is still what the person was shown, so it stays -- and
+     *  the panel says why there is no more of it. */
+    expect(bubbles(container).at(-1)!.textContent).toContain("I was about to say");
+    const said = container.querySelector("[data-region='answer-failed']");
+    expect(said, "the panel says it stopped").not.toBeNull();
+    expect(said!.textContent).toContain("the model hung up");
+    await capture("png").uri;
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    {@render panel(pocket)}
   {/snippet}
 </Sweater>

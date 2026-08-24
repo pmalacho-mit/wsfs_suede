@@ -481,6 +481,96 @@ class ExecutionRow(ActedRow, IsAbstractClass):
     """
 
 
+# -- the tutor ------------------------------------------------------------------------
+#
+# A conversation is not a transaction. Nothing here changes an entry, takes a
+# position, or presents a token, so none of it is in the event stream or the
+# delta chain -- the same reasoning that put snapshots and executions in tables
+# of their own, for the same reason.
+#
+# What it IS is a record of what somebody asked and what they were shown, which
+# is worth as much as the ability to read it back later. So it is stored the way
+# everything else here is stored: rows, not blobs, and no fact recorded twice.
+
+
+class ChatAskedRow(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    Minted, WithTime, IsAbstractClass
+):
+    """One question put to the tutor.
+
+    MINTED BY THE CLIENT, like every other id it originates. Asking is a round
+    trip, a round trip can be lost, and a client that re-sends a question it
+    already asked must be answered rather than asked twice -- which is exactly
+    what a primary key it chose gives, at no cost.
+
+    THE SNAPSHOT IS NULLABLE, and that is not sloppiness. A snapshot is itself a
+    transaction the client sent moments earlier; it can be refused, for naming a
+    version this server never issued, and a client that cannot reach the server
+    at all has none to name. A tutor that answers from the question alone is
+    worse than one that can see the workspace and much better than an error, so
+    the column records that this question came with nothing to look at.
+    """
+
+    workspace_id: ID
+    user_id: ID
+
+    snapshot: ID | None = Field(default=None, nullable=True, index=True)
+    """What the workspace looked like when this was asked, if anything did."""
+
+    text: str = Field(nullable=False)
+
+    utc_offset: int | None = Field(default=None, nullable=True)
+    """The clock the person was reading -- see `ActedRow.utc_offset`."""
+
+
+class ChatAttachmentRow(WithID, IsAbstractClass):
+    """One thing that went along with a question.
+
+    A ROW PER THING, not a list on the question. The same argument as
+    `SnapshotRow`: "which questions was this file attached to" and "was this run
+    ever shown to the tutor" are the questions worth asking of these, and each is
+    an index on a column -- inside a JSON blob each is a scan of every question
+    anybody ever asked.
+
+    A NULL `execution_id` MEANS THE FILE WAS ATTACHED WITH NOTHING RUN. A file
+    attached alongside three runs is three rows, all naming the same entry, and
+    the file having been attached is true of any of them. That is why the entry
+    is named here as well as being reachable through the execution: the file is
+    the thing attached, and the run is the extra.
+    """
+
+    message_id: ID
+    entry_id: ID
+    execution_id: ID | None = Field(default=None, nullable=True, index=True)
+
+
+class ChatAnsweredRow(WithID, WithTime, IsAbstractClass):
+    """What the tutor said back.
+
+    ONE PER QUESTION, and written when the generation ENDS rather than when a
+    client is listening. A person who asks and closes the tab has still asked,
+    and the answer they paid for is theirs when they come back.
+
+    A FAILURE IS ALSO AN ANSWER, recorded rather than dropped: a transcript that
+    silently skips the turn where the model fell over reads as though the
+    question was never asked.
+    """
+
+    message_id: ID
+    workspace_id: ID
+    user_id: ID
+
+    text: str = Field(default="", nullable=False)
+    """What was produced -- including a partial, when something went wrong
+    halfway. Half an answer is still what the person was shown."""
+
+    model: str = Field(default="", nullable=False)
+    """Which model said it, because the transcript outlives the choice."""
+
+    failure: str | None = Field(default=None, nullable=True)
+    """Null when it finished. Otherwise why it did not."""
+
+
 class TokenRow(  # pyright: ignore[reportUnsafeMultipleInheritance]
     SQLModel, IsAbstractClass
 ):
@@ -528,6 +618,9 @@ class Models:
     room: type[RoomRow]
     snapshot: type[SnapshotRow]
     execution: type[ExecutionRow]
+    asked: type[ChatAskedRow]
+    attachment: type[ChatAttachmentRow]
+    answered: type[ChatAnsweredRow]
 
     refused_name: type[RefusedNameRow]
     refused_parent: type[RefusedParentRow]
@@ -595,6 +688,11 @@ class Models:
             self.refused_text_cache,
             self.token,
             self.room,
+            self.snapshot,
+            self.execution,
+            self.asked,
+            self.attachment,
+            self.answered,
         )
 
 
@@ -773,6 +871,38 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         )
         """Newest-first for one file is the only way these are ever read."""
 
+    class Asked(ChatAskedRow, named("chat_asked"), table=True):
+        user_id: ID = ForeignKeyField(users)
+        workspace_id: ID = ForeignKeyField(workspaces)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            Index(
+                f"ix_{prefix}_chat_asked_whose", "workspace_id", "user_id", "timestamp"
+            ),
+        )
+        """A transcript is read one person's at a time, newest first, and that
+        is the only way it is ever read."""
+
+    class Attachment(ChatAttachmentRow, named("chat_attachments"), table=True):
+        message_id: ID = ForeignKeyField(Asked)
+        entry_id: ID = ForeignKeyField(Entry)
+        execution_id: ID | None = ForeignKeyField(Execution, nullable=True)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            Index(f"ix_{prefix}_chat_attachments_message", "message_id"),
+        )
+
+    class Answered(ChatAnsweredRow, named("chat_answered"), table=True):
+        message_id: ID = ForeignKeyField(Asked)
+        user_id: ID = ForeignKeyField(users)
+        workspace_id: ID = ForeignKeyField(workspaces)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            UniqueConstraint("message_id"),
+        )
+        """One answer per question. A second would not be a longer transcript,
+        it would be two claims about what the tutor said."""
+
     class Room(RoomRow, named("rooms"), table=True):
         entry_id: ID = ForeignKeyField(Entry)
         base: ID | None = ForeignKeyField(TextContent, nullable=True, ondelete=None)
@@ -793,6 +923,9 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         room=Room,
         snapshot=Snapshot,
         execution=Execution,
+        asked=Asked,
+        attachment=Attachment,
+        answered=Answered,
         refused_name=RefusedName,
         refused_parent=RefusedParent,
         refused_deletion=RefusedDeletion,

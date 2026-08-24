@@ -15,6 +15,10 @@ import type {
   Submitted,
   Transaction,
   Version,
+  Answering,
+  Asked,
+  Asking,
+  Transcript,
 } from "./contract";
 
 export type Authorized = () => HeadersInit | Promise<HeadersInit>;
@@ -59,6 +63,23 @@ export type Transport = {
     asking: { before?: string; limit?: number },
   ) => Promise<History>;
   follow: (workspace: Id, token: string, reading: Reading) => Subscription;
+  /** Put a question to the tutor, and be told where to hear the answer. */
+  ask: (workspace: Id, asking: Asking) => Promise<Asked>;
+  /**
+   * The answer, delta by delta, until it ends.
+   *
+   * An async iterator rather than a subscription, because unlike the event
+   * stream this one ENDS, and a caller wants to await the end of it. Read with
+   * `fetch` for the same reason the event stream is -- see `read` below -- and
+   * for one more: `EventSource` reconnects on its own, and a reconnect here
+   * would replay an answer somebody has already read.
+   */
+  hear: (workspace: Id, token: string) => AsyncIterable<Answering>;
+  /** This person's conversation here, newest first. */
+  conversation: (
+    workspace: Id,
+    asking: { before?: string; limit?: number },
+  ) => Promise<Transcript>;
 };
 
 const REFUSED = 409;
@@ -168,6 +189,48 @@ export const http = (base: string, authorize: Authorized): Transport => {
         headers: { "Content-Type": "application/octet-stream" },
         body: update as BodyInit,
       });
+    },
+
+    ask: async (workspace, asking) =>
+      json<Asked>(await posted(`${workspaces(workspace)}/chat`, asking)),
+
+    hear: async function* (workspace, token) {
+      const response = await send(
+        `${workspaces(workspace)}/chat/stream?token=${encodeURIComponent(token)}`,
+      );
+      if (response.body === null) return;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const said = JSON.parse(line.slice("data: ".length)) as Answering;
+          yield said;
+          /**
+           * Read no further once it has ended. Nothing follows it, and
+           * holding the body open would hold a connection for nothing.
+           */
+          if (said.type === "ended") {
+            await reader.cancel().catch(() => undefined);
+            return;
+          }
+        }
+      }
+    },
+
+    conversation: async (workspace, { before, limit }) => {
+      const asked = new URLSearchParams();
+      if (before !== undefined) asked.set("before", before);
+      if (limit !== undefined) asked.set("limit", String(limit));
+      return json<Transcript>(
+        await send(`${workspaces(workspace)}/chat?${asked.toString()}`),
+      );
     },
 
     history: async (workspace, entry, { before, limit }) => {

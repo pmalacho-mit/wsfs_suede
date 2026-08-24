@@ -18,6 +18,18 @@ export type {
 /** What a `watch` listener is handed: one entry, one thing about it, and who. */
 export type { Change, Watching } from "./changes";
 
+/** The tutor's half of the wire, for a panel that draws a conversation. */
+export type {
+  Answering,
+  Asked,
+  Asking,
+  Attached,
+  Attaching,
+  Id,
+  Transcript,
+  Turn,
+} from "./contract";
+
 export { http } from "./transport";
 export type { Authorized, Transport } from "./transport";
 

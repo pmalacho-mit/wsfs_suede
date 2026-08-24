@@ -66,6 +66,12 @@ export const offline = (layout: Layout): Transport => {
     warmRoom: async () => {},
     roomStored: async () => {},
     handOver: async () => {},
+    /** Nobody is listening, so nobody is answering either. */
+    ask: async () => {
+      throw new Error("nothing is listening");
+    },
+    hear: async function* () {},
+    conversation: async () => ({ turns: [], more: false }),
     /** Nothing was ever kept here, so there is nothing to say has reached anybody. */
     cleared: async () => {},
     follow: () => ({ close: () => {} }),

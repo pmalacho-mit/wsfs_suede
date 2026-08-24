@@ -99,6 +99,15 @@
     ok: boolean;
     /** What the kernel said if it ended badly and did not say so in outputs. */
     failure?: string;
+    /**
+     * The transaction this run was recorded as, once it has been.
+     *
+     * Undefined while it is still on its way, and for a run whose snapshot was
+     * refused -- so anything naming runs to somebody else has to skip the ones
+     * that have no name yet. That is not a gap to paper over: a tutor cannot
+     * be shown output the server has never heard of.
+     */
+    transaction?: string;
   };
 
   export class SharedTextFile {
@@ -702,7 +711,16 @@
       ),
       api.addSnippetPanel(
         "assistant",
-        { snapshot, conversation },
+        {
+          snapshot,
+          conversation,
+          /**
+           * Lazy on purpose: the panel exists before the function that
+           * answers it does, and a person cannot click faster than the rest
+           * of this setup runs.
+           */
+          ask: (text: string) => void askTheTutor(text),
+        },
         {
           size: 340,
           minimumWidth: 200,
@@ -805,6 +823,13 @@
     };
 
     Editor.provideFiles(provider(workspace, override), { searchRoot: "" });
+
+    /**
+     * The transcript is the SERVER's, so the panel reads it back rather than
+     * starting empty every time somebody opens the workspace. Entries are
+     * named here because only this side knows where a file lives.
+     */
+    conversation.attach(workspace, (entry) => index.of(entry) ?? entry);
     onSnapshot?.(snapshot);
 
     const kernelPool = new WarmPool<Kernel>({
@@ -815,16 +840,13 @@
         }),
     });
 
-    /** The paths the person can see, which is what a question carries. */
-    const inViewPaths = () => snapshot().visible.map(({ path }) => path);
-
     /**
      * A run that ended badly is the only reason to offer help, and typing
      * again is the only reason needed to withdraw it.
      */
     const finished = (outcome: Outcome) => {
       if (outcome.ok) return nudge.withdraw();
-      nudge.offer(() => conversation.ask(stuckOn(outcome), inViewPaths()));
+      nudge.offer(() => void askTheTutor(stuckOn(outcome)));
     };
 
     /**
@@ -839,6 +861,7 @@
      */
     const onCodeExecution = async ({
       entry,
+      at,
       result,
     }: {
       entry: string | undefined;
@@ -859,7 +882,61 @@
        */
       const kept = await taken.settled;
       if (kept.rejected) return;
-      workspace.executed(entry, taken.transaction, outputs, outcome.ok);
+      const recorded = workspace.executed(
+        entry,
+        taken.transaction,
+        outputs,
+        outcome.ok,
+      );
+      /**
+       * Stamped onto the run it belongs to, by the marker the runner keyed it
+       * with. Without this the panel knows a file has been run three times and
+       * cannot name any of them, which is exactly what attaching one needs.
+       */
+      const held = openFiles.get(entry)?.sharedText;
+      if (held !== undefined)
+        held.executions = held.executions.map((one) =>
+          one.at === at ? { ...one, transaction: recorded.transaction } : one,
+        );
+    };
+
+    /**
+     * Put a question to the tutor, with what the person is looking at.
+     *
+     * A SNAPSHOT FIRST, and awaited. The tutor is shown the files as they
+     * stood when the question was asked, and a snapshot is what says which
+     * versions those were -- so it has to have landed before the question
+     * names it. `resolveDirty` is what makes that possible for a file being
+     * typed into: it stores what is on screen and names the transaction,
+     * rather than naming a version that does not exist yet.
+     *
+     * A REFUSED SNAPSHOT IS NOT A REFUSED QUESTION. It names a version this
+     * server never issued, which happens when work has not arrived; the
+     * question still goes, with nothing attached, and the tutor answers from
+     * what was asked. A person waiting on an answer should not be given an
+     * error about bookkeeping.
+     */
+    const askTheTutor = async (text: string) => {
+      const held = snapshot({ resolveDirty: true });
+      const taken = workspace.snapshot(held.entries.map((one) => one.entry));
+      const attached = held.visible
+        .filter((one) => one.type !== "folder")
+        .map((one) => ({
+          entry: one.entry,
+          path: one.path,
+          executions: (openFiles.get(one.entry)?.sharedText?.executions ?? [])
+            .map((run) => run.transaction)
+            .filter((named): named is string => named !== undefined),
+        }));
+
+      let named: string | undefined;
+      try {
+        const kept = await taken.settled;
+        if (!kept.rejected) named = taken.transaction;
+      } catch {
+        /** Unsent. The question goes without it -- see above. */
+      }
+      await conversation.ask(text, named === undefined ? [] : attached, named);
     };
 
     const editorProps: EditorHooks = {
@@ -993,14 +1070,19 @@
 {/snippet}
 
 {#snippet assistant({
-  params: { snapshot, conversation },
+  params: { snapshot, conversation, ask },
 }: PanelProps<
   "grid",
-  { snapshot: () => Snapshot; conversation: Conversation }
+  {
+    snapshot: () => Snapshot;
+    conversation: Conversation;
+    ask: (text: string) => void;
+  }
 >)}
   <div class="h-full min-h-0 border-l" data-region="assistant">
     <Assistant
       {conversation}
+      onAsk={ask}
       attached={snapshot().visible.map(({ path, executions, entry }) => ({
         entry,
         path,

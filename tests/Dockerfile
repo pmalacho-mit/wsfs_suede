@@ -18,14 +18,16 @@ RUN apt-get update \
 
 # Dependencies first: editing source then leaves these layers cached.
 COPY requirements.txt ./requirements.txt
+COPY requirements-tutor.txt ./requirements-tutor.txt
 COPY tests/requirements.txt ./tests/requirements.txt
-RUN pip install -r requirements.txt -r tests/requirements.txt
+RUN pip install -r requirements.txt -r requirements-tutor.txt -r tests/requirements.txt
 
 # compose bind-mounts the source over the top for the dev loop; copying it in
 # keeps the image runnable on its own (CI, or a bare `docker run`).
 COPY pytest.ini ./pytest.ini
 COPY release/ ./release/
 COPY wsfs_suede__sqlmodel_utils_suede/ ./wsfs_suede__sqlmodel_utils_suede/
+COPY wsfs_suede__pytutor_llms_suede/ ./wsfs_suede__pytutor_llms_suede/
 COPY samples/ ./samples/
 COPY tests/ ./tests/
 

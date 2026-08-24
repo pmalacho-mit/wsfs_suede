@@ -12,12 +12,16 @@ import { cache, type Content, type Payload } from "./content";
 import {
   settledHere,
   UNSOUND,
+  type Answering,
+  type Asked,
+  type Asking,
   type Body,
   type Id,
   type Metadata,
   type Response,
   type Submitted,
   type Transaction,
+  type Transcript,
   type Version,
   type Write,
 } from "./contract";
@@ -159,6 +163,18 @@ export type Workspace = {
     warm: (entry: Id) => Promise<void>;
     stored: (entry: Id, version: Version) => Promise<void>;
     handOver: (entry: Id, update: Uint8Array) => Promise<void>;
+  };
+  /**
+   * The tutor: ask it something, hear the answer, read back what was said.
+   *
+   * Grouped like `room` and for the same reason -- these are scoped by
+   * workspace and authorised like everything else, and a caller holding this
+   * object already has both.
+   */
+  tutor: {
+    ask: (asking: Omit<Asking, "message"> & { message?: Id }) => Promise<Asked>;
+    hear: (token: string) => AsyncIterable<Answering>;
+    said: (asking: { before?: string; limit?: number }) => Promise<Transcript>;
   };
   /**
    * Record that the workspace looked like this.
@@ -606,6 +622,19 @@ export const connect = (options: Options): Workspace => {
           told: false,
         };
       }
+    },
+
+    tutor: {
+      ask: (asking) =>
+        transport.ask(workspace, {
+          ...asking,
+          text: asking.text,
+          /** Minted here when a caller does not, so a retry is free. */
+          message: asking.message ?? mint(),
+          offset: asking.offset ?? offset(),
+        }),
+      hear: (token) => transport.hear(workspace, token),
+      said: (asking) => transport.conversation(workspace, asking),
     },
 
     room: {

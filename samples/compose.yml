@@ -32,12 +32,21 @@ services:
       # browser. The value here is a placeholder the developer's proxy swaps
       # for the real key on the way out; a real deployment sets the real one.
       LIVEBLOCKS_SECRET_KEY: LIVEBLOCKS__SECRET__KEY
+    # The model's key, from the developer's own `.env` -- which is gitignored,
+    # and read at RUN time rather than copied into the image, so a key never
+    # lands in a layer anybody could push. Optional: with no file and no key
+    # the sample serves a tutor that says it is not wired to a model, which is
+    # what keeps the browser suite runnable without one.
+    env_file:
+      - path: ../.env
+        required: false
     # Live source, so swapping revisions needs a restart rather than a rebuild
     # -- which is what makes a before/after measurement the same image. Point
     # WSFS_RELEASE at another checkout to serve it instead.
     volumes:
       - ${WSFS_RELEASE:-../release}:/app/wsfs_suede/release:ro
       - ../wsfs_suede__sqlmodel_utils_suede:/app/wsfs_suede/wsfs_suede__sqlmodel_utils_suede:ro
+      - ../wsfs_suede__pytutor_llms_suede:/app/wsfs_suede/wsfs_suede__pytutor_llms_suede:ro
       - ../samples:/app/wsfs_suede/samples:ro
     depends_on:
       sample-db:

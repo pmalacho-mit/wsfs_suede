@@ -104,3 +104,11 @@ export const isWrite = (request: Submitted): request is Write =>
  */
 export const changesNothing = (request: Submitted): boolean =>
   request.op === "snapshot" || request.op === "execute";
+
+export type Asking = Schemas["Asking"];
+export type Asked = Schemas["Asked"];
+export type Answering = Schemas["Answering"];
+export type Attaching = Schemas["Attaching"];
+export type Attached = Schemas["Attached"];
+export type Turn = Schemas["Turn"];
+export type Transcript = Schemas["Transcript"];
