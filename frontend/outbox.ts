@@ -212,6 +212,25 @@ export const queue = (held: Entry[] = [], kept: Kept = nowhere): Queue => {
 };
 
 /**
+ * The bytes a queued write named are not there, and never will be.
+ *
+ * Told apart from every other failure a read can have, because the answers
+ * are opposite: a store that REFUSED will likely answer next time, so the
+ * write waits. Bytes that are GONE will not, so the write has to be given up
+ * and said out loud -- and anything that keeps retrying it stops the queue
+ * behind it moving at all.
+ */
+export class LostBytes extends Error {
+  constructor(
+    readonly transaction: Transaction,
+    message: string,
+  ) {
+    super(message);
+    this.name = "LostBytes";
+  }
+}
+
+/**
  * The text a queued write would send, whether it is holding the whole thing or
  * a delta against the one in front of it.
  *
@@ -225,7 +244,10 @@ export const textOf = async (
 ): Promise<string> => {
   const stored = item.content === undefined ? undefined : await bytes.text(item.content);
   if (stored === undefined)
-    throw new Error(`Queued write ${item.request.transaction} has lost its bytes`);
+    throw new LostBytes(
+      item.request.transaction,
+      `Queued write ${item.request.transaction} has lost its bytes`,
+    );
   if (item.basis === undefined) return stored;
 
   /**
@@ -242,7 +264,8 @@ export const textOf = async (
         ? undefined
         : await textOf(ahead, queue, bytes);
   if (before === undefined)
-    throw new Error(
+    throw new LostBytes(
+      item.request.transaction,
       `Queued write ${item.request.transaction} is a delta against ` +
         `${item.basis.after}, which is no longer readable`,
     );
@@ -262,6 +285,7 @@ export const chained = (before: string, after: string): string =>
  * fine, so this is reported rather than thrown.
  */
 export type Unreadable = { transaction: Transaction; why: string };
+
 
 export type Presented = { presented: Submitted[]; unreadable: Unreadable[] };
 
@@ -306,8 +330,16 @@ export const presenting = async (
         content: { type: "text", content: await textOf(item, queue, bytes) },
       });
     } catch (reason) {
+      /**
+       * The transaction the READ blames, which for a broken chain is not the
+       * one being presented: a delta three deep fails on whichever ancestor
+       * lost its bytes, and that is the one there is nothing left of.
+       */
       unreadable.push({
-        transaction: item.request.transaction,
+        transaction:
+          reason instanceof LostBytes
+            ? reason.transaction
+            : item.request.transaction,
         why: reason instanceof Error ? reason.message : String(reason),
       });
     }
