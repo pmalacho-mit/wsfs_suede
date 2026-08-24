@@ -21,7 +21,7 @@ import time
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as APIPath
-from sqlmodel import Field, select
+from sqlmodel import Field, select, col
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ...release.backend.blobs import FilesystemBlobs
@@ -246,6 +246,13 @@ def create_sample_app(
             app.state.rooms = backend.keeper
         return app.state.rooms
 
-    app.include_router(create_router(backend=backend, authorize=authorize))
+    wsfs = create_router(backend=backend, authorize=authorize)
+    app.include_router(wsfs.router)
     app.state.wsfs = backend
+    app.state.mounted = wsfs
+    """Both, because they answer different questions. `wsfs` is the backend --
+    the schema, the registry, the keeper -- which is what the tests reach for
+    and what a host shuts down. `mounted` is the work: the router, every
+    route's function, and the two things that are NOT routes -- `clone` and
+    `place` -- which can be reached no other way."""
     return app

@@ -397,6 +397,57 @@ class RoomRow(WithID, IsAbstractClass):
     nulling it."""
 
 
+class ClonedRow(WithID, WithTime, IsAbstractClass):
+    """One entry copied out of another workspace, and where it came from.
+
+    A clone COPIES rather than shares: the target gets its own entries, its
+    own logs and its own positions, because two workspaces sharing a log
+    would be one workspace with two names -- a write in either would appear
+    in both, which is the opposite of what somebody cloning a workspace
+    wants. What is genuinely lost by copying is the provenance, and that is
+    the whole of what this table keeps.
+
+    ONE ROW PER ENTRY, not one per clone. "Where did this file come from" is
+    the question worth answering, and it is asked of a file; a row holding a
+    list would make it a scan. The clone as a whole is recoverable from these
+    -- same source, same target, same timestamp -- and is not itself a thing
+    anything here needs to name.
+
+    NOT `Minted`, and not in the event stream. Cloning appends ordinary
+    creates through the ordinary choke point, so the target's stream already
+    says everything that happened to it; this row is a note ALONGSIDE that
+    work, and a subscriber folding an entry's history must not see it.
+    """
+
+    source_workspace_id: ID
+    target_workspace_id: ID
+    """Both named directly. A source entry can be reached through its own
+    entry row, but the workspace it was read from is what a caller asks
+    about -- "what came out of that workspace" is a question about the
+    workspace, and a join to answer it would be a join every time."""
+
+    source_entry_id: ID
+    target_entry_id: ID
+    user_id: ID
+    """Whoever the clone was performed on behalf of. Every create this wrote
+    into the target is attributed to them, and so is this."""
+
+    source_content_version: ID | None = Field(default=None, index=True, nullable=True)
+    """The write the copy was taken at, or null for a folder.
+
+    WHAT THIS ROW IS FOR, beyond saying which file: a clone is a copy of a
+    MOMENT, and the source keeps moving afterwards. Without this a caller can
+    say the two files are related and nothing about how far apart they have
+    since drifted.
+
+    NO FOREIGN KEY, and it is the one column here without one: content lives
+    in two logs -- text and blob -- and a column cannot point at whichever of
+    them holds this write. The alternative is two nullable columns of which
+    exactly one is ever set, which is a constraint nothing would enforce
+    either.
+    """
+
+
 class SnapshotRow(WithID, WithTime, IsAbstractClass):
     """One entry, at the versions a snapshot found it at.
 
@@ -621,6 +672,7 @@ class Models:
     asked: type[ChatAskedRow]
     attachment: type[ChatAttachmentRow]
     answered: type[ChatAnsweredRow]
+    cloned: type[ClonedRow]
 
     refused_name: type[RefusedNameRow]
     refused_parent: type[RefusedParentRow]
@@ -693,6 +745,7 @@ class Models:
             self.asked,
             self.attachment,
             self.answered,
+            self.cloned,
         )
 
 
@@ -911,6 +964,25 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
             UniqueConstraint("entry_id"),
         )
 
+    class Cloned(ClonedRow, named("cloned_entries"), table=True):
+        source_workspace_id: ID = ForeignKeyField(workspaces)
+        target_workspace_id: ID = ForeignKeyField(workspaces)
+        source_entry_id: ID = ForeignKeyField(Entry)
+        target_entry_id: ID = ForeignKeyField(Entry)
+        user_id: ID = ForeignKeyField(users)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            UniqueConstraint("target_entry_id"),
+            Index(
+                f"ix_{prefix}_cloned_from",
+                "source_workspace_id",
+                "target_workspace_id",
+            ),
+        )
+        """An entry is cloned FROM many things and INTO exactly one, so the
+        target side is unique and the source side is merely indexed. The pair
+        index is what makes "everything that came out of that clone" a seek."""
+
     return Models(
         entry=Entry,
         name=Name,
@@ -926,6 +998,7 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         asked=Asked,
         attachment=Attachment,
         answered=Answered,
+        cloned=Cloned,
         refused_name=RefusedName,
         refused_parent=RefusedParent,
         refused_deletion=RefusedDeletion,
