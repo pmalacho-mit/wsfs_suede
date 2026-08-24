@@ -23,7 +23,7 @@ from conftest import (
     refused,
     seen,
 )
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 
 
 async def lost(api: Api, other: Api, entry: str, mine: str, theirs: str = "theirs"):

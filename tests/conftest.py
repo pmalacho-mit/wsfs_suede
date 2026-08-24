@@ -21,7 +21,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 # Imported for the side effect: the host declares its own tables and builds
 # the wsfs schema against them, which is what registers everything.
-from app import create_sample_app
+from wsfs_suede.samples.backend.app import create_sample_app
 from wsfs_suede.release.backend.blobs import digest_of
 from wsfs_suede.release.backend.minted import mint
 from sqlmodel.ext.asyncio.session import AsyncSession

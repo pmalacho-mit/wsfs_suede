@@ -17,7 +17,7 @@
     browser,
     iAm,
     me,
-  } from "../../../../release/frontend/collab/collaboration";
+  } from "./harness/collaboration";
 
   class Pocket {
     status = $state("(nothing yet)");

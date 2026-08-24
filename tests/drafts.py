@@ -15,7 +15,7 @@ import httpx
 from sqlmodel import Session, col, select
 
 from conftest import Api, acknowledged, new_id, refused
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 
 from wsfs_suede.release.backend.contract import Refusal
 

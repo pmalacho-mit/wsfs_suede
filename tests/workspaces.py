@@ -60,10 +60,17 @@ async def test_two_users_share_one_workspace(api: Api, other: Api):
 
 async def test_a_host_without_a_liveblocks_key_says_so_rather_than_failing_oddly(
     instance,
+    monkeypatch,
 ):
     """The sample's own route, not wsfs's -- but a host that quietly returned a
     broken token would send every client into a retry loop against a room they
-    can never enter, which is much harder to read than a 503."""
+    can never enter, which is much harder to read than a 503.
+
+    The absence is MADE here rather than assumed: the suite runs with a key
+    set, because the sample host refuses to be built without one, and a test
+    about not having one has to arrange not to have one.
+    """
+    monkeypatch.delenv("LIVEBLOCKS_SECRET_KEY", raising=False)
     answer = await instance.get(
         "/liveblocks/token?rooms=any",
         headers={"X-User-Email": "ada@example.com"},

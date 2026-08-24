@@ -18,7 +18,7 @@ from conftest import (
     open_workspace,
     serving,
 )
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 
 
 async def test_writes_to_one_workspace_are_serialized(api: Api, session: Session):

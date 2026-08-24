@@ -17,7 +17,7 @@ from sqlmodel import Session, SQLModel
 
 from conftest import Api, acknowledged, new_id
 from wsfs_suede.release.backend.migrate import Missing, missing, widen
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 
 A_TABLE = MODELS.refused_text.__tablename__
 

@@ -17,6 +17,23 @@ const CHECKOUT = new URL("../../", import.meta.url).pathname;
  */
 const config = defineConfig({
   plugins: [tailwindcss(), sveltekit()],
+  /**
+   * ONE COPY OF YJS, and it is not a nicety.
+   *
+   * The collaboration code ships from `release/`, which is outside this app,
+   * so it resolves its dependencies from the checkout's node_modules while
+   * everything under `src/` resolves them from this app's. Same versions,
+   * different instances -- and a Yjs root type made by one instance is not
+   * the type the other one finds under that name. The document then reports
+   * a `content` text 24 characters long that renders as the empty string,
+   * and the file a client had open comes back blank.
+   *
+   * Everything listed carries identity across a document: the CRDT itself,
+   * the store that reloads one, and the provider that syncs one.
+   */
+  resolve: {
+    dedupe: ["yjs", "y-indexeddb", "@liveblocks/client", "@liveblocks/yjs"],
+  },
   server: {
     // Reachable from outside this container, because the browser that runs
     // `npm run test:browser` is in one of its own: `--forward` publishes this

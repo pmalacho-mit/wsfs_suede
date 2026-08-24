@@ -22,7 +22,7 @@ import { kInternal, ServerMsgCode } from "@liveblocks/core";
 import type { createClient } from "@liveblocks/client";
 import { LiveblocksYjsProvider } from "@liveblocks/yjs";
 
-import type { Enter } from "../../../../release/frontend/svelte/room.svelte";
+import type { Enter } from "../../../../../release/frontend/svelte/room.svelte";
 import * as Y from "yjs";
 
 type Client = ReturnType<typeof createClient>;

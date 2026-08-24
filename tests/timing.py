@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlmodel import Session, select
 
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 from conftest import (
     Api,
     acknowledged,

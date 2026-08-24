@@ -4,8 +4,8 @@ import asyncio
 
 from pycrdt import Doc, Map, Text
 
-from wsfs_suede.samples.backend.keeper import Keeper
-from wsfs_suede.samples.backend.rooms import Held
+from wsfs_suede.release.backend.keeper import Keeper
+from wsfs_suede.release.backend.rooms import Held
 
 BORN = "01a02361-dad9-755a-ba88-e651f1ad637a"
 WROTE = "01a02361-e423-71aa-ad9b-f4bd66c1aeb1"
@@ -90,7 +90,9 @@ def keeping(
     files: FakeFiles,
     standings: FakeStandings | None = None,
 ) -> Keeper:
-    return Keeper(liveblocks=liveblocks, files=files, standings=standings or FakeStandings())
+    return Keeper(
+        collaboration=liveblocks, files=files, standings=standings or FakeStandings()
+    )
 
 
 async def test_a_room_is_created_and_filled_from_the_file():

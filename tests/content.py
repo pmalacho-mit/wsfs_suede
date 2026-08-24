@@ -10,7 +10,7 @@ from conftest import (
     name_version,
     new_id,
 )
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 
 REVISIONS = ["one", "one two", "one two three", "two three"]
 

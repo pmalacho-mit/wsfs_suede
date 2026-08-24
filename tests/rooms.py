@@ -8,7 +8,7 @@ collaboration server every time anybody saved, for every client that heard.
 
 from pycrdt import Doc, Text
 
-from wsfs_suede.samples.backend.rooms import (
+from wsfs_suede.release.backend.rooms import (
     Carry,
     Change,
     Held,
