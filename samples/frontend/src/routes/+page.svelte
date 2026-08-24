@@ -10,6 +10,7 @@
     keeping,
     persist,
     type Faltering,
+    type Reclamation,
     type Workspace as Client,
   } from "$wsfs";
   import { createClient } from "@liveblocks/client";
@@ -42,6 +43,11 @@
    * is an error the app can recover from on their behalf.
    */
   let storage = $state<Faltering | undefined>(undefined);
+  /**
+   * What the last pass at making room found. Only ONE of its answers is worth
+   * a person's attention, and it is not the one about having succeeded.
+   */
+  let room = $state<Reclamation>({ phase: "idle" });
   let unwatch: (() => void) | undefined;
 
   /**
@@ -89,7 +95,16 @@
        * start.
        */
       void persist();
-      unwatch = held.watch(() => (storage = held.faltering()));
+      unwatch = held.watch(() => {
+        storage = held.faltering();
+        room = held.reclamation();
+      });
+      /**
+       * Once at startup, because a store that filled up during the last visit
+       * is still full at the start of this one and nothing else would notice
+       * until the first write failed.
+       */
+      void held.reclaim();
       workspace = connect({
         workspace: id,
         transport: http(BACKEND, asUser(USER)),
@@ -114,7 +129,7 @@
     {#if failure}
       <p class="text-destructive p-4 text-sm">{failure}</p>
     {:else if workspace}
-      <WorkspacePane {workspace} {liveblocks} {storage} />
+      <WorkspacePane {workspace} {liveblocks} {storage} {room} />
     {:else}
       <p class="text-muted-foreground p-4 text-sm">Opening a workspace…</p>
     {/if}

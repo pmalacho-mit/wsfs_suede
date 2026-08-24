@@ -14,10 +14,18 @@
 import { asText, digestOf, type Digest, type Store } from "./bytes";
 import type { Id, Transaction } from "./contract";
 import { referenced, type Faltering, type Kept, type Restored } from "./kept";
+import {
+  alone,
+  crowded,
+  headroom,
+  sweep,
+  type Reclamation,
+  type Sweepable,
+} from "./reclaim";
 import type { Entry } from "./outbox";
 
 const DATABASE = "wsfs";
-const VERSION = 1;
+const VERSION = 2;
 
 const QUEUED = "queued";
 const ANSWERS = "answers";
@@ -35,7 +43,25 @@ type Queued = {
   entry: Entry;
 };
 type Answer = { key: string; workspace: Id; transaction: Transaction };
-type Bytes = { key: string; workspace: Id; digest: Digest; bytes: Uint8Array };
+type Bytes = {
+  key: string;
+  workspace: Id;
+  digest: Digest;
+  bytes: Uint8Array;
+  /**
+   * When these bytes were written, as milliseconds since the epoch.
+   *
+   * DURABLE, and that is the point: a payload is stored before the row that
+   * names it, so there is always a moment when it looks like garbage. The
+   * in-memory guard that covers that moment is TAB-LOCAL, so a sweep in one
+   * tab cannot see that another stored bytes a moment ago and has not
+   * captured the row yet. A timestamp on the row is a fact both tabs read.
+   *
+   * Absent on rows written before this was added, which reads as "older than
+   * any sweep" -- correct, because they are.
+   */
+  at?: number;
+};
 
 const awaited = <T>(request: IDBRequest<T>): Promise<T> =>
   new Promise((done, failed) => {
@@ -63,6 +89,19 @@ const opened = (): Promise<IDBDatabase> =>
           .createIndex(WORKSPACE, WORKSPACE, { unique: false });
       }
     };
+    /**
+     * A version change waits for every other tab to let go of the old one,
+     * and without this it waits FOR EVER -- silently, with no error and no
+     * timeout, so the app simply never finishes opening. Saying so is the
+     * least this can do; the tab that is blocking is the user's own.
+     */
+    request.onblocked = () =>
+      failed(
+        new Error(
+          "This workspace is open in another tab running an older version. " +
+            "Close it, or reload it, and this one will finish opening.",
+        ),
+      );
     request.onsuccess = () => done(request.result);
     request.onerror = () => failed(request.error);
   });
@@ -79,6 +118,9 @@ const everythingIn = <T>(
       .index(WORKSPACE)
       .getAll(IDBKeyRange.only(workspace)),
   ) as Promise<T[]>;
+
+/** Wall clock, in one place, so a test can hold it still. */
+const now = () => Date.now();
 
 const isFull = (reason: unknown) =>
   reason instanceof Error &&
@@ -144,6 +186,15 @@ export type Keeping = {
   faltering: () => Faltering | undefined;
   watch: (changed: () => void) => () => void;
   /**
+   * What the last pass at making room found, and whether one is running.
+   *
+   * Reported through the same `watch` as `faltering`, because a consumer is
+   * watching one thing: whether the work it is holding is safe.
+   */
+  reclamation: () => Reclamation;
+  /** Make room now. Answers what it found; one pass at a time, per origin. */
+  reclaim: () => Promise<Reclamation>;
+  /**
    * Every workspace with unsent work written down here.
    *
    * A queue is drained by the stream of the workspace it belongs to, and a
@@ -182,8 +233,13 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
   const nowSaying = (trouble: Faltering | undefined) => {
     const before = faltering?.says;
     faltering = trouble;
-    if (before === trouble?.says) return;
-    for (const changed of [...watchers]) changed();
+    if (before !== trouble?.says) for (const changed of [...watchers]) changed();
+    /**
+     * A store that has just said it is FULL is the one moment worth sweeping
+     * without waiting to be asked -- and the last moment at which sweeping
+     * can still help, because everything after this needs room to work in.
+     */
+    if (trouble?.full === true) void reclaim();
   };
 
   /**
@@ -204,12 +260,14 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
     return mine;
   };
 
-  const put = (store: string, value: Queued | Answer) =>
+  const put = (store: string, value: Queued | Answer) => {
+    maybeReclaim();
     void inOrder(() =>
       awaited(
         database.transaction(store, "readwrite").objectStore(store).put(value),
       ),
     );
+  };
 
   const remove = (store: string, keys: string[]) =>
     void inOrder(async () => {
@@ -304,6 +362,7 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
               workspace,
               digest,
               bytes: stored,
+              at: now(),
             }),
         ),
       );
@@ -346,6 +405,82 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
     },
   };
 
+  /**
+   * Everything on this origin, not just this workspace.
+   *
+   * A sweep decides what is garbage by what NOTHING names, so it has to see
+   * every row there is. Reading one workspace's rows and deleting another's
+   * payloads on the strength of it is how a sweep destroys a queue.
+   */
+  const everywhere: Sweepable = {
+    queued: async () => {
+      const rows = (await awaited(
+        database.transaction(QUEUED, "readonly").objectStore(QUEUED).getAll(),
+      )) as Queued[];
+      return rows.map((row) => ({ workspace: row.workspace, entry: row.entry }));
+    },
+    payloads: async () => {
+      const rows = (await awaited(
+        database.transaction(BYTES, "readonly").objectStore(BYTES).getAll(),
+      )) as Bytes[];
+      return rows.map((row) => ({
+        workspace: row.workspace,
+        digest: row.digest,
+        size: row.bytes.byteLength,
+        at: row.at,
+      }));
+    },
+    drop: (of) =>
+      inOrder(async () => {
+        const store = database.transaction(BYTES, "readwrite").objectStore(BYTES);
+        await Promise.all(
+          of.map(({ workspace: where, digest }) =>
+            awaited(store.delete(keyed(where, digest))),
+          ),
+        );
+        for (const { digest } of of) stamped.delete(digest);
+      }),
+  };
+
+  let reclamation: Reclamation = { phase: "idle" };
+  let sweeping: Promise<Reclamation> | undefined;
+
+  const nowReclaiming = (state: Reclamation) => {
+    reclamation = state;
+    for (const changed of [...watchers]) changed();
+  };
+
+  const reclaim = (): Promise<Reclamation> =>
+    (sweeping ??= (async () => {
+      nowReclaiming({ phase: "sweeping" });
+      try {
+        return await alone(
+          () => sweep(everywhere, headroom, now),
+          /** Another tab has it; its answer is the one that counts. */
+          reclamation,
+        );
+      } finally {
+        sweeping = undefined;
+      }
+    })().then((found) => (nowReclaiming(found), found)));
+
+  /**
+   * Measured rather than waited for.
+   *
+   * Reacting to a store that has already refused is reacting too late: at that
+   * point there may not be room to write down what a sweep decided. So the
+   * counter checks occasionally -- often enough to notice a store filling up,
+   * rarely enough to stay off the hot path.
+   */
+  let written = 0;
+  const EVERY = 64;
+  const maybeReclaim = () => {
+    if ((written += 1) % EVERY !== 0) return;
+    void headroom().then((room) => {
+      if (crowded(room)) void reclaim();
+    });
+  };
+
   return {
     bytes,
     kept,
@@ -354,6 +489,8 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
       watchers.add(changed),
       () => void watchers.delete(changed)
     ),
+    reclamation: () => reclamation,
+    reclaim,
     restored: {
       entries: queued.map((row) => row.entry),
       recorded: answers.map((row) => row.transaction),

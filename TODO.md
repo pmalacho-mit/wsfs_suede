@@ -91,10 +91,30 @@ silent until the first write, which happened twice.
     of a queued write -- see the comment there. Dying between the two leaves
     one copy of one file's text in IndexedDB that nothing references: a leak,
     not a loss.
-    NOT to be fixed with a startup sweep for unreferenced payloads. It would
-    race a second tab that has just stored bytes it has not captured yet, and
-    the `stamped`/`tick` guard in `indexed.ts` is tab-local and cannot see it.
-    Whatever fixes this has to be safe across tabs first.
+    COLLECTED NOW, and the two things that had to be true first are: `BYTES`
+    rows carry a durable `at`, so "older than this pass" is a fact both tabs
+    can read rather than a tab-local guess, and the pass takes a Web Lock so
+    only one tab is ever deciding. See `reclaim.ts`.
+```
+
+## 2c. What a sweep still will not reclaim
+
+```
+[ ] Yjs documents. Compacting one -- rewriting it as `encodeStateAsUpdate` to
+    drop tombstones -- costs nothing and can be most of a long-edited file.
+    It needs enumerating databases this client did not create, and
+    `indexedDB.databases()` does not exist in every browser the suite runs in,
+    so there is no way to find them all. Needs a register of open documents
+    before it can be done at all, let alone safely beside another tab
+[ ] Queued rows the server has already answered but no stream event has
+    carried. Freeing them means asking the authority "which of these have you
+    written down", per workspace, which is a new endpoint. The yield is small
+    -- for a workspace nobody is looking at, the rows were queued offline and
+    the server has never seen them -- so it buys a `blocked` verdict more than
+    it buys space. Worth doing when the space is shown to be there
+[ ] Rows in `answers`. Three ids each, and every reconcile already prunes them
+    to the few a snapshot cannot answer for. Dropping them would cost the
+    accuracy of `unsettled` to save almost nothing
 ```
 
 ## 3. Blobs to object storage
