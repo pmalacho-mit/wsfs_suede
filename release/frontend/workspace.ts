@@ -97,6 +97,15 @@ export type Submitting = {
 export type Creating = Submitting & { entry: Id };
 
 export type Workspace = {
+  /**
+   * Which workspace this is.
+   *
+   * Every scoped endpoint needs it, and a consumer holding only this object
+   * would otherwise have to be handed the id separately and keep the two in
+   * step -- which is exactly how a client goes on calling routes for the
+   * wrong workspace, or for none.
+   */
+  id: Id;
   entries: () => effective.View;
   index: () => paths.Index;
   watch: (changed: Changed) => () => void;
@@ -138,6 +147,19 @@ export type Workspace = {
    * recovers. The version restored from is still in the history afterwards.
    */
   restore: (entry: Id, version: Version) => Promise<Submitting>;
+  /**
+   * This file's collaboration room, as this host serves it.
+   *
+   * Here rather than reached for directly, because these calls are scoped by
+   * workspace and authorised like every other -- and a caller holding this
+   * object already has both.
+   */
+  room: {
+    settle: (entry: Id) => Promise<Version | null>;
+    warm: (entry: Id) => Promise<void>;
+    stored: (entry: Id, version: Version) => Promise<void>;
+    handOver: (entry: Id, update: Uint8Array) => Promise<void>;
+  };
   /**
    * Record that the workspace looked like this.
    *
@@ -516,6 +538,7 @@ export const connect = (options: Options): Workspace => {
   );
 
   return {
+    id: workspace,
     entries: () => shown.view,
     index: () => index,
     watch: (changed) => (
@@ -583,6 +606,13 @@ export const connect = (options: Options): Workspace => {
           told: false,
         };
       }
+    },
+
+    room: {
+      settle: (entry) => transport.settleRoom(workspace, entry),
+      warm: (entry) => transport.warmRoom(workspace, entry),
+      stored: (entry, version) => transport.roomStored(workspace, entry, version),
+      handOver: (entry, update) => transport.handOver(workspace, entry, update),
     },
 
     snapshot: (entries) => {

@@ -17,41 +17,18 @@ import { createClient } from "@liveblocks/client";
 import { LiveblocksYjsProvider } from "@liveblocks/yjs";
 import { IndexeddbPersistence, storeState } from "y-indexeddb";
 import { Rooms, type Persist, type Host } from "./room.svelte";
+import type { Workspace } from "../";
 
 type LiveblocksClient = ReturnType<typeof createClient>;
 
 /**
- * Asking the backend to make an entry's room exist and return it's content.
- */
-const settling = async (entry: string) => {
-  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}`, {
-    method: "POST",
-  });
-  if (!answer.ok) throw new Error(`settling ${entry}: ${answer.status}`);
-  return ((await answer.json()) as { base: string | null }).base;
-};
-
-/**
  * Asking the host to fill a room now, so opening the file later is instant.
  */
-export const warmRoom = async (entry: string): Promise<void> => {
-  await fetch(`/rooms/${encodeURIComponent(entry)}/warm`, { method: "POST" });
-};
-
-/**
- * Telling the backend a member of this room wrote the file.
- *
- * Cheap on purpose, and it is what makes everybody else's settle free: the
- * room already holds the text, so the host only has to be told where the file
- * now stands rather than go and look.
- */
-const storedFromRoom = async (entry: string, version: string) => {
-  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/stored`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ version }),
-  });
-  if (!answer.ok) throw new Error(`stored ${entry}: ${answer.status}`);
+export const warmRoom = async (
+  workspace: Pick<Workspace, "room">,
+  entry: string,
+): Promise<void> => {
+  await workspace.room.warm(entry);
 };
 
 const synchronized = (provider: LiveblocksYjsProvider) =>
@@ -114,21 +91,19 @@ export const persisting: Persist = (entry, doc) => {
   };
 };
 
-const handingOver = async (entry: string, update: Uint8Array) => {
-  const answer = await fetch(`/rooms/${encodeURIComponent(entry)}/updates`, {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: update as BodyInit,
-  });
-  if (!answer.ok) throw new Error(`handing over ${entry}: ${answer.status}`);
-};
-
-/** Everything a room asks of this host, in one place. */
-export const hosted: Host = {
-  settle: settling,
-  stored: storedFromRoom,
-  handOver: handingOver,
-};
+/**
+ * Everything a room asks of this host.
+ *
+ * Taken FROM THE CLIENT rather than built from a path and a bare `fetch`.
+ * These endpoints are scoped by workspace and authorised like every other,
+ * and a hand-built path had nowhere to keep either -- which is how they went
+ * on calling routes that had moved, and then calling them unauthenticated.
+ */
+export const hostedIn = (workspace: Pick<Workspace, "room">): Host => ({
+  settle: (entry) => workspace.room.settle(entry),
+  stored: (entry, version) => workspace.room.stored(entry, version),
+  handOver: (entry, update) => workspace.room.handOver(entry, update),
+});
 
 export const enteringWith = (liveblocks: LiveblocksClient) =>
   ((entry, doc) => {

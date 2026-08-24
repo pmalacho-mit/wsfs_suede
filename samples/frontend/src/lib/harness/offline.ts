@@ -61,6 +61,11 @@ export const offline = (layout: Layout): Transport => {
     store: async () => {},
     /** Nothing was ever written here, so nothing has ever been said. */
     history: async () => ({ versions: [], more: false }),
+    /** And no room was ever filled: this is a picture, not a session. */
+    settleRoom: async () => null,
+    warmRoom: async () => {},
+    roomStored: async () => {},
+    handOver: async () => {},
     /** Nothing was ever kept here, so there is nothing to say has reached anybody. */
     cleared: async () => {},
     follow: () => ({ close: () => {} }),

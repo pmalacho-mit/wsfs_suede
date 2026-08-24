@@ -37,7 +37,7 @@ import {
 } from "../../../../../release/frontend/svelte/room.svelte";
 
 import {
-  hosted,
+  hostedIn,
   persisting,
   untilSynchronized,
 } from "../../../../../release/frontend/svelte/collaborator";
@@ -200,6 +200,16 @@ export const switchable = (
       reach(),
       wire.store(workspace, digest, bytes, mime)
     ),
+    settleRoom: (workspace, entry) => (reach(), wire.settleRoom(workspace, entry)),
+    warmRoom: (workspace, entry) => (reach(), wire.warmRoom(workspace, entry)),
+    roomStored: (workspace, entry, version) => (
+      reach(),
+      wire.roomStored(workspace, entry, version)
+    ),
+    handOver: (workspace, entry, update) => (
+      reach(),
+      wire.handOver(workspace, entry, update)
+    ),
     history: (workspace, entry, asking) => (
       reach(),
       wire.history(workspace, entry, asking)
@@ -289,7 +299,7 @@ export class Collaborator {
     this.rooms = new Rooms(
       this.workspace,
       enteringWith(this.liveblocks),
-      hosted,
+      hostedIn(this.workspace),
       persisting,
     );
   }

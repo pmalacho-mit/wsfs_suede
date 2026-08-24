@@ -12,7 +12,7 @@
     type Sending,
     type Written,
   } from "./room.svelte";
-  import { enteringWith, hosted, persisting } from "./collaborator";
+  import { enteringWith, hostedIn, persisting } from "./collaborator";
   import type { editor } from "monaco-editor";
   import { UserEdits, type UserEdit } from "./edits";
   import { cleaner } from "./utils";
@@ -495,7 +495,7 @@
     const rooms = new Rooms(
       workspace,
       entering ?? enteringWith(liveblocks),
-      hosted,
+      hostedIn(workspace),
       persisting,
     );
 

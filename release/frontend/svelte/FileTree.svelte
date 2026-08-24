@@ -179,7 +179,14 @@
 
   type MinimalWorkspace = Pick<
     Workspace,
-    "index" | "entries" | "move" | "folder" | "create" | "remove" | "watch"
+    | "room"
+    | "index"
+    | "entries"
+    | "move"
+    | "folder"
+    | "create"
+    | "remove"
+    | "watch"
   >;
 
   /**
@@ -467,7 +474,7 @@
     model.performAndDeferAnyAnnouncements(() => mapping.set(entry, path));
     if (!isFolder) {
       awaiting.add(entry);
-      warmRoom(entry);
+      warmRoom(workspace, entry);
     }
   };
 

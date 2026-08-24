@@ -39,6 +39,19 @@ export type Transport = {
     mime: string,
   ) => Promise<void>;
   cleared: (workspace: Id, transactions: Transaction[]) => Promise<void>;
+  /**
+   * The collaboration room for one entry, as this host serves it.
+   *
+   * ON THE TRANSPORT, with everything else that talks to the server. These
+   * were bare `fetch` calls to a path built by hand, which is how they went
+   * on calling routes that had moved -- and, once found, how they went on
+   * calling them without the caller's authorisation. One door, one base URL,
+   * one auth story.
+   */
+  settleRoom: (workspace: Id, entry: Id) => Promise<Version | null>;
+  warmRoom: (workspace: Id, entry: Id) => Promise<void>;
+  roomStored: (workspace: Id, entry: Id, version: Version) => Promise<void>;
+  handOver: (workspace: Id, entry: Id, update: Uint8Array) => Promise<void>;
   /** What this file has said, newest first, as far back as `before`. */
   history: (
     workspace: Id,
@@ -132,6 +145,29 @@ export const http = (base: string, authorize: Authorized): Transport => {
 
     cleared: async (workspace, transactions) => {
       await posted(`${workspaces(workspace)}/drafts/cleared`, { transactions });
+    },
+
+    settleRoom: async (workspace, entry) =>
+      (
+        await json<{ base: Version | null }>(
+          await posted(`${workspaces(workspace)}/rooms/${entry}`, {}),
+        )
+      ).base,
+
+    warmRoom: async (workspace, entry) => {
+      await posted(`${workspaces(workspace)}/rooms/${entry}/warm`, {});
+    },
+
+    roomStored: async (workspace, entry, version) => {
+      await posted(`${workspaces(workspace)}/rooms/${entry}/stored`, { version });
+    },
+
+    handOver: async (workspace, entry, update) => {
+      await send(`${workspaces(workspace)}/rooms/${entry}/updates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: update as BodyInit,
+      });
     },
 
     history: async (workspace, entry, { before, limit }) => {

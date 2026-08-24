@@ -79,7 +79,7 @@
     const pocket: Pocket = harness.set(new Pocket());
     pocket.who = "one client, many rounds";
 
-    const SEED = 7;
+    const SEED = 13579;
     const ROUNDS = 40;
     const roll = rolling(SEED);
     const pick = <T,>(from: T[]): T => from[Math.floor(roll() * from.length)]!;
