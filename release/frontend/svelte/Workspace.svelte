@@ -174,9 +174,25 @@
         .open(id)
         .then((room) => {
           if (this.#disposed) return;
+          this.#carryInWhatWasTypedWhileOpening(room);
           this.shared = room;
           this.file.sourceSync = room.text;
           this.userEdits?.attach(room.text);
+          /**
+           * And store it, because the store it already asked for was refused.
+           *
+           * Typing enqueues a debounced store, and a store made before the
+           * room is open is answered "the room is not open yet" and held --
+           * correctly, since there was nowhere to put it. But nothing asked
+           * again. The file stayed dirty until the person typed one more
+           * character, and if they did not, what they had written sat in a
+           * model on one machine: not on the server, not in the room, not in
+           * a draft, and gone with the tab.
+           *
+           * Opening is the moment that stops being true, so it is the moment
+           * to ask again.
+           */
+          if (this.dirty) void this.store();
         })
         /**
          * A room that never syncs leaves the editor on the content the
@@ -213,6 +229,39 @@
     }
 
     /**
+     * Typing that happened while the room was still opening.
+     *
+     * Opening is two round trips and a socket, and a person who opens a file
+     * and types straight away is typing into a model that is bound to
+     * nothing yet. `MonacoBinding` makes the model say whatever the `Y.Text`
+     * says the moment it is constructed -- so without this, that typing is
+     * not lost slowly or quietly at the far end. It is discarded on screen,
+     * at the moment collaboration starts, in front of the person who typed
+     * it, and the only sign is that the characters go away.
+     *
+     * Carried in as EDITS rather than as a value, because the document is the
+     * shared one: what arrives has to be the insertions it actually was, so
+     * that everybody else's copy merges them rather than being overwritten.
+     *
+     * ONLY WHEN THE ROOM STILL SAYS WHAT THIS EDITOR OPENED ON. Then the
+     * difference between the two is this person's typing and nothing else,
+     * which is the whole reason replaying it is safe. If the room is somewhere
+     * else -- somebody stored while this was opening, or it is holding work
+     * from a session that closed before a store landed -- then the difference
+     * is their text as well, and replaying it would carry theirs away. That
+     * case is left as it was: the room wins, because it is the only one of
+     * the two that more than one person can see.
+     */
+    #carryInWhatWasTypedWhileOpening(room: Room) {
+      if (!this.dirty) return;
+      const typed = this.editor?.getModel()?.getValue();
+      if (typed === undefined) return;
+      const holds = room.text.toString();
+      if (holds === typed || holds !== this.initialContent) return;
+      become(room.text, typed);
+    }
+
+    /**
      * What the person at this keyboard did, and what it costs.
      */
     #watching(
@@ -224,7 +273,6 @@
       this.userEdits = userEdits;
       userEdits.subscribe({
         edited: (edit) => {
-          console.log("Edit by me");
           this.dirty = true;
           typingDebouncer.enqueue(this.id, () => this.store());
           announce?.(edit);

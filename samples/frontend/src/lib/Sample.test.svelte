@@ -21,6 +21,7 @@
   } from "../../../../release/frontend/svelte/FileTree.svelte";
   import Shell from "../../../../release/frontend/svelte/Workspace.svelte";
   import { drivable, solo } from "./harness/liveblocks";
+  import { createClient } from "@liveblocks/client";
   import {
     alongside,
     clickRow,
@@ -48,13 +49,13 @@
    * answers as a genuinely EMPTY room. That was right while the client filled
    * a room from the file; the host fills it now, on the real collaboration
    * server, which this knows nothing about. So the shared document here is
-   * always empty, and the two tests that turn on the shared document holding
-   * the file cannot pass against it.
+   * always empty, and a test that turns on the shared document holding the
+   * file cannot pass against it -- and, worse, cannot be READ against it,
+   * because an empty room and a room that lost the file look the same.
    *
-   * Swapping `solo()` for `clientAs(ADA)` makes them pass -- verified, one of
-   * them in three seconds on its own -- but eighteen tests each opening a
-   * real room is minutes rather than seconds, so it is not the default. See
-   * AUDIT.md.
+   * The two that turn on it take `live` below instead. Everything else keeps
+   * this one: eighteen tests each opening a real room is minutes rather than
+   * seconds, and sixteen of them are not asking about the document at all.
    *
    * The CONNECTION is drivable either way: whether this client's work is
    * reaching anybody is a question about a network, and no room, real or
@@ -62,6 +63,23 @@
    */
   const collaboration = solo();
   const room = drivable(collaboration);
+
+  /**
+   * A real room on the real collaboration server, for the two tests that need
+   * one. Rooms are entered on demand, so naming this costs nothing until a
+   * shell wired to it opens a file.
+   */
+  const live = createClient({
+    authEndpoint: async (asked?: string) => {
+      const answer = await fetch(
+        `/liveblocks/token?rooms=${encodeURIComponent(asked ?? "")}`,
+        { headers: { "X-User-Email": "ada@example.com" } },
+      );
+      if (!answer.ok) throw new Error(`token: ${answer.status}`);
+      return (await answer.json()) as { token: string };
+    },
+  });
+  const liveRoom = drivable(live);
 
   /**
    * Type the way a person does, which is the only kind of edit that counts.
@@ -818,8 +836,8 @@
       {#if p.workspace}
         <Shell
           workspace={p.workspace.workspace}
-          liveblocks={collaboration}
-          entering={room.entering}
+          liveblocks={live}
+          entering={liveRoom.entering}
           onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
         />
       {/if}
@@ -1201,8 +1219,8 @@
       {#if p.workspace}
         <Shell
           workspace={p.workspace.workspace}
-          liveblocks={collaboration}
-          entering={room.entering}
+          liveblocks={live}
+          entering={liveRoom.entering}
           onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
           onSnapshot={(take) => (p.take = take)}
         />
