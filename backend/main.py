@@ -670,6 +670,9 @@ Reconstruct = Callable[
     [UUID, ReconstructionRequest, UUID], Awaitable[ReconstructionResponse]
 ]
 Follow = Callable[[UUID, str], Awaitable[StreamingResponse]]
+Ask = Callable[[UUID, Asking, UUID], Awaitable[Asked]]
+Hear = Callable[[UUID, str, UUID], Awaitable[StreamingResponse]]
+FetchTranscript = Callable[[UUID, datetime | None, int, UUID], Awaitable[Transcript]]
 EnsureRoom = Callable[[UUID, UUID, UUID], Awaitable[RoomStanding]]
 WarmRoom = Callable[[UUID, UUID, BackgroundTasks, UUID], Awaitable[None]]
 RecordStored = Callable[[UUID, UUID, RoomStored, UUID], Awaitable[None]]
@@ -713,6 +716,9 @@ class Mounted:
     clear_drafts: ClearDrafts
     reconstruction: Reconstruct
     stream: Follow
+    ask: Ask
+    hear: Hear
+    conversation: FetchTranscript
     ensure_room: EnsureRoom
     warm_room: WarmRoom
     room_stored: RecordStored
@@ -1326,6 +1332,9 @@ def create_router(
         clear_drafts=clear_drafts,
         reconstruction=reconstruction,
         stream=events,
+        ask=ask,
+        hear=hear,
+        conversation=conversation,
         ensure_room=ensure_room,
         warm_room=warm_room,
         room_stored=room_stored,
