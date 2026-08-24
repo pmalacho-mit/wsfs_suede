@@ -34,6 +34,14 @@ export { inMemory } from "./bytes";
  * written down, and what was there last time.
  */
 export { evictable, keeping, persist } from "./indexed";
+
+/**
+ * Making room for work that has not been sent, and the verdict when there is
+ * none to make. `Reclamation` is what a consumer renders; the rest is here
+ * because the rule for what may be discarded is worth being able to test.
+ */
+export { CROWDED, crowded, headroom } from "./reclaim";
+export type { Headroom, Reclamation } from "./reclaim";
 export type { Keeping } from "./indexed";
 export { nothing, nowhere, remembering } from "./kept";
 export type { Faltering, Kept, Restored } from "./kept";
