@@ -9,6 +9,8 @@
   import type { IDockviewPanelProps } from "dockview";
 
   import { Editor } from "../../../wsfs_suede.python-monaco-suede";
+  import History from "./History.svelte";
+  import HistoryIcon from "@lucide/svelte/icons/history";
   import Preview from "./Preview.svelte";
   import Runner, { type Outcome } from "./Runner.svelte";
   import type { Workspace } from "../";
@@ -85,6 +87,15 @@
   onMount(read);
 
   let runnable = $derived(params.opened.path.endsWith(".py"));
+
+  /**
+   * Offered on every open file, not only when something looks wrong.
+   *
+   * The moment a person needs this is the moment they believe work has gone,
+   * and that is the worst moment to go looking for where it lives. A line
+   * that is always there costs one row and is already known when it matters.
+   */
+  let showingHistory = $state(false);
 </script>
 
 {#if binary}
@@ -99,6 +110,24 @@
   {/if}
   <Preview path={params.opened.path} held={binary} />
 {:else if params.opened.sharedText}
+  <button
+    type="button"
+    class="text-muted-foreground hover:bg-muted/60 flex w-full shrink-0 items-center gap-2 border-b px-3 py-1.5 text-left text-xs"
+    data-region="history-offer"
+    onclick={() => (showingHistory = true)}
+  >
+    <HistoryIcon class="size-3.5 shrink-0" />
+    <span class="truncate">
+      Missing something, or want to see how this looked before?
+      <span class="underline underline-offset-2">Open this file's history</span>
+    </span>
+  </button>
+  <History
+    workspace={params.workspace}
+    entry={params.opened.id}
+    path={params.opened.path}
+    bind:open={showingHistory}
+  />
   {@const trouble = params.opened.sharedText.shared?.trouble}
   {#if trouble}
     <p

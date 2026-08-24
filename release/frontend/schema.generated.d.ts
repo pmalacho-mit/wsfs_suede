@@ -93,6 +93,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/entries/{entry_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * History
+         * @description What this file has said, newest first.
+         *
+         *     Scoped to the CALLER for everything except what the workspace
+         *     accepted: a draft is work that reached nobody, so the author is the
+         *     only person who has ever seen it, and listing somebody else's would
+         *     publish typing they never shared.
+         *
+         *     Paged by `before` rather than by an offset, because rows arrive while
+         *     somebody is reading and an offset would show one twice or skip one.
+         */
+        get: operations["history_wsfs_workspaces__workspace_id__entries__entry_id__history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wsfs/workspaces/{workspace_id}/drafts": {
         parameters: {
             query?: never;
@@ -189,6 +217,123 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ensure Room
+         * @description Make this entry's room exist and say what the file says.
+         *
+         *     Idempotent, and the only way a room is ever filled. Free when there is
+         *     nothing to do, which is the common case by a wide margin: the common
+         *     reason to ask is that somebody just saved and every other client with
+         *     the file open heard about it.
+         *
+         *     A null base is not a failure. It is what a file that is not text a
+         *     room can hold answers -- bytes written over it, or a deletion -- and
+         *     the caller's own read is the first moment anybody could know that.
+         */
+        post: operations["ensure_room_wsfs_workspaces__workspace_id__rooms__entry_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}/warm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Warm Room
+         * @description Fill this room now, so that opening the file later is instant.
+         *
+         *     Creating a room, asking what it holds and filling it is three calls to
+         *     the collaboration server and takes a second or two. Somebody opening a
+         *     file waits for all of it, because an editor bound to a room that has
+         *     not been filled shows an empty document and then saves that over the
+         *     real file.
+         *
+         *     Nobody is waiting when a file is CREATED, so that is where this
+         *     belongs -- whether a person made it or a workspace was cloned for one.
+         *     Answered before the work starts, because the answer is not the point.
+         */
+        post: operations["warm_room_wsfs_workspaces__workspace_id__rooms__entry_id__warm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}/stored": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Room Stored
+         * @description A member of this room wrote the file.
+         *
+         *     The cheap half of the whole design: this host is told where the file
+         *     now stands instead of every client that hears about the write asking
+         *     the collaboration server what the room contains. One POST here, and
+         *     everybody else's settle finds nothing to do.
+         */
+        post: operations["room_stored_wsfs_workspaces__workspace_id__rooms__entry_id__stored_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Hand Over
+         * @description Put a client's own document update into the room for it.
+         *
+         *     The one thing a client cannot do for itself when it can reach this
+         *     host and not the collaboration server. Its work is already kept as a
+         *     draft and cannot be lost -- but nobody else would see it until that
+         *     connection came back, which can be a long time and is not a good
+         *     enough reason.
+         *
+         *     FORWARDED, NOT INTERPRETED. The update carries its own identities, so
+         *     it merges exactly once however many routes it arrives by, including
+         *     this client's own connection when that returns.
+         *
+         *     Sized like a blob, and for the same reason: this is the one route here
+         *     whose body a caller chooses the length of.
+         */
+        post: operations["hand_over_wsfs_workspaces__workspace_id__rooms__entry_id__updates_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -273,6 +418,13 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** History */
+        History: {
+            /** Versions */
+            versions: components["schemas"]["Version"][];
+            /** More */
+            more: boolean;
+        };
         /** InitializeRequest */
         InitializeRequest: {
             /** Outbox */
@@ -293,6 +445,11 @@ export interface components {
             /** Rejected */
             rejected: components["schemas"]["Rejection"][];
         };
+        /**
+         * Kind
+         * @enum {string}
+         */
+        Kind: "text" | "binary";
         /**
          * Metadata
          * @description Pure namespace, plus the four tokens the next mutation must present.
@@ -509,6 +666,29 @@ export interface components {
             parent_version: string;
         };
         /**
+         * RoomStanding
+         * @description Where a room's text stands, as this host remembers it.
+         */
+        RoomStanding: {
+            /** Base */
+            base: string | null;
+        };
+        /**
+         * RoomStored
+         * @description A member of this room wrote the file.
+         *
+         *     Told rather than discovered: the room already holds the text, so the only
+         *     thing that changed is where this host believes it stands. Knowing that is
+         *     what makes every other client's settle cost nothing.
+         */
+        RoomStored: {
+            /**
+             * Version
+             * Format: uuid
+             */
+            version: string;
+        };
+        /**
          * Seen
          * @description Every token of the entry a delete was looking at.
          *
@@ -535,6 +715,17 @@ export interface components {
             /** Content Version */
             content_version: string | null;
         };
+        /**
+         * Standing
+         * @description Where one version of a file stands.
+         *
+         *     Three, not two, because a draft is neither of the others: not what the
+         *     workspace holds, and not the system declining -- it is a client saying it
+         *     could not share this yet. Telling a user their own caution was a refusal
+         *     would report it as a failure.
+         * @enum {string}
+         */
+        Standing: "applied" | "draft" | "refused";
         /**
          * Stranded
          * @description A draft whose work is still only where it was typed.
@@ -629,6 +820,24 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * Version
+         * @description One thing this file has said, and where that stands.
+         */
+        Version: {
+            /**
+             * Transaction
+             * Format: uuid
+             */
+            transaction: string;
+            at: components["schemas"]["Occurrence"];
+            standing: components["schemas"]["Standing"];
+            kind: components["schemas"]["Kind"];
+            /** Size */
+            size?: number | null;
+            /** Why */
+            why?: string | null;
         };
         /**
          * Versions
@@ -863,6 +1072,41 @@ export interface operations {
             };
         };
     };
+    history_wsfs_workspaces__workspace_id__entries__entry_id__history_get: {
+        parameters: {
+            query?: {
+                before?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["History"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     stranded_drafts_wsfs_workspaces__workspace_id__drafts_get: {
         parameters: {
             query?: never;
@@ -984,6 +1228,134 @@ export interface operations {
                     "text/event-stream": unknown;
                     "application/json": components["schemas"]["StreamEvent"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ensure_room_wsfs_workspaces__workspace_id__rooms__entry_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoomStanding"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    warm_room_wsfs_workspaces__workspace_id__rooms__entry_id__warm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    room_stored_wsfs_workspaces__workspace_id__rooms__entry_id__stored_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoomStored"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    hand_over_wsfs_workspaces__workspace_id__rooms__entry_id__updates_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

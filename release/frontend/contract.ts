@@ -36,6 +36,9 @@ export type Snapshot = Schemas["InitializeResponse"];
 export type Rejection = Schemas["Rejection"];
 
 export type Versions = Schemas["Versions"];
+export type Standing = Schemas["Standing"];
+export type Version_ = Schemas["Version"];
+export type History = Schemas["History"];
 export type Reconstructed = Schemas["Reconstructed"];
 export type ReconstructionRequest = Schemas["ReconstructionRequest"];
 export type ReconstructionResponse = Schemas["ReconstructionResponse"];

@@ -200,6 +200,10 @@ export const switchable = (
       reach(),
       wire.store(workspace, digest, bytes, mime)
     ),
+    history: (workspace, entry, asking) => (
+      reach(),
+      wire.history(workspace, entry, asking)
+    ),
     cleared: (workspace, transactions) => (
       reach(),
       wire.cleared(workspace, transactions)

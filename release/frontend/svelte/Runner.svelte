@@ -33,9 +33,7 @@
    * writes to, so running a file runs what is on screen -- including imports
    * of siblings nobody has saved by hand.
    */
-  import EraserIcon from "@lucide/svelte/icons/eraser";
-  import PlayIcon from "@lucide/svelte/icons/play";
-  import SquareIcon from "@lucide/svelte/icons/square";
+  import { Square, Play, Eraser } from "@lucide/svelte";
   import { snippets } from "../../../wsfs_suede.python-web-kernel-suede";
   import { Button } from "./shadcn/ui/button";
   import { Separator } from "./shadcn/ui/separator";
@@ -91,12 +89,12 @@
         variant="destructive"
         onclick={() => running?.interrupt()}
       >
-        <SquareIcon />
+        <Square />
         Stop
       </Button>
     {:else}
       <Button size="xs" onclick={run} data-region="run">
-        <PlayIcon />
+        <Play />
         Run
       </Button>
     {/if}
@@ -106,7 +104,7 @@
       onclick={() => (outputs = [])}
       disabled={outputs.length === 0}
     >
-      <EraserIcon />
+      <Eraser />
       Clear
     </Button>
     <Separator orientation="vertical" class="mx-1 h-4" />

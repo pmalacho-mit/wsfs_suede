@@ -59,6 +59,8 @@ export const offline = (layout: Layout): Transport => {
       text: held.get(entry) ?? "",
     }),
     store: async () => {},
+    /** Nothing was ever written here, so nothing has ever been said. */
+    history: async () => ({ versions: [], more: false }),
     /** Nothing was ever kept here, so there is nothing to say has reached anybody. */
     cleared: async () => {},
     follow: () => ({ close: () => {} }),

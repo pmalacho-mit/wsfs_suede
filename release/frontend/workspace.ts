@@ -22,6 +22,7 @@ import {
   type Write,
 } from "./contract";
 import * as effective from "./effective";
+import { merged, type Told } from "./history";
 import { nothing, nowhere, type Kept, type Restored } from "./kept";
 import { mint } from "./identity";
 import { offset } from "./minted";
@@ -117,6 +118,26 @@ export type Workspace = {
    * and the file may have been renamed since the version it is asking about.
    */
   at: (entry: Id, version: Version) => Promise<Payload>;
+  /**
+   * What this file has said, newest first: queued work, then what the server
+   * holds -- everything it accepted, and this user's own drafts and refusals.
+   *
+   * The queued half is the reason this is not just a call: a client with no
+   * network still has a history, and it is the half nobody else can rebuild.
+   */
+  history: (
+    entry: Id,
+    asking?: { before?: string; limit?: number },
+  ) => Promise<{ versions: Told[]; more: boolean; told: boolean }>;
+  /**
+   * Put back what this file said at that version.
+   *
+   * A NEW WRITE, not a rewind. It presents the token that is current now, so
+   * it is refused if somebody moved the file on -- which is right, because
+   * restoring over work you have not seen is how a restore loses more than it
+   * recovers. The version restored from is still in the history afterwards.
+   */
+  restore: (entry: Id, version: Version) => Promise<Submitting>;
   write: (
     path: paths.Path,
     content: string | Uint8Array,
@@ -457,6 +478,61 @@ export const connect = (options: Options): Workspace => {
      * less than a second cache keyed a second way.
      */
     at: (entry, version) => transport.content(workspace, entry, version),
+
+    history: async (entry, asking = {}) => {
+      /**
+       * Queued work is only in front of the FIRST page. Later pages reach
+       * further back than anything this client is still holding, so putting
+       * the outbox in front of each would repeat it down the list.
+       */
+      const first = asking.before === undefined;
+      try {
+        const said = await transport.history(workspace, entry, asking);
+        return {
+          versions: first
+            ? merged(queue.entries(), entry, said.versions)
+            : said.versions.map((one) => one as Told),
+          more: said.more,
+          told: true,
+        };
+      } catch {
+        /**
+         * THE CASE THIS FEATURE IS MOST FOR. Somebody who cannot reach the
+         * server is exactly the person asking where their work went, and the
+         * answer is in the outbox -- which is here. Refusing to show it
+         * because the other half is unreachable would withhold the only half
+         * that was ever at risk.
+         *
+         * `told` is false so a reader can say the list is partial rather than
+         * letting it look like the whole history.
+         */
+        return {
+          versions: first ? merged(queue.entries(), entry, []) : [],
+          more: false,
+          told: false,
+        };
+      }
+    },
+
+    restore: async (entry, version) => {
+      const held = await transport.content(workspace, entry, version);
+      if (held.kind !== "text")
+        throw new Error(
+          `Version ${version} of this file is ${held.mime}, and putting bytes ` +
+            "back is a copy rather than a write. Not yet supported.",
+        );
+      /**
+       * An ordinary write even when a document speaks for this entry, and
+       * rule one is why that is allowed rather than in spite of it: the rule
+       * closes the door on text that CAME OUT OF AN EDITOR, because typing it
+       * back in creates new characters and the same work survives twice.
+       * This text came out of the server's own history. Nobody's document
+       * holds a second copy of it, so it is diffed in exactly as a script's
+       * write is -- and the room hears about it the same way, by the server
+       * carrying it in.
+       */
+      return written(heldEntry(entry), held.text, TEXT);
+    },
 
     write: (path, payload, mime = TEXT) => {
       const entry = index.at(path);

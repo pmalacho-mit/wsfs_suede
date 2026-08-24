@@ -7,6 +7,7 @@
  */
 import type { Payload } from "./content";
 import type {
+  History,
   Id,
   Response,
   Snapshot,
@@ -38,6 +39,12 @@ export type Transport = {
     mime: string,
   ) => Promise<void>;
   cleared: (workspace: Id, transactions: Transaction[]) => Promise<void>;
+  /** What this file has said, newest first, as far back as `before`. */
+  history: (
+    workspace: Id,
+    entry: Id,
+    asking: { before?: string; limit?: number },
+  ) => Promise<History>;
   follow: (workspace: Id, token: string, reading: Reading) => Subscription;
 };
 
@@ -125,6 +132,17 @@ export const http = (base: string, authorize: Authorized): Transport => {
 
     cleared: async (workspace, transactions) => {
       await posted(`${workspaces(workspace)}/drafts/cleared`, { transactions });
+    },
+
+    history: async (workspace, entry, { before, limit }) => {
+      const asked = new URLSearchParams();
+      if (before !== undefined) asked.set("before", before);
+      if (limit !== undefined) asked.set("limit", String(limit));
+      return json<History>(
+        await send(
+          `${workspaces(workspace)}/entries/${entry}/history?${asked.toString()}`,
+        ),
+      );
     },
 
     content: async (workspace, entry, version) => {

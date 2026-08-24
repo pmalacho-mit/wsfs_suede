@@ -273,6 +273,84 @@
         }
       }
     },
+    "/wsfs/workspaces/{workspace_id}/entries/{entry_id}/history": {
+      "get": {
+        "summary": "History",
+        "description": "What this file has said, newest first.\n\nScoped to the CALLER for everything except what the workspace\naccepted: a draft is work that reached nobody, so the author is the\nonly person who has ever seen it, and listing somebody else's would\npublish typing they never shared.\n\nPaged by `before` rather than by an offset, because rows arrive while\nsomebody is reading and an offset would show one twice or skip one.",
+        "operationId": "history_wsfs_workspaces__workspace_id__entries__entry_id__history_get",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/History"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/wsfs/workspaces/{workspace_id}/drafts": {
       "get": {
         "summary": "Stranded Drafts",
@@ -446,6 +524,204 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}": {
+      "post": {
+        "summary": "Ensure Room",
+        "description": "Make this entry's room exist and say what the file says.\n\nIdempotent, and the only way a room is ever filled. Free when there is\nnothing to do, which is the common case by a wide margin: the common\nreason to ask is that somebody just saved and every other client with\nthe file open heard about it.\n\nA null base is not a failure. It is what a file that is not text a\nroom can hold answers -- bytes written over it, or a deletion -- and\nthe caller's own read is the first moment anybody could know that.",
+        "operationId": "ensure_room_wsfs_workspaces__workspace_id__rooms__entry_id__post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomStanding"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}/warm": {
+      "post": {
+        "summary": "Warm Room",
+        "description": "Fill this room now, so that opening the file later is instant.\n\nCreating a room, asking what it holds and filling it is three calls to\nthe collaboration server and takes a second or two. Somebody opening a\nfile waits for all of it, because an editor bound to a room that has\nnot been filled shows an empty document and then saves that over the\nreal file.\n\nNobody is waiting when a file is CREATED, so that is where this\nbelongs -- whether a person made it or a workspace was cloned for one.\nAnswered before the work starts, because the answer is not the point.",
+        "operationId": "warm_room_wsfs_workspaces__workspace_id__rooms__entry_id__warm_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}/stored": {
+      "post": {
+        "summary": "Room Stored",
+        "description": "A member of this room wrote the file.\n\nThe cheap half of the whole design: this host is told where the file\nnow stands instead of every client that hears about the write asking\nthe collaboration server what the room contains. One POST here, and\neverybody else's settle finds nothing to do.",
+        "operationId": "room_stored_wsfs_workspaces__workspace_id__rooms__entry_id__stored_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomStored"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}/updates": {
+      "post": {
+        "summary": "Hand Over",
+        "description": "Put a client's own document update into the room for it.\n\nThe one thing a client cannot do for itself when it can reach this\nhost and not the collaboration server. Its work is already kept as a\ndraft and cannot be lost -- but nobody else would see it until that\nconnection came back, which can be a long time and is not a good\nenough reason.\n\nFORWARDED, NOT INTERPRETED. The update carries its own identities, so\nit merges exactly once however many routes it arrives by, including\nthis client's own connection when that returns.\n\nSized like a blob, and for the same reason: this is the one route here\nwhose body a caller chooses the length of.",
+        "operationId": "hand_over_wsfs_workspaces__workspace_id__rooms__entry_id__updates_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -664,6 +940,27 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "History": {
+        "properties": {
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/Version"
+            },
+            "type": "array",
+            "title": "Versions"
+          },
+          "more": {
+            "type": "boolean",
+            "title": "More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "versions",
+          "more"
+        ],
+        "title": "History"
+      },
       "InitializeRequest": {
         "properties": {
           "outbox": {
@@ -746,6 +1043,14 @@
         ],
         "title": "InitializeResponse",
         "description": "DEPARTURE: `applied` is transaction ids. The contract echoes back the\nfull requests, which the client already holds and evicts by id."
+      },
+      "Kind": {
+        "type": "string",
+        "enum": [
+          "text",
+          "binary"
+        ],
+        "title": "Kind"
       },
       "Metadata": {
         "properties": {
@@ -1222,6 +1527,43 @@
         ],
         "title": "Reparent"
       },
+      "RoomStanding": {
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          }
+        },
+        "type": "object",
+        "required": [
+          "base"
+        ],
+        "title": "RoomStanding",
+        "description": "Where a room's text stands, as this host remembers it."
+      },
+      "RoomStored": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "RoomStored",
+        "description": "A member of this room wrote the file.\n\nTold rather than discovered: the room already holds the text, so the only\nthing that changed is where this host believes it stands. Knowing that is\nwhat makes every other client's settle cost nothing."
+      },
       "Seen": {
         "properties": {
           "name_version": {
@@ -1261,6 +1603,16 @@
         ],
         "title": "Seen",
         "description": "Every token of the entry a delete was looking at.\n\nDelete is the destructive operation, and the question worth asking is not\n\"has the deleted flag moved\" -- it almost never has -- but \"is this still\nthe thing I was told to destroy\"."
+      },
+      "Standing": {
+        "type": "string",
+        "enum": [
+          "applied",
+          "draft",
+          "refused"
+        ],
+        "title": "Standing",
+        "description": "Where one version of a file stands.\n\nThree, not two, because a draft is neither of the others: not what the\nworkspace holds, and not the system declining -- it is a client saying it\ncould not share this yet. Telling a user their own caution was a refusal\nwould report it as a failure."
       },
       "Stranded": {
         "properties": {
@@ -1443,6 +1795,55 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "Version": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "at": {
+            "$ref": "#/components/schemas/Occurrence"
+          },
+          "standing": {
+            "$ref": "#/components/schemas/Standing"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Kind"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          },
+          "why": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Why"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "at",
+          "standing",
+          "kind"
+        ],
+        "title": "Version",
+        "description": "One thing this file has said, and where that stands."
       },
       "Versions": {
         "properties": {

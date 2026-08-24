@@ -446,6 +446,52 @@ class Clearing(BaseModel):
     transactions: list[UUID]
 
 
+class Standing(str, enum.Enum):
+    """Where one version of a file stands.
+
+    Three, not two, because a draft is neither of the others: not what the
+    workspace holds, and not the system declining -- it is a client saying it
+    could not share this yet. Telling a user their own caution was a refusal
+    would report it as a failure.
+    """
+
+    APPLIED = "applied"
+    DRAFT = "draft"
+    REFUSED = "refused"
+
+
+class Version(BaseModel):
+    """One thing this file has said, and where that stands."""
+
+    transaction: UUID
+    at: Occurrence
+    standing: Standing
+    kind: Kind
+
+    size: int | None = None
+    """Characters for text, bytes for a blob, null when neither is known.
+
+    A refused write is stored as a delta against what came before it, so its
+    stored length is the size of an edit script rather than of the file. Null
+    says so instead of reporting a number that means something else.
+    """
+
+    why: str | None = None
+    """The refusal's reason, for a version the system declined. Null for a
+    draft, whose reason is always the same one and is already its standing."""
+
+
+class History(BaseModel):
+    versions: list[Version]
+
+    more: bool
+    """Whether asking again with an earlier `before` would find any.
+
+    Answered by fetching one more row than was asked for, so saying it costs
+    a row rather than a count over the whole history.
+    """
+
+
 class Stranded(BaseModel):
     """A draft whose work is still only where it was typed."""
 
