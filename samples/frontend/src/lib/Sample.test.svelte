@@ -1196,6 +1196,81 @@
 </Sweater>
 
 <Sweater
+  name="typing survives the whole page going away, room or no room"
+  lazy
+  body={async (harness) => {
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    await workspace.workspace.create("leaving.md", "before").settled;
+    const { root } = await harness.definition("root");
+    await until(
+      "the file is drawn",
+      () => !!rowFor(root, "leaving.md"),
+      () => drawn(root).join(" | "),
+    );
+
+    await clickRow(rowFor(root, "leaving.md")!);
+    await until(
+      "the editor handed itself over",
+      () => pocket.editor !== undefined,
+    );
+    pocket.editor!.focus();
+    await until(
+      "the editor opened on the file",
+      () => pocket.editor!.getModel()?.getValue() === "before",
+      () => JSON.stringify(pocket.editor!.getModel()?.getValue()),
+    );
+
+    // Nobody shuts a panel on the way out of a browser. The page just goes,
+    // and the only warning anything gets is this event.
+    typeInto(pocket.editor!, " after");
+    await until(
+      "it went dirty",
+      () => pocket.take!().entries.some((held: any) => held.dirty),
+    );
+    window.dispatchEvent(new Event("pagehide"));
+
+    /**
+     * Answered for BEFORE anything else runs, which is the whole point: a
+     * page that is really going does not come back for a later attempt. So
+     * this asks in the same turn as the event, and what it asks is whether
+     * this file is still holding text that nobody else has.
+     */
+    harness
+      .expect(
+        pocket.take!().entries.find((one: any) => one.path === "leaving.md")
+          .dirty,
+      )
+      .toBe(false);
+
+    await until(
+      "the typing to reach the server",
+      () => texted(other.workspace.holding("leaving.md")) === "before after",
+      () => JSON.stringify(other.workspace.holding("leaving.md")),
+      20_000,
+    );
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={live}
+          entering={liveRoom.entering}
+          onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
+          onSnapshot={(take) => (p.take = take)}
+        />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>
+
+<Sweater
   name="a snapshot resolves what the user has not stored, in one pass"
   lazy
   body={async (harness) => {

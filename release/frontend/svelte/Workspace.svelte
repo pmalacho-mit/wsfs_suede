@@ -388,7 +388,7 @@
      * not need to: the transaction is in the durable outbox before this
      * returns, and the outbox is what promises delivery.
      */
-    #putAwayWhatWasTyped() {
+    keepWhatWasTyped() {
       if (!this.dirty) return;
       if (this.shared !== undefined) return void this.store();
       const typed = this.editor?.getModel()?.getValue();
@@ -396,11 +396,19 @@
       void this.workspace
         .shares(this.id, typed)
         .settled.catch(() => undefined);
+      /**
+       * No longer holding anything nobody else has. The transaction is in the
+       * outbox, which is a better place than this model -- and saying so
+       * matters when the page does not actually go after all, as a page put
+       * into the back/forward cache and then come back to has not.
+       */
+      typingDebouncer.clear(this.id);
+      this.dirty = false;
     }
 
     dispose() {
       if (this.#disposed) return;
-      this.#putAwayWhatWasTyped();
+      this.keepWhatWasTyped();
       this.#disposed = true;
       this.cleanup();
       this.userEdits?.dispose();
@@ -825,6 +833,27 @@
       onEditor,
       onUserEdit: () => nudge.withdraw(),
     };
+
+    /**
+     * The page going away is a close that nobody clicked.
+     *
+     * A panel being shut is where unsaved typing is put away, and nothing
+     * shuts the panels when the whole page goes -- but "I typed the last bit
+     * and then closed the browser" is an ordinary way to stop working, and it
+     * has to keep the last bit.
+     *
+     * `pagehide` rather than `beforeunload`, for the reason the debouncer
+     * gives: registering `beforeunload` disqualifies the page from the
+     * back/forward cache in several browsers, and this needs no prompt.
+     */
+    const keepWhatNobodySaved = () =>
+      openFiles.forEach((open) => open.sharedText?.keepWhatWasTyped());
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", keepWhatNobodySaved);
+      cleanup.add(() =>
+        window.removeEventListener("pagehide", keepWhatNobodySaved),
+      );
+    }
 
     cleanup.add(
       () => openFiles.forEach((open) => open.sharedText?.dispose()),
