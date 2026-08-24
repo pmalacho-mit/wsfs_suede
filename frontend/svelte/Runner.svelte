@@ -37,8 +37,8 @@
   import PlayIcon from "@lucide/svelte/icons/play";
   import SquareIcon from "@lucide/svelte/icons/square";
   import { snippets } from "../../../wsfs_suede.python-web-kernel-suede";
-  import { Button } from "./components/ui/button";
-  import { Separator } from "./components/ui/separator";
+  import { Button } from "./shadcn/ui/button";
+  import { Separator } from "./shadcn/ui/separator";
   import type { KernelPool, SharedTextFile } from "./Workspace.svelte";
 
   let {
