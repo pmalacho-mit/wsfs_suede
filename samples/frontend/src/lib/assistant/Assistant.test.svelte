@@ -31,6 +31,21 @@
       model: "scripted",
     }));
 
+  /** A transcript whose answer contains a fenced block, as a real one does. */
+  const withCode = () => [
+    {
+      message: "told-code",
+      at: { minted: null, offset: null, accepted: "2026-08-24T00:00:00Z" },
+      text: "show me a decorator",
+      snapshot: null,
+      attached: [],
+      answer:
+        "Here is one:\n\n```python\ndef logger(func):\n    return func\n```\n\nThat is the shape.",
+      failure: null,
+      model: "scripted",
+    },
+  ];
+
   const bubbles = (within: HTMLElement) => [
     ...within.querySelectorAll("[data-turn]"),
   ] as HTMLElement[];
@@ -484,5 +499,145 @@
 >
   {#snippet vest(pocket: Pocket)}
     {@render panel(pocket)}
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a code block in an answer can be copied and downloaded"
+  body={async ({ set, container, expect, delay, capture }) => {
+    /**
+     * The tutor answers with code more often than not, so the two controls on
+     * a code block are part of the feature rather than decoration. Both were
+     * doing nothing, and a button that does nothing looks exactly like one
+     * that is not there.
+     */
+    const pocket = set(new Pocket(withCode()));
+    await delay({ frames: 4 });
+    await until("the answer to arrive", () => bubbles(container).length >= 2);
+    await until(
+      "the code block to be highlighted",
+      () => !!container.querySelector("[data-streamdown='code-block']"),
+      12_000,
+    );
+    await delay({ frames: 6 });
+
+    const buttons = [
+      ...container.querySelectorAll(
+        "[data-streamdown='code-block-actions'] button",
+      ),
+    ] as HTMLButtonElement[];
+    expect(buttons.length, "a download and a copy button").toBe(2);
+    for (const button of buttons)
+      expect(button.disabled, `${button.title} is clickable`).toBe(false);
+
+    /**
+     * HIT-TESTED, not just present. These sit in a sticky shell that is pulled
+     * up over the header, so "rendered" and "reachable by a pointer" are two
+     * different claims and only the second one matters to somebody clicking.
+     */
+    for (const button of buttons) {
+      /**
+       * Brought into view first. These tests share one page, so a control
+       * that is off-screen would be hit-tested against whatever else happens
+       * to occupy those viewport coordinates -- another test's panel.
+       */
+      button.scrollIntoView({ block: "center" });
+      await delay({ frames: 2 });
+      const { left, top, width, height } = button.getBoundingClientRect();
+      const at = container.ownerDocument.elementFromPoint(
+        left + width / 2,
+        top + height / 2,
+      );
+      const shell = button.closest(
+        "[data-streamdown='code-block-actions-shell']",
+      ) as HTMLElement;
+      const inner = button.parentElement as HTMLElement;
+      const seen = (element: HTMLElement) => {
+        const style = getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return {
+          pointer: style.pointerEvents,
+          position: style.position,
+          z: style.zIndex,
+          margin: style.marginTop,
+          box: `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}`,
+        };
+      };
+      expect(
+        button.contains(at) || button === at,
+        `${button.title}: click landed on ${at?.tagName}.${String((at as HTMLElement)?.className).slice(0, 40)} | ` +
+          `button ${JSON.stringify(seen(button))} | inner ${JSON.stringify(seen(inner))} | ` +
+          `shell ${JSON.stringify(seen(shell))}`,
+      ).toBe(true);
+    }
+    /**
+     * ON THE LANGUAGE'S ROW, which is the other half of the complaint. The
+     * controls are lifted onto the header by a negative margin; without it
+     * they drop to a row of their own and leave the header looking like an
+     * empty bar with the language stranded at one end. Compared by centre
+     * line, so this says "beside" rather than "within a pixel".
+     */
+    const header = container.querySelector(
+      "[data-streamdown='code-block-header']",
+    ) as HTMLElement;
+    const shellOf = buttons[0]!.closest(
+      "[data-streamdown='code-block-actions-shell']",
+    ) as HTMLElement;
+    const middle = (element: HTMLElement) => {
+      const box = element.getBoundingClientRect();
+      return box.top + box.height / 2;
+    };
+    expect(
+      Math.abs(middle(header) - middle(shellOf)),
+      `header centre ${middle(header)} vs controls ${middle(shellOf)}`,
+    ).toBeLessThan(10);
+
+    /**
+     * AND THEY DO SOMETHING. Reachable is not the same as wired, and "nothing
+     * happens" was the whole complaint -- so this watches the two APIs the
+     * controls end in and clicks them for real.
+     */
+    const window_ = container.ownerDocument.defaultView as any;
+    const copied: string[] = [];
+    const saved: Blob[] = [];
+    const clipboard = window_.navigator.clipboard;
+    const madeUrl = window_.URL.createObjectURL;
+    Object.defineProperty(window_.navigator, "clipboard", {
+      value: { writeText: async (text: string) => void copied.push(text) },
+      configurable: true,
+    });
+    window_.URL.createObjectURL = (blob: Blob) => (
+      saved.push(blob), "blob:stubbed"
+    );
+    try {
+      const download = buttons.find((one) => /download/i.test(one.title))!;
+      const copy = buttons.find((one) => /cop/i.test(one.title))!;
+      download.click();
+      copy.click();
+      await until("the copy to reach the clipboard", () => copied.length === 1);
+    } finally {
+      Object.defineProperty(window_.navigator, "clipboard", {
+        value: clipboard,
+        configurable: true,
+      });
+      window_.URL.createObjectURL = madeUrl;
+    }
+
+    expect(copied[0], "the code, and only the code").toBe(
+      "def logger(func):\n    return func",
+    );
+    expect(saved, "one file offered for download").toHaveLength(1);
+    expect(await saved[0]!.text()).toContain("def logger(func):");
+    await capture("png").uri;
+  }}
+>
+  {#snippet vest(pocket: Pocket)}
+    <div class="bg-background h-[30rem] w-full">
+      <Assistant
+        conversation={pocket.conversation}
+        attached={pocket.attached}
+        onAsk={pocket.ask}
+      />
+    </div>
   {/snippet}
 </Sweater>
