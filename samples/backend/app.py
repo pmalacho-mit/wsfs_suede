@@ -167,7 +167,14 @@ def create_sample_app(
         return {"token": answer.json()["token"]}
 
     @app.post("/projects", status_code=201)
-    async def open_project(project_id: UUID | None) -> dict[str, str]:
+    async def open_project(project_id: UUID | None = None) -> dict[str, str]:
+        """Open the named project, or make one when none is named.
+
+        `= None` is load-bearing: a query parameter typed `UUID | None` with
+        no default is REQUIRED by FastAPI, nullability notwithstanding -- so
+        without it the half of this route that makes a project cannot be
+        reached at all, and every caller gets a 422.
+        """
         async with database.session() as session:
             if project_id is None:
                 project = Project()
