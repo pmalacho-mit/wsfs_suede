@@ -12,6 +12,8 @@
   import History from "./History.svelte";
   import HistoryIcon from "@lucide/svelte/icons/history";
   import Preview from "./Preview.svelte";
+  import ProblemHeader from "./ProblemHeader.svelte";
+  import { headerFor } from "./headers";
   import Runner, { type Outcome } from "./Runner.svelte";
   import type { Workspace } from "../";
   import type { KernelPool, OpenFile } from "./Workspace.svelte";
@@ -95,6 +97,13 @@
   let runnable = $derived(params.opened.path.endsWith(".py"));
 
   /**
+   * The problem this file is an answer to, for the files somebody wrote one
+   * down for. Derived from the path rather than read once, so a file that is
+   * renamed stops -- or starts -- carrying a header along with the name.
+   */
+  let problem = $derived(headerFor(params.opened.path));
+
+  /**
    * Offered on every open file, not only when something looks wrong.
    *
    * The moment a person needs this is the moment they believe work has gone,
@@ -134,7 +143,10 @@
     path={params.opened.path}
     bind:open={showingHistory}
   />
-  <div class="text relative" class:runnable>
+  <div class="text relative" class:runnable class:headed={problem !== undefined}>
+    {#if problem !== undefined}
+      <ProblemHeader content={problem} />
+    {/if}
     <!--
       OVER the editor rather than above it.
       A notice that takes a row pushes every line of code down the moment it
@@ -189,5 +201,15 @@
   }
   .text.runnable {
     grid-template-rows: 1fr minmax(7rem, 30%);
+  }
+  /* The header takes what it needs -- itself capped -- and the editor takes
+     the rest, which is why it is a row here rather than a block above the
+     grid: an editor sized to 100% of a box it no longer fills alone overflows
+     the panel, and the terminal underneath goes off the bottom of it. */
+  .text.headed {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .text.headed.runnable {
+    grid-template-rows: auto minmax(0, 1fr) minmax(7rem, 30%);
   }
 </style>
