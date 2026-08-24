@@ -18,6 +18,8 @@ import type {
   Answering,
   Asked,
   Asking,
+  Judged,
+  Judging,
   Transcript,
 } from "./contract";
 
@@ -75,6 +77,8 @@ export type Transport = {
    * would replay an answer somebody has already read.
    */
   hear: (workspace: Id, token: string) => AsyncIterable<Answering>;
+  /** Whether a program has moved toward its goal since a few minutes ago. */
+  progress: (workspace: Id, asking: Judging) => Promise<Judged>;
   /** This person's conversation here, newest first. */
   conversation: (
     workspace: Id,
@@ -223,6 +227,9 @@ export const http = (base: string, authorize: Authorized): Transport => {
         }
       }
     },
+
+    progress: async (workspace, asking) =>
+      json<Judged>(await posted(`${workspaces(workspace)}/progress`, asking)),
 
     conversation: async (workspace, { before, limit }) => {
       const asked = new URLSearchParams();

@@ -256,7 +256,13 @@ async def _cas(
 # -- judgement: why a request cannot be applied, if it cannot --------------------
 
 
-def _refuses_name(name: str) -> str | None:
+def refuses_name(name: str) -> str | None:
+    """Why this cannot be what an entry is called, or None.
+
+    PUBLIC because a path segment and an entry name are the same thing, and
+    `place` splits paths into them. Two definitions of what a name may be
+    would be two definitions that eventually disagree.
+    """
     if not name or name in (".", ".."):
         return Refusal.NAME_INVALID
     if UNNAMEABLE.search(name) or name != name.strip():
@@ -358,7 +364,7 @@ async def _overfull(submission: Submission, where: Destination) -> str | None:
 
 
 async def _refuses_create(submission: Submission, request: Create) -> str | None:
-    if (unnameable := _refuses_name(request.name)) is not None:
+    if (unnameable := refuses_name(request.name)) is not None:
         return unnameable
     if await _bytes_are_missing(submission, request.content):
         return Refusal.BYTES_NEVER_STORED
@@ -439,7 +445,7 @@ async def _refuses_rename(submission: Submission, request: Rename) -> str | None
         return Refusal.ENTRY_UNKNOWN
     if node.deleted:
         return Refusal.ENTRY_DELETED
-    if (unnameable := _refuses_name(request.name)) is not None:
+    if (unnameable := refuses_name(request.name)) is not None:
         return unnameable
     if (
         conflict := await _cas(
@@ -496,7 +502,7 @@ async def _refuses_move(submission: Submission, request: Move) -> str | None:
         return Refusal.ENTRY_UNKNOWN
     if node.deleted:
         return Refusal.ENTRY_DELETED
-    if (unnameable := _refuses_name(request.name)) is not None:
+    if (unnameable := refuses_name(request.name)) is not None:
         return unnameable
     if (stale := await _cas(
         submission, node, request.name_version,

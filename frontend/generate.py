@@ -71,7 +71,7 @@ def _stub() -> "FastAPI":
                 tutor=cast(ITutor, _absent),
             ),
             authorize=never_asked,
-        )
+        ).router
     )
     return app
 

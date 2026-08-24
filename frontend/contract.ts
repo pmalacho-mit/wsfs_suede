@@ -112,3 +112,5 @@ export type Attaching = Schemas["Attaching"];
 export type Attached = Schemas["Attached"];
 export type Turn = Schemas["Turn"];
 export type Transcript = Schemas["Transcript"];
+export type Judging = Schemas["Judging"];
+export type Judged = Schemas["Judged"];
