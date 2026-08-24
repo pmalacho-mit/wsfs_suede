@@ -3,7 +3,13 @@
   import type { Output } from "../../../wsfs_suede.python-web-kernel-suede";
   import { Editor } from "../../../wsfs_suede.python-monaco-suede";
   import { nameOf, holderOf } from "./paths";
-  import { filesystem, MappedDebouncer, provider, type Workspace } from "../";
+  import {
+    filesystem,
+    MappedDebouncer,
+    provider,
+    type Submitting,
+    type Workspace,
+  } from "../";
   import {
     become,
     Rooms,
@@ -393,9 +399,7 @@
       if (this.shared !== undefined) return void this.store();
       const typed = this.editor?.getModel()?.getValue();
       if (typed === undefined || typed === this.initialContent) return;
-      void this.workspace
-        .shares(this.id, typed)
-        .settled.catch(() => undefined);
+      void this.workspace.shares(this.id, typed).settled.catch(() => undefined);
       /**
        * No longer holding anything nobody else has. The transaction is in the
        * outbox, which is a better place than this model -- and saying so
@@ -494,6 +498,15 @@
   const ROOT = "/home/pyodide";
 
   export type KernelPool = WarmPool<Kernel>;
+
+  export class Model extends WithEvents<{
+    executed: [
+      entry: Id,
+      snapshot: Submitting,
+      output: Output.Specific[],
+      outcome: Outcome,
+    ];
+  }> {}
 </script>
 
 <script lang="ts">
@@ -522,14 +535,17 @@
   import { Conversation } from "./assistant/conversation.svelte";
   import { Nudge } from "./assistant/nudge";
   import type { Outcome } from "./Runner.svelte";
+  import { WithEvents } from "../../../wsfs_suede.with-events-suede";
 
   let {
+    model,
     workspace,
     liveblocks,
     entering,
     onEditor,
     onSnapshot,
   }: {
+    model: Model;
     workspace: Workspace;
     liveblocks: LiveblocksClient;
     /**
@@ -730,7 +746,8 @@
          * says something new -- a script's, an assistant's -- is not this,
          * and goes on down.
          */
-        if (sharedText !== undefined && value === sharedText.source) return true;
+        if (sharedText !== undefined && value === sharedText.source)
+          return true;
         /**
          * A room that has not said what it holds is not a room this write can
          * go into: editing a document that has not received its own content
@@ -820,7 +837,7 @@
      * output is evidence about; taking it afterwards would name whatever the
      * file had become by then.
      */
-    const started = async ({
+    const onCodeExecution = async ({
       entry,
       result,
     }: {
@@ -829,20 +846,20 @@
       result: Promise<Outcome>;
     }) => {
       if (entry === undefined) return;
-      const showing = snapshot().visible.map((held) => held.entry);
       const taken = workspace.snapshot(
-        showing.includes(entry) ? showing : [entry, ...showing],
+        snapshot().entries.map((held) => held.entry),
       );
       const outcome = await result;
       const open = openFiles.get(entry)?.sharedText;
       const outputs = open?.executions.at(-1)?.outputs ?? [];
+      model.fire("executed", entry, taken, outputs, outcome);
       /**
        * Awaited so a snapshot that was refused -- naming a version the server
        * never issued -- does not leave an execution pointing at nothing.
        */
       const kept = await taken.settled;
       if (kept.rejected) return;
-      void workspace.executed(entry, taken.transaction, outputs, outcome.ok);
+      workspace.executed(entry, taken.transaction, outputs, outcome.ok);
     };
 
     const editorProps: EditorHooks = {
@@ -901,7 +918,7 @@
                 kernelPool,
                 workspace,
                 onFinished: finished,
-                onRun: started,
+                onRun: onCodeExecution,
               },
               { id, title },
             );
@@ -984,7 +1001,8 @@
   <div class="h-full min-h-0 border-l" data-region="assistant">
     <Assistant
       {conversation}
-      attached={snapshot().visible.map(({ path, executions }) => ({
+      attached={snapshot().visible.map(({ path, executions, entry }) => ({
+        entry,
         path,
         executions,
       }))}

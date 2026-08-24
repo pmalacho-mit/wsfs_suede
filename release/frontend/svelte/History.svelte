@@ -13,9 +13,7 @@
    * list afterwards, and a restore can be refused like any other write if
    * somebody moved the file on meanwhile.
    */
-  import ClockIcon from "@lucide/svelte/icons/clock";
-  import EyeIcon from "@lucide/svelte/icons/eye";
-  import RotateCcwIcon from "@lucide/svelte/icons/rotate-ccw";
+  import { Clock, Eye, RotateCcw } from "@lucide/svelte";
   import type { Told } from "../history";
   import type { Workspace } from "../";
   import type { Id } from "../contract";
@@ -90,7 +88,8 @@
    * row the server actually gave us, and unsent work never moves the window.
    */
   const oldest = () =>
-    [...versions].reverse().find((one) => one.at.accepted !== null)?.at.accepted;
+    [...versions].reverse().find((one) => one.at.accepted !== null)?.at
+      .accepted;
 
   const read = async (again: boolean) => {
     if (reading) return;
@@ -175,7 +174,7 @@
   let sentinel = $state<HTMLElement | undefined>(undefined);
   $effect(() => {
     const held = sentinel;
-    if (held === undefined || !more) return;
+    if (held === undefined || held === null || !more) return;
     const watching = new IntersectionObserver((entries) => {
       if (entries.some((one) => one.isIntersecting)) void read(true);
     });
@@ -198,13 +197,13 @@
   >
     <Dialog.Header class="shrink-0 border-b px-5 py-4">
       <Dialog.Title class="flex items-center gap-2 text-base">
-        <ClockIcon class="size-4" />
+        <Clock class="size-4" />
         History of <span class="font-mono text-sm">{path}</span>
       </Dialog.Title>
       <Dialog.Description>
-        Everything this file has said, newest first — including your own
-        unsent and unaccepted writes. View one to see what it held; putting it
-        back is a new change, not an undo.
+        Everything this file has said, newest first — including your own unsent
+        and unaccepted writes. View one to see what it held; putting it back is
+        a new change, not an undo.
       </Dialog.Description>
     </Dialog.Header>
 
@@ -219,7 +218,10 @@
         </p>
       {/if}
       {#if failure}
-        <p class="text-destructive px-3 py-2 text-sm" data-region="history-failed">
+        <p
+          class="text-destructive px-3 py-2 text-sm"
+          data-region="history-failed"
+        >
           {failure}
         </p>
       {/if}
@@ -231,56 +233,60 @@
           data-standing={version.standing}
           data-transaction={version.transaction}
         >
-        <div class="hover:bg-muted/60 flex items-center gap-3 rounded-md px-3 py-2">
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <Badge variant={tone(version.standing)} class="shrink-0">
-                {says[version.standing]}
-              </Badge>
-              <span class="text-muted-foreground truncate text-xs">
-                {when(version)}
-              </span>
+          <div
+            class="hover:bg-muted/60 flex items-center gap-3 rounded-md px-3 py-2"
+          >
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <Badge variant={tone(version.standing)} class="shrink-0">
+                  {says[version.standing]}
+                </Badge>
+                <span class="text-muted-foreground truncate text-xs">
+                  {when(version)}
+                </span>
+              </div>
+              {#if version.why}
+                <p class="text-muted-foreground mt-1 truncate text-xs">
+                  {version.why}
+                </p>
+              {/if}
             </div>
-            {#if version.why}
-              <p class="text-muted-foreground mt-1 truncate text-xs">
-                {version.why}
-              </p>
-            {/if}
+            <span
+              class="text-muted-foreground shrink-0 font-mono text-[0.7rem]"
+            >
+              {version.size === null ? "" : `${version.size} chars`}
+            </span>
+            <Button
+              size="xs"
+              variant="ghost"
+              data-region="preview-toggle"
+              onclick={() => look(version)}
+            >
+              <Eye />
+              {showing === version.transaction ? "Hide" : "View"}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              data-region="restore"
+              disabled={restoring !== undefined || version.kind !== "text"}
+              onclick={() => restore(version)}
+            >
+              <RotateCcw />
+              {restoring === version.transaction ? "Putting back…" : "Restore"}
+            </Button>
           </div>
-          <span class="text-muted-foreground shrink-0 font-mono text-[0.7rem]">
-            {version.size === null ? "" : `${version.size} chars`}
-          </span>
-          <Button
-            size="xs"
-            variant="ghost"
-            data-region="preview-toggle"
-            onclick={() => look(version)}
-          >
-            <EyeIcon />
-            {showing === version.transaction ? "Hide" : "View"}
-          </Button>
-          <Button
-            size="xs"
-            variant="ghost"
-            data-region="restore"
-            disabled={restoring !== undefined || version.kind !== "text"}
-            onclick={() => restore(version)}
-          >
-            <RotateCcwIcon />
-            {restoring === version.transaction ? "Putting back…" : "Restore"}
-          </Button>
-        </div>
 
-        {#if showing === version.transaction}
-          <div class="px-3 pb-3" data-region="preview">
-            {#if reading_version}
-              <p class="text-muted-foreground text-xs">Reading…</p>
-            {:else}
-              <pre
-                class="bg-muted/60 max-h-56 overflow-auto rounded-md p-3 font-mono text-[0.72rem] leading-relaxed whitespace-pre-wrap">{said}</pre>
-            {/if}
-          </div>
-        {/if}
+          {#if showing === version.transaction}
+            <div class="px-3 pb-3" data-region="preview">
+              {#if reading_version}
+                <p class="text-muted-foreground text-xs">Reading…</p>
+              {:else}
+                <pre
+                  class="bg-muted/60 max-h-56 overflow-auto rounded-md p-3 font-mono text-[0.72rem] leading-relaxed whitespace-pre-wrap">{said}</pre>
+              {/if}
+            </div>
+          {/if}
         </div>
       {:else}
         {#if !reading}

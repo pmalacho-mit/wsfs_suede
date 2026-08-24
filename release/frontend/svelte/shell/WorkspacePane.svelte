@@ -12,7 +12,7 @@
    * it both ways and measure.
    */
   import type { Faltering, Reclamation, Workspace as WSFS } from "../../";
-  import Workspace from "../Workspace.svelte";
+  import Workspace, { Model } from "../Workspace.svelte";
   import type { createClient } from "@liveblocks/client";
 
   let {
@@ -38,6 +38,8 @@
    * which is why it does not go through the door `lost` uses.
    */
   const shortOf = $derived(room?.phase === "short" ? room : undefined);
+
+  const model = new Model();
 </script>
 
 <div class="flex h-full min-h-0 flex-col" data-region="workspace-pane">
@@ -70,6 +72,6 @@
     </p>
   {/if}
   <div class="min-h-0 flex-1" data-region="workspace-body">
-    <Workspace {workspace} {liveblocks} />
+    <Workspace {workspace} {liveblocks} {model} />
   </div>
 </div>

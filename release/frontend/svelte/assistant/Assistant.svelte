@@ -7,7 +7,7 @@
    * carries is decided by whoever knows what is on screen -- and so this can
    * be looked at, in a test, with any set of files at all.
    */
-  import MessagesSquareIcon from "@lucide/svelte/icons/messages-square";
+  import { MessagesSquare } from "@lucide/svelte";
   import {
     Conversation as Transcript,
     ConversationContent,
@@ -30,18 +30,21 @@
     PromptInputTools,
     type PromptInputMessage,
   } from "../shadcn/ai-elements/prompt-input";
-  import { Suggestion, Suggestions } from "../shadcn/ai-elements/suggestion";
+  //import { Suggestion, Suggestions } from "../shadcn/ai-elements/suggestion";
   import PanelHeading from "../shell/PanelHeading.svelte";
   import AttachedFiles from "./AttachedFiles.svelte";
   import type { Conversation } from "./conversation.svelte";
+  import type { Id } from "../../contract";
 
   let {
     conversation,
     attached,
+    oninput,
   }: {
     conversation: Conversation;
     /** What goes with the next question, and how much goes with each. */
-    attached: { path: string; executions: number }[];
+    attached: { entry: Id; path: string; executions: number }[];
+    oninput?: (input: Event) => void;
   } = $props();
 
   /** Streamdown's shadcn base leaves lists unmarked. These are the markers. */
@@ -61,7 +64,7 @@
   class="bg-sidebar grid h-full min-h-0 w-full min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden"
   data-region="assistant"
 >
-  <PanelHeading label="Assistant" icon={MessagesSquareIcon} />
+  <PanelHeading label="Assistant" icon={MessagesSquare} />
 
   <Transcript class="min-h-0 min-w-0">
     <ConversationContent class="gap-6 p-3">
@@ -77,7 +80,7 @@
           description="Whatever is open in the dock goes along with your question."
         >
           {#snippet icon()}
-            <MessagesSquareIcon class="size-6" />
+            <MessagesSquare class="size-6" />
           {/snippet}
         </ConversationEmptyState>
       {/each}
@@ -93,19 +96,22 @@
   </Transcript>
 
   <div class="flex min-w-0 flex-col gap-2 border-t p-3">
-    {#if conversation.turns.length === 0}
+    <!-- {#if conversation.turns.length === 0}
       <Suggestions>
         {#each openers as opener (opener)}
           <Suggestion suggestion={opener} onclick={ask} />
         {/each}
       </Suggestions>
-    {/if}
+    {/if} -->
     <PromptInput onSubmit={(message: PromptInputMessage) => ask(message.text)}>
       <PromptInputHeader class="border-b px-3 py-2">
         <AttachedFiles {attached} />
       </PromptInputHeader>
       <PromptInputBody>
-        <PromptInputTextarea placeholder="Ask about the files in view…" />
+        <PromptInputTextarea
+          placeholder="Ask about the files in view…"
+          {oninput}
+        />
       </PromptInputBody>
       <PromptInputToolbar class="px-2 pb-2">
         <PromptInputTools />
