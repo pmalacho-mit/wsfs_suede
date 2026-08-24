@@ -11,7 +11,8 @@
   import * as Tooltip from "../shadcn/ui/tooltip";
   import { nameOf } from "../paths";
 
-  let { paths }: { paths: string[] } = $props();
+  let { attached }: { attached: { path: string; executions: number }[] } =
+    $props();
 </script>
 
 <div
@@ -19,7 +20,7 @@
   data-region="attached-files"
 >
   <PaperclipIcon class="size-3.5 shrink-0" />
-  {#each paths as path (path)}
+  {#each attached as { path, executions } (path)}
     <Tooltip.Provider delayDuration={200}>
       <Tooltip.Root>
         <Tooltip.Trigger>
@@ -31,6 +32,16 @@
               data-path={path}
             >
               <span class="truncate">{nameOf(path)}</span>
+              <!-- What goes with the file, not just the file. A question
+                   asked about a script that has been run three times carries
+                   three runs' output, and the person asking should be able to
+                   see that before they send it. -->
+              {#if executions > 0}
+                <span class="opacity-70" data-region="attached-runs">
+                  · {executions}
+                  {executions === 1 ? "run" : "runs"}
+                </span>
+              {/if}
             </Badge>
           {/snippet}
         </Tooltip.Trigger>

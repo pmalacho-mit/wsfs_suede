@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import { createClient } from "@liveblocks/client";
+  import type { Output } from "../../../wsfs_suede.python-web-kernel-suede";
   import { Editor } from "../../../wsfs_suede.python-monaco-suede";
   import { nameOf, holderOf } from "./paths";
   import { filesystem, MappedDebouncer, provider, type Workspace } from "../";
@@ -64,12 +65,6 @@
       this.sharedText?.path(path);
     }
 
-    /**
-     * `content` is what the workspace holds, and it is needed for two
-     * different reasons: the editor opens on it, and an empty room is filled
-     * from it. Without the first, opening a file writes the empty editor
-     * straight back over it.
-     */
     share(content: string) {
       const { id, path, rooms, editorProps } = this;
       this.sharedText ??= new SharedTextFile(
@@ -91,15 +86,15 @@
     }
   }
 
-  /**
-   * One text file, shared with whoever else has it open (via yjs / liveblocks).
-   *
-   * It owns its own editor wiring, because the events worth having are the
-   * editor's: a person focusing this file and a person changing it are facts
-   * about a human, and this is the only place that can see them. Everything
-   * else -- storing versions here, an assistant panel elsewhere -- hangs off
-   * those events rather than reaching for the editor again.
-   */
+  /** One run of this file, and what it produced. */
+  export type Execution = {
+    at: string;
+    outputs: Output.Specific[];
+    ok: boolean;
+    /** What the kernel said if it ended badly and did not say so in outputs. */
+    failure?: string;
+  };
+
   export class SharedTextFile {
     readonly id: Id;
     readonly workspace: Workspace;
@@ -108,16 +103,16 @@
     readonly props: EditorHooks;
     readonly initialContent: string;
 
-    /** Every room this workspace holds -- one stream feeds all of them. */
+    /** Every room the containing workspace holds -- one event stream feeds all of them. */
     readonly rooms: Rooms;
 
     /**
+     * Every run of this file, oldest first.
+     */
+    executions = $state<Execution[]>([]);
+
+    /**
      * The protocol, shared with the two-browser suite.
-     *
-     * Everything about whether this document still speaks for the file lives
-     * in there -- see `collab/room.svelte.ts`. What is left here is the
-     * editor: binding it at the right moment, and telling the room what the
-     * person at the keyboard did.
      *
      * Undefined until the room has synced AND reconciled, which is also how
      * anything rendering this knows not to show an editor yet.
@@ -137,8 +132,7 @@
      *
      * The question it answers is "does what the user is looking at exist
      * anywhere else yet" -- which is what anything about to send this file
-     * somewhere needs to know, so it can store first rather than send what
-     * was there a moment ago.
+     * somewhere needs to know, so it can store first.
      */
     dirty = $state(false);
 
@@ -182,19 +176,6 @@
           if (this.#disposed) return;
           this.shared = room;
           this.file.sourceSync = room.text;
-          /**
-           * ATTACHED, NOT REBUILT, and the difference is autosave working.
-           *
-           * Setting `sourceSync` is what binds the editor to the shared text,
-           * and the binding listens for model changes to copy them into the
-           * document. Building a new `UserEdits` here would register its own
-           * listener BEHIND that one -- so by the time it saw a keystroke,
-           * the binding's Yjs transaction would be open, and every edit the
-           * person made would look like somebody else's arriving.
-           *
-           * Nothing would break loudly. The file would simply never go dirty
-           * and never autosave.
-           */
           this.userEdits?.attach(room.text);
         })
         /**
@@ -233,34 +214,20 @@
 
     /**
      * What the person at this keyboard did, and what it costs.
-     *
-     * The two things that follow from an edit are here TOGETHER because they
-     * are the same fact seen twice: this file now holds something that exists
-     * nowhere else. `dirty` is that fact for anything about to describe the
-     * screen; the debounced store is that fact being fixed.
-     *
-     * Only the user's own edits count. A peer's keystroke arriving through
-     * y-monaco changes this model too, and treating that as this person's work
-     * would have every member of a room storing every other member's typing --
-     * which is why `UserEdits` exists rather than `onDidChangeModelContent`.
      */
     #watching(
       editor: editor.IStandaloneCodeEditor,
-      told?: (edit: UserEdit) => void,
+      announce?: (edit: UserEdit) => void,
     ): UserEdits {
       this.userEdits?.dispose();
       const userEdits = new UserEdits(editor, this.file.sourceSync);
       this.userEdits = userEdits;
       userEdits.subscribe({
         edited: (edit) => {
+          console.log("Edit by me");
           this.dirty = true;
-          typingDebouncer.enqueue(this.id, () => void this.store());
-          /**
-           * Said last, and only after the edit has been accounted for. What
-           * listens is the assistant's offer of help, which withdraws itself
-           * the moment somebody starts typing again.
-           */
-          told?.(edit);
+          typingDebouncer.enqueue(this.id, () => this.store());
+          announce?.(edit);
         },
       });
       return userEdits;
@@ -268,16 +235,6 @@
 
     /**
      * Stores a version now, and stops being dirty.
-     *
-     * Clearing first is deliberate: a keystroke landing while the write is in
-     * flight has to leave this dirty again, and it will.
-     *
-     * MAY ANSWER THAT IT DID NOT. A room that is not reaching the others, or
-     * that owes a repair, must not write what it is showing back -- see
-     * `rooms.speaking`. Nothing is lost by that: the text stays in the shared
-     * document and goes when the room recovers. It does mean a caller cannot
-     * assume a transaction came back, which is why this says which happened
-     * rather than returning an id that might be a lie.
      */
     store(): Promise<Written> {
       const sent = this.send();
@@ -309,19 +266,6 @@
           : room.send();
       /**
        * Cleared once the text has left this machine, whichever way it left.
-       *
-       * `dirty` means "what the user is looking at exists nowhere else yet",
-       * and a draft is somewhere else: on the server, rebuildable, nameable
-       * by a snapshot. A room that is reaching nobody still cannot make it
-       * the FILE -- that waits for the room to come back -- but the work is
-       * no longer only here, and saying it is would be showing unsaved work
-       * that had in fact been saved.
-       *
-       * Only text that went nowhere at all leaves this set.
-       *
-       * Clearing FIRST, before the answer, is still deliberate: a keystroke
-       * landing while the write is in flight has to leave this dirty again,
-       * and it will.
        */
       if (!sent.held || sent.draft !== null) {
         typingDebouncer.clear(id);
@@ -333,12 +277,6 @@
     /** The transaction a snapshot can name for this file, if there is one. */
     /**
      * The version this file's text was put on the server as, whichever way.
-     *
-     * A HELD WRITE STILL NAMES SOMETHING. The room may not write the file
-     * back -- it is reaching nobody, or the file stopped being its text --
-     * but the text is kept as a draft, and the draft's transaction is exactly
-     * what a snapshot needs: the server can rebuild it, so what the user was
-     * looking at can still be handed to somebody else.
      *
      * Undefined only when there was no text to put anywhere.
      */
@@ -398,7 +336,7 @@
    * of those transactions, because what it records is what the user was
    * looking at, which happened whether or not anybody agreed to it.
    */
-  export type Held = {
+  export type EntrySnapshot = {
     entry: Id;
     path: string;
     name: string;
@@ -425,6 +363,14 @@
     /** Whether this file's room may write it back right now. Diagnostic. */
     speaks: boolean;
     /**
+     * How many runs of this file go with it.
+     *
+     * On the snapshot rather than counted where it is shown, so the thing
+     * that DECIDES what accompanies a question and the thing that displays it
+     * read one number.
+     */
+    executions: number;
+    /**
      * The transaction this snapshot submitted for it, if it submitted one.
      *
      * Its content version does not exist yet -- the token above is still the
@@ -436,9 +382,9 @@
 
   export type Snapshot = {
     taken: Date;
-    entries: Held[];
+    entries: EntrySnapshot[];
     /** The subset the user can actually see, which is the useful default. */
-    visible: Held[];
+    visible: EntrySnapshot[];
   };
 
   export type Taking = {
@@ -479,8 +425,7 @@
   import { Kernel } from "../../../wsfs_suede.python-web-kernel-suede";
   import { WarmPool } from "./pool";
   import fs from "../../../wsfs_suede.python-web-kernel-suede/fs";
-  import FileTextIcon from "@lucide/svelte/icons/file-text";
-  import FolderTreeIcon from "@lucide/svelte/icons/folder-tree";
+  import { FileText, FolderTree } from "@lucide/svelte";
   import { InView } from "./inview.svelte";
   import PanelHeading from "./shell/PanelHeading.svelte";
   import Assistant from "./assistant/Assistant.svelte";
@@ -595,7 +540,7 @@
       // re-render, and reading it per entry would not happen at all in a
       // workspace that is still empty.
       const showing = new Set(inView.showing);
-      const entries: Held[] = [];
+      const entries: EntrySnapshot[] = [];
       for (const entry of workspace.entries().values()) {
         const path = index.of(entry.id);
         if (path === undefined || entry.type === "folder") continue;
@@ -616,6 +561,7 @@
           stage: open?.sharedText?.rooms?.get(entry.id)?.opening ?? "no room",
           watching: open?.sharedText?.userEdits !== undefined,
           speaks: open?.sharedText?.rooms?.get(entry.id)?.speaks === true,
+          executions: open?.sharedText?.executions.length ?? 0,
           ...(stored.has(entry.id) ? { stored: stored.get(entry.id) } : {}),
         });
       }
@@ -758,6 +704,41 @@
       nudge.offer(() => conversation.ask(stuckOn(outcome), inViewPaths()));
     };
 
+    /**
+     * A run, recorded: a snapshot of what the person could see, and then the
+     * output against it. Both are transactions, so both go through the outbox
+     * and survive being offline -- which is the only reason either is worth
+     * recording at all.
+     *
+     * The snapshot is taken as the run STARTS, because that is the state the
+     * output is evidence about; taking it afterwards would name whatever the
+     * file had become by then.
+     */
+    const started = async ({
+      entry,
+      result,
+    }: {
+      entry: string | undefined;
+      at: string;
+      result: Promise<Outcome>;
+    }) => {
+      if (entry === undefined) return;
+      const showing = snapshot().visible.map((held) => held.entry);
+      const taken = workspace.snapshot(
+        showing.includes(entry) ? showing : [entry, ...showing],
+      );
+      const outcome = await result;
+      const open = openFiles.get(entry)?.sharedText;
+      const outputs = open?.executions.at(-1)?.outputs ?? [];
+      /**
+       * Awaited so a snapshot that was refused -- naming a version the server
+       * never issued -- does not leave an execution pointing at nothing.
+       */
+      const kept = await taken.settled;
+      if (kept.rejected) return;
+      void workspace.executed(entry, taken.transaction, outputs, outcome.ok);
+    };
+
     const editorProps: EditorHooks = {
       onEditor,
       onUserEdit: () => nudge.withdraw(),
@@ -788,7 +769,13 @@
             openFiles.set(id, opened);
             await tabsAPI.addComponentPanel(
               "file",
-              { opened, kernelPool, workspace, onFinished: finished },
+              {
+                opened,
+                kernelPool,
+                workspace,
+                onFinished: finished,
+                onRun: started,
+              },
               { id, title },
             );
           } finally {
@@ -828,7 +815,7 @@
     class="bg-sidebar grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] border-r"
     data-region="explorer"
   >
-    <PanelHeading label="Explorer" icon={FolderTreeIcon} />
+    <PanelHeading label="Explorer" icon={FolderTree} />
     <FileTree {model} />
   </section>
 {/snippet}
@@ -855,7 +842,7 @@
     data-region="nothing-open"
   >
     <div class="flex flex-col items-center gap-2">
-      <FileTextIcon class="size-6" />
+      <FileText class="size-6" />
       Open a file from the explorer.
     </div>
   </div>
@@ -870,7 +857,10 @@
   <div class="h-full min-h-0 border-l" data-region="assistant">
     <Assistant
       {conversation}
-      attached={snapshot().visible.map(({ path }) => path)}
+      attached={snapshot().visible.map(({ path, executions }) => ({
+        path,
+        executions,
+      }))}
     />
   </div>
 {/snippet}

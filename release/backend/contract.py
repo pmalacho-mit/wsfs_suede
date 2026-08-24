@@ -38,6 +38,8 @@ class Operation(str, enum.Enum):
     REPARENT = "reparent"
     MOVE = "move"
     WRITE = "write"
+    SNAPSHOT = "snapshot"
+    EXECUTE = "execute"
 
 
 class Kind(str, enum.Enum):
@@ -242,8 +244,50 @@ class Write(Transacted):
     """
 
 
+class Seen_(BaseModel):
+    """One entry as a snapshot found it: the four tokens that ARE the entry."""
+
+    id: UUID
+    name_version: UUID
+    parent_version: UUID
+    deleted_version: UUID
+    content_version: UUID | None = None
+
+
+class Snapshot(Transacted):
+    """A claim that the workspace looked like this.
+
+    NOT A MUTATION. It changes nothing about any entry, so it presents no
+    token, cannot conflict, and is not in the event stream. What it can be
+    refused for is naming a version that was never issued -- a claim about a
+    state that never existed is not worth keeping.
+
+    `id` is inherited and unused: a snapshot is about the workspace rather
+    than about one entry. It carries the transaction's own id so that dedup,
+    the outbox and `utc_offset` all work exactly as they do for everything
+    else.
+    """
+
+    op: Literal[Operation.SNAPSHOT] = Operation.SNAPSHOT
+    entries: list[Seen_]
+
+
+class Execute(Transacted):
+    """One run of one file, against a snapshot, and what came out.
+
+    Refused when the snapshot is unknown, because output whose subject cannot
+    be named is not evidence of anything.
+    """
+
+    op: Literal[Operation.EXECUTE] = Operation.EXECUTE
+    snapshot: UUID
+    outputs: list[Any] = Field(default_factory=list)
+    ok: bool = True
+
+
 Submitted = Annotated[
-    Create | Delete | Rename | Reparent | Move | Write, Field(discriminator="op")
+    Create | Delete | Rename | Reparent | Move | Write | Snapshot | Execute,
+    Field(discriminator="op"),
 ]
 """Everything a client can submit -- and everything it can queue. Creates are
 no longer online-only, because the client already knows the id."""
@@ -490,6 +534,34 @@ class History(BaseModel):
     Answered by fetching one more row than was asked for, so saying it costs
     a row rather than a count over the whole history.
     """
+
+
+class Executed(BaseModel):
+    """One recorded run, as it is read back."""
+
+    transaction: UUID
+    snapshot: UUID
+    entry: UUID
+    at: Occurrence
+    outputs: list[Any]
+    ok: bool
+
+
+class Executions(BaseModel):
+    executions: list[Executed]
+
+
+class SnapshotEntry(BaseModel):
+    entry: UUID
+    name_version: UUID
+    parent_version: UUID
+    deleted_version: UUID
+    content_version: UUID | None = None
+
+
+class SnapshotTaken(BaseModel):
+    snapshot: UUID
+    entries: list[SnapshotEntry]
 
 
 class Stranded(BaseModel):

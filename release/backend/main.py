@@ -46,11 +46,18 @@ from ...wsfs_suede__sqlmodel_utils_suede.associations import now
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
 from . import history as history_of
+from . import records
+from .minted import minted_at
 from . import reconstruct, refusals, service
 from .blobs import Blobs
 from .contract import (
     Clearing,
+    Executed,
+    Executions,
     History,
+    Occurrence,
+    SnapshotEntry,
+    SnapshotTaken,
     Create,
     InitializeRequest,
     InitializeResponse,
@@ -613,6 +620,65 @@ def create_router(
                 max(1, min(limit, 100)),
             )
             return History(versions=versions, more=more)
+
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/executions")
+    async def executions(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        limit: int = 20,
+        _: UUID = Depends(authorize),
+    ) -> Executions:
+        """What running this file has produced, newest first."""
+        async with database.session() as session:
+            rows = await records.executions_of(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                max(1, min(limit, 200)),
+            )
+            return Executions(
+                executions=[
+                    Executed(
+                        transaction=row.id,
+                        snapshot=row.snapshot,
+                        entry=row.entry_id,
+                        at=Occurrence(
+                            minted=minted_at(row.id),
+                            offset=row.utc_offset,
+                            accepted=row.timestamp,
+                        ),
+                        outputs=row.outputs,
+                        ok=row.ok,
+                    )
+                    for row in rows
+                ]
+            )
+
+    @router.get("/workspaces/{workspace_id}/snapshots/{snapshot_id}")
+    async def snapshot_taken(
+        workspace_id: Annotated[UUID, APIPath()],
+        snapshot_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> SnapshotTaken:
+        """Which entries a snapshot named, and at which versions."""
+        async with database.session() as session:
+            rows = await records.entries_in(
+                session, backend.models, workspace_id, snapshot_id
+            )
+            return SnapshotTaken(
+                snapshot=snapshot_id,
+                entries=[
+                    SnapshotEntry(
+                        entry=row.entry_id,
+                        name_version=row.name_version,
+                        parent_version=row.parent_version,
+                        deleted_version=row.deleted_version,
+                        content_version=row.content_version,
+                    )
+                    for row in rows
+                ],
+            )
 
     @router.get("/workspaces/{workspace_id}/drafts")
     async def stranded_drafts(

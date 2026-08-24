@@ -22,7 +22,7 @@ import {
   connect,
   contract,
   http,
-  keeping,
+  persistenceMechanism,
   type Keeping,
   type Transport,
   type Workspace,
@@ -139,7 +139,7 @@ const BACKEND = "/wsfs";
 
 const asUser = (email: string) => async () => ({ "X-User-Email": email });
 
-export const clientAs = (email: string): LiveblocksClient =>
+export const liveblocksClientAs = (email: string): LiveblocksClient =>
   createClient({
     authEndpoint: async (room) => {
       const answer = await fetch(
@@ -250,7 +250,11 @@ export class Collaborator {
    * its queued work afterwards would have shown a view missing its own.
    */
   static async opened(part: Part, workspaceId: string): Promise<Collaborator> {
-    return new Collaborator(part, workspaceId, await keeping(workspaceId));
+    return new Collaborator(
+      part,
+      workspaceId,
+      await persistenceMechanism(workspaceId),
+    );
   }
 
   constructor(part: Part, workspaceId: string, held: Keeping) {
@@ -278,7 +282,7 @@ export class Collaborator {
       restored: held.restored,
       shared: (entry) => this.rooms.speaksFor(entry),
     });
-    this.liveblocks = clientAs(this.email);
+    this.liveblocks = liveblocksClientAs(this.email);
     this.rooms = new Rooms(
       this.workspace,
       enteringWith(this.liveblocks),

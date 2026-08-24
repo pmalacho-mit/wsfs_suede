@@ -278,7 +278,7 @@ export class Room {
    * in flight, and nothing good follows from that -- see `rooms.speaking`.
    */
   get speaks(): boolean {
-    return this.trouble === undefined;
+    return this.#withheld === undefined;
   }
 
   /**
@@ -288,17 +288,47 @@ export class Room {
    * nobody should be told so -- and because the alternative to one answer is
    * two, one for the rule and one for the banner, drifting apart.
    */
-  get trouble(): Trouble | undefined {
+  /**
+   * Why this room may not write the file back, if it may not.
+   *
+   * The rule, whole. `speaks` is this being absent, and `trouble` is the part
+   * of it worth interrupting somebody about -- which is not the same set, and
+   * conflating them is what made the editor jump on every keystroke.
+   */
+  get #withheld(): (Trouble & { sayable: boolean }) | undefined {
     if (this.replaced !== undefined)
-      return { says: "this file is not text any more", passing: false };
+      return {
+        says: "this file is not text any more",
+        passing: false,
+        sayable: true,
+      };
     if (this.#ahead)
-      return { says: "still handing over what you typed", passing: true };
+      return {
+        says: "still handing over what you typed",
+        passing: true,
+        /**
+         * NOT SAID. This is the healthy path: it is true for a fraction of a
+         * second after every burst of typing, and it means the client is
+         * doing exactly what it should. Telling somebody about it while they
+         * type is noise -- and a notice that appears and disappears that
+         * often is worse than noise if it moves anything.
+         */
+        sayable: false,
+      };
     if (rooms.speaking({ attached: this.attached, behind: this.#missed }))
       return undefined;
     return {
       says: this.attached ? "catching up" : "not reaching anybody",
       passing: true,
+      sayable: true,
     };
+  }
+
+  /** What is worth telling the person at the keyboard, if anything. */
+  get trouble(): Trouble | undefined {
+    const held = this.#withheld;
+    if (held === undefined || !held.sayable) return undefined;
+    return { says: held.says, passing: held.passing };
   }
 
   /**

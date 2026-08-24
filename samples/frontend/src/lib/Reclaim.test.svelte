@@ -9,7 +9,7 @@
    * what a browser adds is the store.
    */
   import { Sweater } from "sweater-vest-suede";
-  import { keeping, mint, type Keeping } from "$wsfs";
+  import { persistenceMechanism, mint, type Keeping } from "$wsfs";
 
   class Pocket {
     said = $state("");
@@ -22,11 +22,11 @@
   name="opens a store whose version has moved on"
   body={async (harness: any) => {
     const pocket = harness.set(new Pocket());
-    const held: Keeping = await keeping(mint());
+    const held: Keeping = await persistenceMechanism(mint());
     pocket.said = `restored ${held.restored.entries.length}`;
     harness.expect(held.restored.entries).toEqual([]);
     /** And a second open, which is the one a version bump can hang. */
-    const again = await keeping(mint());
+    const again = await persistenceMechanism(mint());
     harness.expect(again.reclamation()).toEqual({ phase: "idle" });
   }}
 >
@@ -40,7 +40,7 @@
   body={async (harness: any) => {
     const pocket = harness.set(new Pocket());
     const workspace = mint();
-    const held = await keeping(workspace);
+    const held = await persistenceMechanism(workspace);
 
     /**
      * Stored and never captured, which is exactly what a tab dying between

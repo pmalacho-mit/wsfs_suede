@@ -108,21 +108,18 @@ class EntryRow(Minted, IsAbstractClass):
     type: Type
 
 
-class TransactionRow(Minted, Positioned, WithTime, IsAbstractClass):
-    """One applied change to one property of one entry.
+class ActedRow(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    Minted, WithTime, IsAbstractClass
+):
+    """One thing a client did, keyed by the id it minted for it.
 
-    Finding a client's transaction id here is the whole of dedup: the change
-    it names already happened, so presenting it again is answered rather than
-    applied a second time. It is also the property's current CAS token.
+    Everything a transaction carries EXCEPT its place in the stream, because
+    that is the one part not every transaction has. A change to an entry takes
+    a position; recording a claim about the workspace does not, and must not
+    -- see `Positioned`, and `ExecutionRow` below.
 
-    TWO CLOCKS, ONE NEW COLUMN. `timestamp`, from `WithTime`, is this server's
-    -- stamped as the row is applied, and the only time here anybody has a
-    reason to believe. The client's is already in `id`: a UUIDv7 carries the
-    millisecond it was minted, which is the moment the user acted, and
-    `minted.minted_at` reads it back out. Storing that in a column beside the
-    primary key would be storing the key's own contents twice, where the two
-    can drift. What is genuinely NOT derivable is which clock the client was
-    reading, and that is the one thing added below.
+    Split out so the two do not each declare `entry_id`, `user_id` and
+    `utc_offset` and drift.
     """
 
     entry_id: ID
@@ -137,6 +134,26 @@ class TransactionRow(Minted, Positioned, WithTime, IsAbstractClass):
     store for a time still to come. This is a past one, and for a past instant
     the offset IS the answer: it is what the clock said, whatever any database
     of rules later decides it should have said.
+    """
+
+
+class TransactionRow(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    ActedRow, Positioned, IsAbstractClass
+):
+    """One applied change to one property of one entry.
+
+    Finding a client's transaction id here is the whole of dedup: the change
+    it names already happened, so presenting it again is answered rather than
+    applied a second time. It is also the property's current CAS token.
+
+    TWO CLOCKS, ONE NEW COLUMN. `timestamp`, from `WithTime`, is this server's
+    -- stamped as the row is applied, and the only time here anybody has a
+    reason to believe. The client's is already in `id`: a UUIDv7 carries the
+    millisecond it was minted, which is the moment the user acted, and
+    `minted.minted_at` reads it back out. Storing that in a column beside the
+    primary key would be storing the key's own contents twice, where the two
+    can drift. What is genuinely NOT derivable is which clock the client was
+    reading, and that is the one thing added below.
     """
 
 
@@ -380,6 +397,90 @@ class RoomRow(WithID, IsAbstractClass):
     nulling it."""
 
 
+class SnapshotRow(WithID, WithTime, IsAbstractClass):
+    """One entry, at the versions a snapshot found it at.
+
+    MANY ROWS PER SNAPSHOT, one per entry, rather than one row holding a list.
+    The question worth asking of these is "which snapshots named this
+    version", and that is an index on a column -- inside a JSON blob it is a
+    scan of every snapshot ever taken.
+
+    THE FOUR TOKENS, not just the content one. Together they ARE the entry:
+    what it is called, where it lives, whether it is gone, and what it holds.
+    A snapshot that recorded only content could not say the file was called
+    something else at the time, which is exactly the sort of thing somebody
+    reading an old execution needs to know.
+
+    NOT `Positioned`, and not one of the logs. Taking a snapshot changes
+    nothing about any entry, so it is not in the event stream and not in the
+    delta chain -- a subscriber replaying the workspace must not see these,
+    and it cannot, by their being in a different table.
+    """
+
+    snapshot: ID = Field(index=True, nullable=False)
+    """The transaction that took it. Repeats across this snapshot's rows."""
+
+    entry_id: ID
+    user_id: ID
+    workspace_id: ID
+
+    name_version: ID
+    parent_version: ID
+    deleted_version: ID
+    content_version: ID | None = Field(default=None, nullable=True)
+    """Null for a folder, which has no content and never had."""
+
+
+class ExecutionRow(ActedRow, IsAbstractClass):
+    """One run of one file, and what came out of it.
+
+    KEYED BY THE TRANSACTION that recorded it, like every other client-minted
+    thing here, so replaying an outbox cannot record the same run twice.
+
+    `ActedRow` RATHER THAN `TransactionRow`, and the difference is exactly
+    `Positioned`. A position is a place in the workspace's one ordered stream
+    of CHANGES, stamped at the choke point and seeded from the highest one in
+    the logs. Running a file changes nothing, so taking a position would put a
+    number in that sequence that the stream never emits and the controller's
+    counter never sees -- a gap at best, and a collision once the counter is
+    reseeded from logs this row is not in.
+
+    Everything else a transaction carries, it carries: its own id, who, when,
+    and which clock they were reading.
+
+    AGAINST A SNAPSHOT, which is the whole reason snapshots became a thing the
+    server knows about. Output is only evidence if you can say what it was
+    evidence ABOUT, and "this file at this version, in a workspace that looked
+    like this" is that. Without it an execution is a paragraph of text with no
+    claim attached.
+    """
+
+    snapshot: ID = Field(index=True, nullable=False)
+
+    workspace_id: ID
+    """Named directly, unlike the logs, which reach it through their entry.
+
+    These are read per workspace -- everything this person ran here -- and a
+    join to answer that would be a join every time.
+    """
+
+    outputs: list[Any] = Field(default_factory=list, sa_type=JSONB, nullable=False)
+    """What the kernel produced, as it produced it.
+
+    Opaque on purpose: the shape belongs to whatever ran the code, and a
+    server that parsed it would have to be changed every time a kernel learned
+    a new kind of output.
+    """
+
+    ok: bool = Field(default=True, nullable=False)
+    """Whether it ended without raising.
+
+    A column rather than something to be read out of `outputs`, because "show
+    me the runs that failed" is a question worth answering with an index
+    instead of a scan through JSON.
+    """
+
+
 class TokenRow(  # pyright: ignore[reportUnsafeMultipleInheritance]
     SQLModel, IsAbstractClass
 ):
@@ -425,6 +526,8 @@ class Models:
     text_cache: type[TextCacheRow]
     token: type[TokenRow]
     room: type[RoomRow]
+    snapshot: type[SnapshotRow]
+    execution: type[ExecutionRow]
 
     refused_name: type[RefusedNameRow]
     refused_parent: type[RefusedParentRow]
@@ -649,6 +752,27 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         user_id: ID = ForeignKeyField(users)
         workspace_id: ID = ForeignKeyField(workspaces)
 
+    class Snapshot(SnapshotRow, named("snapshots"), table=True):
+        entry_id: ID = ForeignKeyField(Entry)
+        user_id: ID = ForeignKeyField(users)
+        workspace_id: ID = ForeignKeyField(workspaces)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            UniqueConstraint("snapshot", "entry_id"),
+        )
+        """One row per entry per snapshot. Naming an entry twice in one
+        snapshot would be claiming it was at two versions at once."""
+
+    class Execution(ExecutionRow, named("executions"), table=True):
+        entry_id: ID = ForeignKeyField(Entry)
+        user_id: ID = ForeignKeyField(users)
+        workspace_id: ID = ForeignKeyField(workspaces)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            Index(f"ix_{prefix}_executions_entry_time", "entry_id", "timestamp"),
+        )
+        """Newest-first for one file is the only way these are ever read."""
+
     class Room(RoomRow, named("rooms"), table=True):
         entry_id: ID = ForeignKeyField(Entry)
         base: ID | None = ForeignKeyField(TextContent, nullable=True, ondelete=None)
@@ -667,6 +791,8 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         text_cache=TextContentCache,
         token=StreamToken,
         room=Room,
+        snapshot=Snapshot,
+        execution=Execution,
         refused_name=RefusedName,
         refused_parent=RefusedParent,
         refused_deletion=RefusedDeletion,

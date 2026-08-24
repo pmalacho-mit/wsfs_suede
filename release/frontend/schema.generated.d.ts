@@ -121,6 +121,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/entries/{entry_id}/executions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Executions
+         * @description What running this file has produced, newest first.
+         */
+        get: operations["executions_wsfs_workspaces__workspace_id__entries__entry_id__executions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wsfs/workspaces/{workspace_id}/snapshots/{snapshot_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Snapshot Taken
+         * @description Which entries a snapshot named, and at which versions.
+         */
+        get: operations["snapshot_taken_wsfs_workspaces__workspace_id__snapshots__snapshot_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wsfs/workspaces/{workspace_id}/drafts": {
         parameters: {
             query?: never;
@@ -413,6 +453,75 @@ export interface components {
          * @enum {string}
          */
         Event: "create" | "name" | "parent" | "move" | "delete" | "write";
+        /**
+         * Execute
+         * @description One run of one file, against a snapshot, and what came out.
+         *
+         *     Refused when the snapshot is unknown, because output whose subject cannot
+         *     be named is not evidence of anything.
+         */
+        Execute: {
+            /**
+             * Transaction
+             * Format: uuid
+             */
+            transaction: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Offset */
+            offset?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "execute";
+            /**
+             * Snapshot
+             * Format: uuid
+             */
+            snapshot: string;
+            /** Outputs */
+            outputs?: unknown[];
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+        };
+        /**
+         * Executed
+         * @description One recorded run, as it is read back.
+         */
+        Executed: {
+            /**
+             * Transaction
+             * Format: uuid
+             */
+            transaction: string;
+            /**
+             * Snapshot
+             * Format: uuid
+             */
+            snapshot: string;
+            /**
+             * Entry
+             * Format: uuid
+             */
+            entry: string;
+            at: components["schemas"]["Occurrence"];
+            /** Outputs */
+            outputs: unknown[];
+            /** Ok */
+            ok: boolean;
+        };
+        /** Executions */
+        Executions: {
+            /** Executions */
+            executions: components["schemas"]["Executed"][];
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -428,7 +537,7 @@ export interface components {
         /** InitializeRequest */
         InitializeRequest: {
             /** Outbox */
-            outbox?: (components["schemas"]["Create"] | components["schemas"]["Delete"] | components["schemas"]["Rename"] | components["schemas"]["Reparent"] | components["schemas"]["Move"] | components["schemas"]["Write"])[];
+            outbox?: (components["schemas"]["Create"] | components["schemas"]["Delete"] | components["schemas"]["Rename"] | components["schemas"]["Reparent"] | components["schemas"]["Move"] | components["schemas"]["Write"] | components["schemas"]["Snapshot"] | components["schemas"]["Execute"])[];
         };
         /**
          * InitializeResponse
@@ -716,6 +825,104 @@ export interface components {
             content_version: string | null;
         };
         /**
+         * Seen_
+         * @description One entry as a snapshot found it: the four tokens that ARE the entry.
+         */
+        Seen_: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Name Version
+             * Format: uuid
+             */
+            name_version: string;
+            /**
+             * Parent Version
+             * Format: uuid
+             */
+            parent_version: string;
+            /**
+             * Deleted Version
+             * Format: uuid
+             */
+            deleted_version: string;
+            /** Content Version */
+            content_version?: string | null;
+        };
+        /**
+         * Snapshot
+         * @description A claim that the workspace looked like this.
+         *
+         *     NOT A MUTATION. It changes nothing about any entry, so it presents no
+         *     token, cannot conflict, and is not in the event stream. What it can be
+         *     refused for is naming a version that was never issued -- a claim about a
+         *     state that never existed is not worth keeping.
+         *
+         *     `id` is inherited and unused: a snapshot is about the workspace rather
+         *     than about one entry. It carries the transaction's own id so that dedup,
+         *     the outbox and `utc_offset` all work exactly as they do for everything
+         *     else.
+         */
+        Snapshot: {
+            /**
+             * Transaction
+             * Format: uuid
+             */
+            transaction: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Offset */
+            offset?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "snapshot";
+            /** Entries */
+            entries: components["schemas"]["Seen_"][];
+        };
+        /** SnapshotEntry */
+        SnapshotEntry: {
+            /**
+             * Entry
+             * Format: uuid
+             */
+            entry: string;
+            /**
+             * Name Version
+             * Format: uuid
+             */
+            name_version: string;
+            /**
+             * Parent Version
+             * Format: uuid
+             */
+            parent_version: string;
+            /**
+             * Deleted Version
+             * Format: uuid
+             */
+            deleted_version: string;
+            /** Content Version */
+            content_version?: string | null;
+        };
+        /** SnapshotTaken */
+        SnapshotTaken: {
+            /**
+             * Snapshot
+             * Format: uuid
+             */
+            snapshot: string;
+            /** Entries */
+            entries: components["schemas"]["SnapshotEntry"][];
+        };
+        /**
          * Standing
          * @description Where one version of a file stands.
          *
@@ -951,7 +1158,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["Create"] | components["schemas"]["Delete"] | components["schemas"]["Rename"] | components["schemas"]["Reparent"] | components["schemas"]["Move"] | components["schemas"]["Write"];
+                "application/json": components["schemas"]["Create"] | components["schemas"]["Delete"] | components["schemas"]["Rename"] | components["schemas"]["Reparent"] | components["schemas"]["Move"] | components["schemas"]["Write"] | components["schemas"]["Snapshot"] | components["schemas"]["Execute"];
             };
         };
         responses: {
@@ -1094,6 +1301,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["History"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    executions_wsfs_workspaces__workspace_id__entries__entry_id__executions_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Executions"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    snapshot_taken_wsfs_workspaces__workspace_id__snapshots__snapshot_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                snapshot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotTaken"];
                 };
             };
             /** @description Validation Error */

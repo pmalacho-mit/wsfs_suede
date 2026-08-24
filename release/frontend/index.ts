@@ -22,7 +22,14 @@ export { http } from "./transport";
 export type { Authorized, Transport } from "./transport";
 
 export { mint, session } from "./identity";
-export { mintedAt, localised, accepted, offset, reading, written } from "./minted";
+export {
+  mintedAt,
+  localised,
+  accepted,
+  offset,
+  reading,
+  written,
+} from "./minted";
 export type { Reading } from "./minted";
 export { inMemory } from "./bytes";
 
@@ -33,7 +40,13 @@ export { inMemory } from "./bytes";
  * three things a durable outbox needs: where payloads live, where the queue is
  * written down, and what was there last time.
  */
-export { evictable, keeping, persist } from "./indexed";
+export {
+  evictable,
+  persistenceMechanism,
+  requestPersistence,
+  startPersistence,
+  type OnPersistenceChange,
+} from "./indexed";
 
 /**
  * Making room for work that has not been sent, and the verdict when there is
@@ -42,7 +55,7 @@ export { evictable, keeping, persist } from "./indexed";
  */
 export { CROWDED, crowded, headroom } from "./reclaim";
 export type { Headroom, Reclamation } from "./reclaim";
-export type { Keeping } from "./indexed";
+export type { Persistence as Keeping } from "./indexed";
 export { nothing, nowhere, remembering } from "./kept";
 export type { Faltering, Kept, Restored } from "./kept";
 export type { Unreadable } from "./outbox";
@@ -82,3 +95,5 @@ export type { FileOverride } from "./adapters";
  * when it becomes a write. This client no longer has an opinion about that.
  */
 export { MappedDebouncer } from "./debounce";
+
+export { createClient } from "@liveblocks/client";

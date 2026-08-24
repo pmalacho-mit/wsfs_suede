@@ -29,6 +29,8 @@ export type Fake = Transport & {
   cleared: (workspace: Id, transactions: Transaction[]) => Promise<void>;
   /** Everything the server has been told, drafts included, in order. */
   answered: () => Transaction[];
+  /** Snapshots and executions kept, in order. */
+  recorded: () => Transaction[];
   /**
    * Stop admitting to having issued this version.
    *
@@ -70,6 +72,8 @@ export const server = (): Fake => {
   const versions = new Map<Id, Map<Version, string>>();
   const issued = new Set<Transaction>();
   const drafted: Transaction[] = [];
+  /** Snapshots and executions, which change nothing and are simply kept. */
+  const recorded: Transaction[] = [];
   const told: Transaction[] = [];
   const seen: Submitted[] = [];
   const listeners = new Set<(event: StreamEvent) => void>();
@@ -161,6 +165,17 @@ export const server = (): Fake => {
     if (issued.has(request.transaction)) return { rejected: false };
     if (request.op === "create") return created(request);
 
+    /**
+     * Recorded and nothing else. Neither changes an entry, so neither takes a
+     * version, writes an event, or can lose a compare-and-swap -- and a fake
+     * that fell through to the mutation branch would answer a snapshot by
+     * deleting the file it named.
+     */
+    if (request.op === "snapshot" || request.op === "execute") {
+      recorded.push(request.transaction);
+      return { rejected: false };
+    }
+
     const entry = held.get(request.id);
     if (entry === undefined)
       return { rejected: true, reason: "no such entry", version: null };
@@ -219,6 +234,7 @@ export const server = (): Fake => {
     text: (entry) => content.get(entry),
     drafts: () => [...drafted],
     answered: () => [...told],
+    recorded: () => [...recorded],
 
     initialize: async (_workspace, replayed) => {
       reach();

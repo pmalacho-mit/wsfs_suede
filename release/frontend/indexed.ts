@@ -157,14 +157,14 @@ export const evictable = async (): Promise<boolean> => {
 /**
  * Ask the browser not to clear this origin's storage.
  *
- * SEPARATE FROM `keeping`, and deliberately, because in some browsers this
+ * SEPARATE FROM `persistenceMechanism`, and deliberately, because in some browsers this
  * shows the user a permission prompt -- and a library that made one appear as
  * a side effect of opening a queue would be deciding something that is not
  * its to decide. Call it at a moment that makes sense to the person looking
  * at the screen. Answers whether it worked; false is not an error, it is a
  * browser saying no.
  */
-export const persist = async (): Promise<boolean> => {
+export const requestPersistence = async (): Promise<boolean> => {
   try {
     return (await navigator.storage?.persist?.()) ?? false;
   } catch {
@@ -172,7 +172,7 @@ export const persist = async (): Promise<boolean> => {
   }
 };
 
-export type Keeping = {
+export type Persistence = {
   bytes: Store;
   kept: Kept;
   restored: Restored;
@@ -212,7 +212,9 @@ export type Keeping = {
  * and then discovered it had queued work would have shown a view that was
  * missing its own.
  */
-export const keeping = async (workspace: Id): Promise<Keeping> => {
+export const persistenceMechanism = async (
+  workspace: Id,
+): Promise<Persistence> => {
   const database = await opened();
 
   /**
@@ -233,7 +235,8 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
   const nowSaying = (trouble: Faltering | undefined) => {
     const before = faltering?.says;
     faltering = trouble;
-    if (before !== trouble?.says) for (const changed of [...watchers]) changed();
+    if (before !== trouble?.says)
+      for (const changed of [...watchers]) changed();
     /**
      * A store that has just said it is FULL is the one moment worth sweeping
      * without waiting to be asked -- and the last moment at which sweeping
@@ -417,7 +420,10 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
       const rows = (await awaited(
         database.transaction(QUEUED, "readonly").objectStore(QUEUED).getAll(),
       )) as Queued[];
-      return rows.map((row) => ({ workspace: row.workspace, entry: row.entry }));
+      return rows.map((row) => ({
+        workspace: row.workspace,
+        entry: row.entry,
+      }));
     },
     payloads: async () => {
       const rows = (await awaited(
@@ -432,7 +438,9 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
     },
     drop: (of) =>
       inOrder(async () => {
-        const store = database.transaction(BYTES, "readwrite").objectStore(BYTES);
+        const store = database
+          .transaction(BYTES, "readwrite")
+          .objectStore(BYTES);
         await Promise.all(
           of.map(({ workspace: where, digest }) =>
             awaited(store.delete(keyed(where, digest))),
@@ -476,8 +484,8 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
   const EVERY = 64;
   const maybeReclaim = () => {
     if ((written += 1) % EVERY !== 0) return;
-    void headroom().then((room) => {
-      if (crowded(room)) void reclaim();
+    headroom().then((room) => {
+      if (crowded(room)) reclaim();
     });
   };
 
@@ -485,10 +493,7 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
     bytes,
     kept,
     faltering: () => faltering,
-    watch: (changed) => (
-      watchers.add(changed),
-      () => void watchers.delete(changed)
-    ),
+    watch: (changed) => (watchers.add(changed), () => watchers.delete(changed)),
     reclamation: () => reclamation,
     reclaim,
     restored: {
@@ -502,4 +507,27 @@ export const keeping = async (workspace: Id): Promise<Keeping> => {
       return [...new Set(rows.map((row) => row.workspace))];
     },
   };
+};
+
+export type OnPersistenceChange = (
+  issue: Faltering | undefined,
+  reclaiming: Reclamation,
+) => void;
+
+export const startPersistence = async (
+  workspace: Id,
+  onChange: OnPersistenceChange,
+) => {
+  const database = await persistenceMechanism(workspace);
+  requestPersistence();
+  const unwatch = database.watch(() =>
+    onChange(database.faltering(), database.reclamation()),
+  );
+  /**
+   * Once at startup, because a store that filled up during the last visit
+   * is still full at the start of this one and nothing else would notice
+   * until the first write failed.
+   */
+  database.reclaim();
+  return { database, unwatch };
 };

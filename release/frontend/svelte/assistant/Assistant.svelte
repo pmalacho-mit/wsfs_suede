@@ -38,7 +38,11 @@
   let {
     conversation,
     attached,
-  }: { conversation: Conversation; attached: string[] } = $props();
+  }: {
+    conversation: Conversation;
+    /** What goes with the next question, and how much goes with each. */
+    attached: { path: string; executions: number }[];
+  } = $props();
 
   /** Streamdown's shadcn base leaves lists unmarked. These are the markers. */
   const LISTS =
@@ -46,7 +50,11 @@
 
   const openers = ["Explain this file", "Why did it fail?", "Write a test"];
 
-  const ask = (text: string) => conversation.ask(text, attached);
+  const ask = (text: string) =>
+    conversation.ask(
+      text,
+      attached.map(({ path }) => path),
+    );
 </script>
 
 <section
@@ -94,7 +102,7 @@
     {/if}
     <PromptInput onSubmit={(message: PromptInputMessage) => ask(message.text)}>
       <PromptInputHeader class="border-b px-3 py-2">
-        <AttachedFiles paths={attached} />
+        <AttachedFiles {attached} />
       </PromptInputHeader>
       <PromptInputBody>
         <PromptInputTextarea placeholder="Ask about the files in view…" />

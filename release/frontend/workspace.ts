@@ -138,6 +138,27 @@ export type Workspace = {
    * recovers. The version restored from is still in the history afterwards.
    */
   restore: (entry: Id, version: Version) => Promise<Submitting>;
+  /**
+   * Record that the workspace looked like this.
+   *
+   * A transaction, so it goes through the outbox and survives being offline
+   * -- which is the whole reason it is one. It changes nothing, presents no
+   * token and cannot conflict; what it can be refused for is naming a version
+   * that was never issued.
+   */
+  snapshot: (entries: Id[]) => Submitting;
+  /**
+   * Record what running a file produced, against a snapshot.
+   *
+   * Output is only evidence if you can say what it was evidence ABOUT, which
+   * is what the snapshot is for.
+   */
+  executed: (
+    entry: Id,
+    snapshot: Transaction,
+    outputs: unknown[],
+    ok: boolean,
+  ) => Submitting;
   write: (
     path: paths.Path,
     content: string | Uint8Array,
@@ -210,6 +231,32 @@ const TEXT = "text/plain";
 
 const isText = (content: string | Uint8Array): content is string =>
   typeof content === "string";
+
+/**
+ * What a kernel produced, reduced to what can actually be stored.
+ *
+ * A queued transaction is WRITTEN DOWN, and IndexedDB stores it by structured
+ * clone -- which refuses a class instance, a proxy, a function. Kernel output
+ * is full of those, and the failure is not local: the clone throws, the whole
+ * durable write fails, and the client reports that the outbox has stopped
+ * reaching disk. One unstorable output turns into "your work is not being
+ * saved".
+ *
+ * JSON is the right filter rather than a lucky one: the server stores these
+ * as JSONB, so anything that does not survive the round trip was never going
+ * to be kept anyway. Doing it HERE means the queue only ever holds what the
+ * wire and the disk can both take.
+ */
+const plainly = (outputs: unknown[]): unknown[] => {
+  try {
+    return JSON.parse(JSON.stringify(outputs)) as unknown[];
+  } catch {
+    /** Circular, or holding a BigInt. Better to keep the run than the shape. */
+    return outputs.map((one) => ({
+      unstorable: Object.prototype.toString.call(one),
+    }));
+  }
+};
 
 export const connect = (options: Options): Workspace => {
   const { workspace, transport } = options;
@@ -477,7 +524,24 @@ export const connect = (options: Options): Workspace => {
      * never asked about -- and reconciling is rare enough that a read costs
      * less than a second cache keyed a second way.
      */
-    at: (entry, version) => transport.content(workspace, entry, version),
+    at: async (entry, version) => {
+      /**
+       * The outbox first, because it holds versions the server has never
+       * heard of. Asking the wire for one of those gets a 404, which is the
+       * right answer to the wrong question: this client is the only place
+       * that write exists, and it is right here.
+       *
+       * Safe for every other caller. A room reconciling asks about versions
+       * it read off the STREAM, and those are applied by definition -- they
+       * cannot be sitting in this queue.
+       */
+      const queued = queue.find(version);
+      if (queued !== undefined) {
+        const text = await outbox.textOf(queued, queue, bytes);
+        return { kind: "text", text };
+      }
+      return transport.content(workspace, entry, version);
+    },
 
     history: async (entry, asking = {}) => {
       /**
@@ -512,6 +576,46 @@ export const connect = (options: Options): Workspace => {
           told: false,
         };
       }
+    },
+
+    snapshot: (entries) => {
+      const transaction = mint();
+      const seen = entries
+        .map((id) => map.get(id) ?? shown.view.get(id))
+        .filter((held): held is Metadata => held !== undefined)
+        .map((held) => ({
+          id: held.id,
+          name_version: held.name_version,
+          parent_version: held.parent_version,
+          deleted_version: held.deleted_version,
+          content_version: held.content_version ?? null,
+        }));
+      const settled = submit({
+        op: "snapshot",
+        transaction,
+        /**
+         * The transaction names an entry because every transaction does. A
+         * snapshot is about the workspace rather than about one of them, so
+         * this is the first it holds -- enough for the server to scope it,
+         * and never read as the subject.
+         */
+        id: seen[0]?.id ?? transaction,
+        entries: seen,
+      } as Submitted);
+      return { transaction, settled };
+    },
+
+    executed: (entry, snapshot, outputs, ok) => {
+      const transaction = mint();
+      const settled = submit({
+        op: "execute",
+        transaction,
+        id: entry,
+        snapshot,
+        outputs: plainly(outputs),
+        ok,
+      } as Submitted);
+      return { transaction, settled };
     },
 
     restore: async (entry, version) => {

@@ -11,7 +11,7 @@
    * children happen to be there. Being a component is what lets a test render
    * it both ways and measure.
    */
-  import type { Faltering, Reclamation, Workspace as Client } from "../../";
+  import type { Faltering, Reclamation, Workspace as WSFS } from "../../";
   import Workspace from "../Workspace.svelte";
   import type { createClient } from "@liveblocks/client";
 
@@ -21,7 +21,7 @@
     storage,
     room,
   }: {
-    workspace: Client;
+    workspace: WSFS;
     liveblocks: ReturnType<typeof createClient>;
     /** What is wrong with writing the queue down, if anything. */
     storage?: Faltering;
@@ -62,8 +62,8 @@
       data-region="out-of-room"
     >
       There is more unsent work here than this browser will hold. Reconnect so
-      it can be saved, or close a workspace — until then, new changes may not
-      be kept anywhere.
+      it can be saved, or close a workspace — until then, new changes may not be
+      kept anywhere.
       {#if shortOf.workspaces.length > 1}
         Work is waiting in {shortOf.workspaces.length} workspaces.
       {/if}

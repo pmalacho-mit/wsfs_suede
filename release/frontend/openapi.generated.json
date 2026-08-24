@@ -94,6 +94,12 @@
                   },
                   {
                     "$ref": "#/components/schemas/Write"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Snapshot"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Execute"
                   }
                 ],
                 "title": "Body"
@@ -334,6 +340,118 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/History"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/entries/{entry_id}/executions": {
+      "get": {
+        "summary": "Executions",
+        "description": "What running this file has produced, newest first.",
+        "operationId": "executions_wsfs_workspaces__workspace_id__entries__entry_id__executions_get",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Executions"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/snapshots/{snapshot_id}": {
+      "get": {
+        "summary": "Snapshot Taken",
+        "description": "Which entries a snapshot named, and at which versions.",
+        "operationId": "snapshot_taken_wsfs_workspaces__workspace_id__snapshots__snapshot_id__get",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Snapshot Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotTaken"
                 }
               }
             }
@@ -927,6 +1045,120 @@
         ],
         "title": "Event"
       },
+      "Execute": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
+          "op": {
+            "type": "string",
+            "const": "execute",
+            "title": "Op",
+            "default": "execute"
+          },
+          "snapshot": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Snapshot"
+          },
+          "outputs": {
+            "items": {},
+            "type": "array",
+            "title": "Outputs"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "snapshot"
+        ],
+        "title": "Execute",
+        "description": "One run of one file, against a snapshot, and what came out.\n\nRefused when the snapshot is unknown, because output whose subject cannot\nbe named is not evidence of anything."
+      },
+      "Executed": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "snapshot": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Snapshot"
+          },
+          "entry": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entry"
+          },
+          "at": {
+            "$ref": "#/components/schemas/Occurrence"
+          },
+          "outputs": {
+            "items": {},
+            "type": "array",
+            "title": "Outputs"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "snapshot",
+          "entry",
+          "at",
+          "outputs",
+          "ok"
+        ],
+        "title": "Executed",
+        "description": "One recorded run, as it is read back."
+      },
+      "Executions": {
+        "properties": {
+          "executions": {
+            "items": {
+              "$ref": "#/components/schemas/Executed"
+            },
+            "type": "array",
+            "title": "Executions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "executions"
+        ],
+        "title": "Executions"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -983,6 +1215,12 @@
                 },
                 {
                   "$ref": "#/components/schemas/Write"
+                },
+                {
+                  "$ref": "#/components/schemas/Snapshot"
+                },
+                {
+                  "$ref": "#/components/schemas/Execute"
                 }
               ],
               "discriminator": {
@@ -990,9 +1228,11 @@
                 "mapping": {
                   "create": "#/components/schemas/Create",
                   "delete": "#/components/schemas/Delete",
+                  "execute": "#/components/schemas/Execute",
                   "move": "#/components/schemas/Move",
                   "rename": "#/components/schemas/Rename",
                   "reparent": "#/components/schemas/Reparent",
+                  "snapshot": "#/components/schemas/Snapshot",
                   "write": "#/components/schemas/Write"
                 }
               }
@@ -1603,6 +1843,165 @@
         ],
         "title": "Seen",
         "description": "Every token of the entry a delete was looking at.\n\nDelete is the destructive operation, and the question worth asking is not\n\"has the deleted flag moved\" -- it almost never has -- but \"is this still\nthe thing I was told to destroy\"."
+      },
+      "Seen_": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Name Version"
+          },
+          "parent_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Parent Version"
+          },
+          "deleted_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Deleted Version"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name_version",
+          "parent_version",
+          "deleted_version"
+        ],
+        "title": "Seen_",
+        "description": "One entry as a snapshot found it: the four tokens that ARE the entry."
+      },
+      "Snapshot": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": -1439.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
+          "op": {
+            "type": "string",
+            "const": "snapshot",
+            "title": "Op",
+            "default": "snapshot"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/Seen_"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "id",
+          "entries"
+        ],
+        "title": "Snapshot",
+        "description": "A claim that the workspace looked like this.\n\nNOT A MUTATION. It changes nothing about any entry, so it presents no\ntoken, cannot conflict, and is not in the event stream. What it can be\nrefused for is naming a version that was never issued -- a claim about a\nstate that never existed is not worth keeping.\n\n`id` is inherited and unused: a snapshot is about the workspace rather\nthan about one entry. It carries the transaction's own id so that dedup,\nthe outbox and `utc_offset` all work exactly as they do for everything\nelse."
+      },
+      "SnapshotEntry": {
+        "properties": {
+          "entry": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entry"
+          },
+          "name_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Name Version"
+          },
+          "parent_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Parent Version"
+          },
+          "deleted_version": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Deleted Version"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entry",
+          "name_version",
+          "parent_version",
+          "deleted_version"
+        ],
+        "title": "SnapshotEntry"
+      },
+      "SnapshotTaken": {
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Snapshot"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SnapshotEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "snapshot",
+          "entries"
+        ],
+        "title": "SnapshotTaken"
       },
       "Standing": {
         "type": "string",
