@@ -83,6 +83,20 @@ silent until the first write, which happened twice.
     the same as UTC
 ```
 
+## 2b. An orphaned payload, deliberately left
+
+```
+[ ] `materialised` stores the whole text BEFORE it re-points the row at it,
+    because promoting first and then failing to store destroys both readings
+    of a queued write -- see the comment there. Dying between the two leaves
+    one copy of one file's text in IndexedDB that nothing references: a leak,
+    not a loss.
+    NOT to be fixed with a startup sweep for unreferenced payloads. It would
+    race a second tab that has just stored bytes it has not captured yet, and
+    the `stamped`/`tick` guard in `indexed.ts` is tab-local and cannot see it.
+    Whatever fixes this has to be safe across tabs first.
+```
+
 ## 3. Blobs to object storage
 
 ```
