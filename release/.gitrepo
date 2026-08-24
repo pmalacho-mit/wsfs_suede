@@ -6,7 +6,7 @@
 [subrepo]
 	remote = https://github.com/pmalacho-mit/wsfs_suede
 	branch = release
-	commit = 7a9e38bd54b0d0edd946b46eb6ee26a0c5513e8e
-	parent = 0d4d00fe0a90b0dbd663fe452d6499852c01aad5
+	commit = e45dde04194837293b2c28257cf14a2e1ca81e18
+	parent = ed79ffc9ece1d639fae6b97360c869d2f39e976b
 	method = merge
 	cmdver = 0.4.9
