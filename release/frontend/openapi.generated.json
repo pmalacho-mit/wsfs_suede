@@ -273,6 +273,91 @@
         }
       }
     },
+    "/wsfs/workspaces/{workspace_id}/drafts": {
+      "get": {
+        "summary": "Stranded Drafts",
+        "description": "Work that is still only where it was typed.\n\nUncleared drafts, which is the one question a client cannot answer for\nitself: the case worth reporting is the machine that never came back,\nand its own record of what it was holding went with it.",
+        "operationId": "stranded_drafts_wsfs_workspaces__workspace_id__drafts_get",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrandedDrafts"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wsfs/workspaces/{workspace_id}/drafts/cleared": {
+      "post": {
+        "summary": "Clear Drafts",
+        "description": "These drafts' work has since reached everybody else.\n\nCleared, not deleted. The row is still what that client had, and a\nsnapshot may still name it.",
+        "operationId": "clear_drafts_wsfs_workspaces__workspace_id__drafts_cleared_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Clearing"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/wsfs/workspaces/{workspace_id}/reconstruction": {
       "post": {
         "summary": "Reconstruction",
@@ -406,6 +491,24 @@
           "mime"
         ],
         "title": "BinaryBody"
+      },
+      "Clearing": {
+        "properties": {
+          "transactions": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Transactions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transactions"
+        ],
+        "title": "Clearing",
+        "description": "Drafts whose work has since reached everybody else."
       },
       "Create": {
         "properties": {
@@ -1159,6 +1262,56 @@
         "title": "Seen",
         "description": "Every token of the entry a delete was looking at.\n\nDelete is the destructive operation, and the question worth asking is not\n\"has the deleted flag moved\" -- it almost never has -- but \"is this still\nthe thing I was told to destroy\"."
       },
+      "Stranded": {
+        "properties": {
+          "transaction": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Transaction"
+          },
+          "entry": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entry"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "User Id"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "transaction",
+          "entry",
+          "user_id",
+          "at"
+        ],
+        "title": "Stranded",
+        "description": "A draft whose work is still only where it was typed."
+      },
+      "StrandedDrafts": {
+        "properties": {
+          "drafts": {
+            "items": {
+              "$ref": "#/components/schemas/Stranded"
+            },
+            "type": "array",
+            "title": "Drafts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "drafts"
+        ],
+        "title": "StrandedDrafts",
+        "description": "What one client had and nobody else ever got.\n\nThe question drafts exist to answer. A machine that never comes back\ncannot report its own, which is why the flag is the server's."
+      },
       "StreamEvent": {
         "properties": {
           "type": {
@@ -1407,6 +1560,11 @@
                 "text": "#/components/schemas/TextBody"
               }
             }
+          },
+          "draft": {
+            "type": "boolean",
+            "title": "Draft",
+            "default": false
           },
           "predecessor": {
             "anyOf": [

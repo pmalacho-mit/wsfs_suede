@@ -114,6 +114,10 @@ const CREATED: readonly Property[] = ["name", "parent", "deleted", "content"];
  * A queued create has no confirmed entry to lay over, so it contributes one --
  * with its own transaction as every token, which is exactly what the server
  * will record if it accepts it.
+ *
+ * THE FIRST CLAUSE IS A PRECONDITION, not an observation. Called for an entry
+ * the confirmed map already holds, this rewinds every version to the create.
+ * Its one caller checks.
  */
 const proposed = (request: Create): Metadata => ({
   id: request.id,
@@ -146,8 +150,23 @@ export const of = (confirmed: Confirmed, queued: Entry[]): Effective => {
   for (const { request } of queued) {
     waiting.add(request.transaction);
     if (request.op === "create") {
-      view.set(request.id, proposed(request));
-      credit(overlaid, request.id, CREATED, request.transaction);
+      /**
+       * Only when there is nothing to lay it over, which is the precondition
+       * `proposed` is written for and did not used to check.
+       *
+       * A create leaves the outbox when the STREAM carries it, not when the
+       * response acknowledges it, so there is a real window in which the
+       * server has confirmed the create AND writes after it while the create
+       * is still queued here. `proposed` sets all four of an entry's versions
+       * to the create's own transaction -- right for an entry that exists
+       * nowhere else, and a rewind for one the server has moved on. Laying it
+       * over hid every write since, and because only the stream drains the
+       * outbox it stayed hidden rather than righting itself.
+       */
+      if (!view.has(request.id)) {
+        view.set(request.id, proposed(request));
+        credit(overlaid, request.id, CREATED, request.transaction);
+      }
       continue;
     }
     const entry = view.get(request.id);

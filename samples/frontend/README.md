@@ -1,8 +1,12 @@
 The sample frontend.
 
 A workspace filesystem in a browser: the tree down the left, open files as tabs
-in the middle, and a terminal under any `.py` file. Layout is dockview, the
-tree is `@pierre/trees`, the editor is monaco, and the terminal runs pyodide.
+in the middle, an assistant down the right, and a terminal under any `.py`
+file. Layout is dockview, the tree is `@pierre/trees`, the editor is monaco,
+and the terminal runs pyodide. The chrome around all of it is shadcn-svelte,
+and the assistant is built from [svelte-ai-elements].
+
+[svelte-ai-elements]: https://svelte-ai-elements.vercel.app/
 
 It reads the client out of `release/frontend` directly rather than out of a
 published package, so a change there shows up here without a build step.
@@ -18,6 +22,30 @@ published package, so a change there shows up here without a build step.
 
 Vite proxies `/wsfs` and `/projects` to the backend, so the browser talks to
 one origin and nothing here needs CORS.
+
+## The chrome
+
+One palette, in `src/app.css`, and one answer about which way it paints:
+`appearance.svelte.ts`. Everything CSS-driven reads the `.dark` class that
+mode-watcher puts on the document; the dock, the tree and monaco each want to
+be *told*, in their own vocabulary, and that module is where the translation
+lives. What decides it is the machine's preference until somebody overrides
+it, and their override -- in local storage -- from then on. `src/app.html`
+settles it before the first paint, because nothing here renders on a server
+and the bundle arrives a frame too late.
+
+`shell/` is the frame: which workspace you are looking at, which course event
+it belongs to, and where else you can go.
+
+`assistant/` is the panel on the right. It is handed the paths the person can
+see rather than asking for them, which is why the chips above the input say
+what a question will carry -- and why `Assistant.svelte` can be looked at, in
+a test, with any set of files at all. Nothing behind it sends anywhere yet;
+`conversation.svelte.ts` is the seam a transport will fill.
+
+`nudge.ts` is the offer of help that appears when a run ends badly, and
+withdraws itself the moment somebody starts typing again -- because somebody
+who is editing is no longer stuck.
 
 Three seams are worth reading, because they are the whole point:
 
@@ -39,6 +67,16 @@ was last saved.
 that the tree, the context menu and the editor really drive a workspace --
 needs a browser, and lives beside the components as `*.test.svelte`, run by
 [sweater-vest-suede](../../sweater-vest-suede/README.md).
+
+The chrome's tests need no backend at all: `offline.ts` answers the wire with
+entries to draw and refuses every mutation, which is enough to photograph the
+layout and nothing like enough to prove anything about storing.
+
+Two things about the pictures, both learned the hard way. A capture resolves
+the palette against the subtree it copies, so a test that wants a dark one
+asks for `.dark` **inside** the captured element -- a class further up the
+page is one it never sees. And the dock and the tree are painted from `mode`
+rather than from that class, so a picture of the whole shell sets both.
 
 ```sh
 docker compose -f ../compose.yml up -d --build   # the sample host, on :8099

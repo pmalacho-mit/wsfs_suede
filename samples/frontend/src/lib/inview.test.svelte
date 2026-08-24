@@ -6,7 +6,7 @@
     type PanelProps,
     type ViewAPI,
   } from "wsfs_suede.dockview-svelte-suede";
-  import { InView } from "./inview.svelte";
+  import { InView } from "../../../../release/frontend/svelte/inview.svelte";
 
   class Pocket {
     api = $state<ViewAPI<"dock", { dummy: typeof dummy }>>();

@@ -17,7 +17,7 @@ from conftest import (
     refused,
     seen,
 )
-from app import MODELS
+from wsfs_suede.samples.backend.app import MODELS
 
 
 def creating(api: Api, entry: str, **fields: Any) -> dict[str, Any]:

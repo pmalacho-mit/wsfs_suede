@@ -26,11 +26,20 @@ from datetime import timedelta
 from typing import Annotated, Any, final
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+)
 from fastapi import Path as APIPath
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import delete, func
-from sqlmodel import col, desc, select
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
@@ -39,6 +48,7 @@ from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 from . import reconstruct, refusals, service
 from .blobs import Blobs
 from .contract import (
+    Clearing,
     Create,
     InitializeRequest,
     InitializeResponse,
@@ -47,14 +57,20 @@ from .contract import (
     Refusal,
     Rejected,
     Rejection,
+    RoomStanding,
+    RoomStored,
+    StrandedDrafts,
     StreamEvent,
     Submitted,
     TextContentResponse,
 )
 from .controller import ControllerRegistry, WorkspaceController
-from .models import BlobContentRow, Models, TextContentRow
+from .collaboration import ICollaboration
+from .models import Models
+from .keeper import Keeper, WsfsFiles, RememberedRooms
 from .service import Workspaces
 from .stream import Emitted
+from .resolve import resolve_content
 
 TOKEN_TTL = timedelta(seconds=60)
 
@@ -99,6 +115,7 @@ class Backend:
     registry: ControllerRegistry
     heartbeat_seconds: float
     max_blob_bytes: int
+    keeper: Keeper
 
     @classmethod
     def over(
@@ -110,6 +127,7 @@ class Backend:
         heartbeat_seconds: float,
         grace_seconds: float,
         max_blob_bytes: int,
+        liveblocks: ICollaboration,
     ) -> "Backend":
         schema = Workspaces.over(models)
         return cls(
@@ -121,6 +139,11 @@ class Backend:
             ),
             heartbeat_seconds=heartbeat_seconds,
             max_blob_bytes=max_blob_bytes,
+            keeper=Keeper(
+                collaboration=liveblocks,
+                files=WsfsFiles(schema, database),
+                standings=RememberedRooms(schema.models, database),
+            ),
         )
 
     @property
@@ -327,94 +350,6 @@ async def apply_within(
         return outcome, events
 
 
-# -- content ------------------------------------------------------------------------
-
-
-async def resolve_content(
-    backend: Backend,
-    session: AsyncSession,
-    workspace_id: UUID,
-    entry_id: UUID,
-    content_id: UUID | None,
-) -> Any:
-    """The write a content token names.
-
-    A client holds `content_version` in its metadata and fetches with it
-    directly -- the token IS the write, so there is nothing to translate.
-    """
-    entry = await session.get(backend.models.entry, entry_id)
-    known = entry is not None and entry.workspace_id == workspace_id
-
-    held = None
-    if known:
-        held = (
-            await _newest_write(backend, session, workspace_id, entry_id)
-            if content_id is None
-            else await _written(backend, session, content_id)
-        )
-        if held is not None and held.entry_id != entry_id:
-            held = None
-
-    if held is None and content_id is not None:
-        held = await _refused_write(backend, session, workspace_id, entry_id, content_id)
-
-    if held is None:
-        raise HTTPException(404, "no such entry" if not known else "entry has no such content")
-    return held
-
-
-async def _written(
-    backend: Backend, session: AsyncSession, content_id: UUID
-) -> TextContentRow | BlobContentRow | None:
-    return await session.get(
-        backend.models.text_content, content_id
-    ) or await session.get(backend.models.blob_content, content_id)
-
-
-async def _refused_write(
-    backend: Backend,
-    session: AsyncSession,
-    workspace_id: UUID,
-    entry_id: UUID,
-    content_id: UUID,
-) -> Any | None:
-    """A write this server declined, asked for by the transaction that sent it.
-
-    Answered at the same address as an accepted one, because a client holding
-    a transaction id should not have to know which way the answer went to ask
-    what it said -- and the reason it is asking is usually that it does not.
-
-    Newest of its transaction, which matters only for a request re-sent after
-    a dropped connection: refused twice, two rows, and the one this client was
-    holding when it gave up is the later.
-    """
-    models = backend.models
-    for refused in models.refused_content:
-        found = (
-            await session.exec(
-                select(refused)
-                .where(
-                    col(refused.workspace_id) == workspace_id,
-                    col(refused.transaction) == content_id,
-                    col(refused.entry_id) == entry_id,
-                )
-                .order_by(desc(col(refused.timestamp)))
-            )
-        ).first()
-        if found is not None:
-            return found
-    return None
-
-
-async def _newest_write(
-    backend: Backend, session: AsyncSession, workspace_id: UUID, entry_id: UUID
-) -> TextContentRow | BlobContentRow | None:
-    node = await backend.schema.tree.node(session, workspace_id, entry_id)
-    if node is None or node.content is None:
-        return None
-    return await _written(backend, session, node.content.version)
-
-
 async def content_response(
     backend: Backend, session: AsyncSession, held: Any
 ) -> Response:
@@ -427,9 +362,7 @@ async def content_response(
     models = backend.models
     if isinstance(held, models.refused_text):
         body = TextContentResponse(
-            content=await refusals.text_of(
-                session, models, backend.schema.text, held
-            ),
+            content=await refusals.text_of(session, models, backend.schema.text, held),
             version=held.transaction,
         )
         return JSONResponse(
@@ -645,9 +578,42 @@ def create_router(
                 backend,
                 session,
                 await resolve_content(
-                    backend, session, workspace_id, entry_id, content
+                    backend.schema, session, workspace_id, entry_id, content
                 ),
             )
+
+    @router.get("/workspaces/{workspace_id}/drafts")
+    async def stranded_drafts(
+        workspace_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> StrandedDrafts:
+        """Work that is still only where it was typed.
+
+        Uncleared drafts, which is the one question a client cannot answer for
+        itself: the case worth reporting is the machine that never came back,
+        and its own record of what it was holding went with it.
+        """
+        async with database.session() as session:
+            return StrandedDrafts(
+                drafts=await refusals.stranded(session, backend.models, workspace_id)
+            )
+
+    @router.post("/workspaces/{workspace_id}/drafts/cleared", status_code=204)
+    async def clear_drafts(
+        workspace_id: Annotated[UUID, APIPath()],
+        body: Clearing,
+        _: UUID = Depends(authorize),
+    ) -> None:
+        """These drafts' work has since reached everybody else.
+
+        Cleared, not deleted. The row is still what that client had, and a
+        snapshot may still name it.
+        """
+        async with database.session() as session:
+            await refusals.clear(
+                session, backend.models, workspace_id, body.transactions
+            )
+            await session.commit()
 
     @router.post("/workspaces/{workspace_id}/reconstruction")
     async def reconstruction(
@@ -712,5 +678,122 @@ def create_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # -- rooms -------------------------------------------------------------------------
+
+    #
+    # One entry's shared document, kept in step with its file by the only party
+    # with a lock to settle it. A client cannot: a document that has not synced
+    # looks exactly like an empty one, so two arrivals both believe the room is
+    # theirs to fill, and a CRDT merges two inserts rather than noticing they
+    # say the same thing.
+    #
+    # UNDER A WORKSPACE, for the same reason the blob routes are. `authorize`
+    # answers exactly one question -- may this caller reach this workspace --
+    # and an entry id in a path is not that question. Being let into one
+    # workspace does not make an entry in another one yours, so each of these
+    # asks separately. `updates` is the route that makes this matter: it puts
+    # bytes a caller supplies into a document other people are reading.
+
+    async def held(workspace_id: UUID, entry_id: UUID) -> None:
+        """That this workspace is the one this entry belongs to.
+
+        The same two lines `resolve_content` opens with, and for the same
+        reason: an entry belongs to exactly one workspace, so nobody has to be
+        told which -- but it does have to be checked.
+        """
+        async with database.session() as session:
+            entry = await session.get(backend.models.entry, entry_id)
+        if entry is None or entry.workspace_id != workspace_id:
+            raise HTTPException(404, "no such entry in this workspace")
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}")
+    async def ensure_room(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> RoomStanding:
+        """Make this entry's room exist and say what the file says.
+
+        Idempotent, and the only way a room is ever filled. Free when there is
+        nothing to do, which is the common case by a wide margin: the common
+        reason to ask is that somebody just saved and every other client with
+        the file open heard about it.
+
+        A null base is not a failure. It is what a file that is not text a
+        room can hold answers -- bytes written over it, or a deletion -- and
+        the caller's own read is the first moment anybody could know that.
+        """
+        await held(workspace_id, entry_id)
+        standing = await backend.keeper.ensure(str(entry_id))
+        return RoomStanding(base=None if standing is None else UUID(standing))
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}/warm", status_code=202)
+    async def warm_room(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        later: BackgroundTasks,
+        _: UUID = Depends(authorize),
+    ) -> None:
+        """Fill this room now, so that opening the file later is instant.
+
+        Creating a room, asking what it holds and filling it is three calls to
+        the collaboration server and takes a second or two. Somebody opening a
+        file waits for all of it, because an editor bound to a room that has
+        not been filled shows an empty document and then saves that over the
+        real file.
+
+        Nobody is waiting when a file is CREATED, so that is where this
+        belongs -- whether a person made it or a workspace was cloned for one.
+        Answered before the work starts, because the answer is not the point.
+        """
+        await held(workspace_id, entry_id)
+        later.add_task(backend.keeper.ensure, str(entry_id))
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}/stored", status_code=204)
+    async def room_stored(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        body: RoomStored,
+        _: UUID = Depends(authorize),
+    ) -> None:
+        """A member of this room wrote the file.
+
+        The cheap half of the whole design: this host is told where the file
+        now stands instead of every client that hears about the write asking
+        the collaboration server what the room contains. One POST here, and
+        everybody else's settle finds nothing to do.
+        """
+        await held(workspace_id, entry_id)
+        await backend.keeper.stored(str(entry_id), str(body.version))
+
+    @router.post("/workspaces/{workspace_id}/rooms/{entry_id}/updates", status_code=204)
+    async def hand_over(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        request: Request,
+        _: UUID = Depends(authorize),
+    ) -> Response:
+        """Put a client's own document update into the room for it.
+
+        The one thing a client cannot do for itself when it can reach this
+        host and not the collaboration server. Its work is already kept as a
+        draft and cannot be lost -- but nobody else would see it until that
+        connection came back, which can be a long time and is not a good
+        enough reason.
+
+        FORWARDED, NOT INTERPRETED. The update carries its own identities, so
+        it merges exactly once however many routes it arrives by, including
+        this client's own connection when that returns.
+
+        Sized like a blob, and for the same reason: this is the one route here
+        whose body a caller chooses the length of.
+        """
+        await held(workspace_id, entry_id)
+        size = declared_size(request)
+        if size is None or size > backend.max_blob_bytes:
+            return JSONResponse({"rejected": True, "reason": "too large"}, 413)
+        await backend.keeper.hand_over(str(entry_id), await request.body())
+        return Response(status_code=204)
 
     return router

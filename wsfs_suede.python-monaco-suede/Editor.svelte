@@ -104,11 +104,18 @@
     size?: number;
     readonlyOverride?: boolean;
     onEditor?: OnEditor;
+    onBinding?: (binding: MonacoBinding) => void | (() => void);
   };
 </script>
 
 <script lang="ts">
-  let { file, onEditor, readonlyOverride = false, size = 14 }: Props = $props();
+  let {
+    file,
+    onEditor,
+    onBinding,
+    readonlyOverride = false,
+    size = 14,
+  }: Props = $props();
 
   let container = $state<HTMLElement>();
   let current = $state<ReturnType<typeof attachEditor>>();
@@ -145,9 +152,17 @@
     let dispose: (() => void) | null = null;
     current?.then(({ model, editor }) => {
       const binding = new MonacoBinding(sourceSync, model, new Set([editor]));
-      dispose = () => binding.destroy();
+      file.syncBinding = binding;
+      dispose = () => {
+        file.syncBinding = undefined;
+        binding.destroy();
+      };
     });
     return () => dispose?.();
+  });
+
+  $effect(() => {
+    if (file.syncBinding && onBinding) return onBinding(file.syncBinding);
   });
 </script>
 

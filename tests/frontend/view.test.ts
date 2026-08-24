@@ -132,6 +132,44 @@ describe("the effective view", () => {
     expect(view.get(id)).toMatchObject({ name: "new.py", type: "file" });
   });
 
+  it("does not lay a queued create back over an entry the server has moved on", () => {
+    /**
+     * A create leaves the outbox when the STREAM carries it, not when the
+     * response acknowledges it -- so there is a real window in which the
+     * server has confirmed the create AND a later write, while the create is
+     * still queued here.
+     *
+     * `proposed` sets every one of an entry's four versions to the create's
+     * own transaction, which is right for an entry that exists nowhere else
+     * and wrong for one the server has since moved on. Laying it over a
+     * confirmed entry rewinds `content_version` to the create and hides every
+     * write after it -- and because the outbox is only drained by the stream,
+     * it stays hidden rather than correcting itself a moment later.
+     *
+     * Observed as scenario 9 in the browser suite: a store that was accepted,
+     * settled and confirmed, whose entry went on reporting the version it had
+     * been created at.
+     */
+    const born = mint();
+    const wrote = mint();
+    const file = entry({ name_version: born, parent_version: born, deleted_version: born, content_version: wrote });
+
+    const items = queue();
+    items.capture({
+      op: "create",
+      transaction: born,
+      id: file.id,
+      type: "file",
+      name: file.name,
+      parent: null,
+      content: { type: "text", content: "" },
+    });
+
+    const { view } = effective.of(confirmed.snapshot([file]), items.entries());
+
+    expect(view.get(file.id)!.content_version).toBe(wrote);
+  });
+
   it("snaps back when the queue drops the work, with nothing to undo", () => {
     const file = entry();
     const items = queue();

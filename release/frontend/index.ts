@@ -24,7 +24,28 @@ export type { Authorized, Transport } from "./transport";
 export { mint, session } from "./identity";
 export { mintedAt, localised, accepted, offset, reading, written } from "./minted";
 export type { Reading } from "./minted";
-export { inMemory, digestOf } from "./bytes";
+export { inMemory } from "./bytes";
+
+/**
+ * The queue, across page loads and across workspaces.
+ *
+ * `keeping` is awaited once before `connect`, and what it hands back is the
+ * three things a durable outbox needs: where payloads live, where the queue is
+ * written down, and what was there last time.
+ */
+export { evictable, keeping, persist } from "./indexed";
+
+/**
+ * Making room for work that has not been sent, and the verdict when there is
+ * none to make. `Reclamation` is what a consumer renders; the rest is here
+ * because the rule for what may be discarded is worth being able to test.
+ */
+export { CROWDED, crowded, headroom } from "./reclaim";
+export type { Headroom, Reclamation } from "./reclaim";
+export type { Keeping } from "./indexed";
+export { nothing, nowhere, remembering } from "./kept";
+export type { Faltering, Kept, Restored } from "./kept";
+export type { Unreadable } from "./outbox";
 
 /**
  * Text diffing, as the outbox uses it to store a chained write as an edit
@@ -50,7 +71,7 @@ export type { Timing } from "./loop";
  * being able to test without a network.
  */
 export * as rooms from "./rooms";
-export type { Standing, Verdict } from "./rooms";
+export type { Reach } from "./rooms";
 
 export { provider } from "./adapters/files";
 export type { FileProvider } from "./adapters/files";

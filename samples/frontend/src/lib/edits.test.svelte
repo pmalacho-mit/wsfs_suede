@@ -2,9 +2,12 @@
   import type { editor } from "monaco-editor";
   import Sweater from "sweater-vest-suede/Sweater.svelte";
   import { Editor } from "wsfs_suede.python-monaco-suede";
-  import { UserEdits, type UserEdit } from "./edits";
+  import {
+    UserEdits,
+    type UserEdit,
+  } from "../../../../release/frontend/svelte/edits";
   import { onDestroy } from "svelte";
-  import { cleaner } from "./utils";
+  import { cleaner } from "../../../../release/frontend/svelte/utils";
 
   const cleanup = cleaner();
   onDestroy(cleanup);

@@ -35,11 +35,16 @@ export type Initialize = Schemas["InitializeRequest"];
 export type Snapshot = Schemas["InitializeResponse"];
 export type Rejection = Schemas["Rejection"];
 
+export type Versions = Schemas["Versions"];
+export type Reconstructed = Schemas["Reconstructed"];
+export type ReconstructionRequest = Schemas["ReconstructionRequest"];
+export type ReconstructionResponse = Schemas["ReconstructionResponse"];
+
 export type Event = Schemas["Event"];
 export type StreamEvent = Schemas["StreamEvent"];
 
 export type Response =
-  | { rejected: false }
+  | { rejected: false; draft?: boolean }
   | { rejected: true; reason: string; version?: Version | null };
 
 /**
@@ -51,6 +56,19 @@ export const UNSOUND = "the version presented was never issued";
 
 export const refused = (response: Response): response is Extract<Response, { rejected: true }> =>
   response.rejected;
+
+/**
+ * Recorded, and deliberately not made the file's content.
+ *
+ * Grouped with `refused` because of the one thing they share and nothing
+ * else: NO STREAM EVENT WILL EVER FOLLOW EITHER, so both are answers the
+ * outbox has to act on itself. What they mean could hardly be further apart --
+ * a refusal is the system declining, a draft is this client asking.
+ */
+export const kept = (response: Response) => !response.rejected && response.draft === true;
+
+/** Neither of which the stream will ever mention again. */
+export const settledHere = (response: Response) => refused(response) || kept(response);
 
 export const isFolder = (entry: Metadata) => entry.type === "folder";
 

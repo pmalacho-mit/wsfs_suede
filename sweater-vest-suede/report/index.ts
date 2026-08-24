@@ -318,7 +318,22 @@ export const generateReport = async (
       await playwright.ready(name);
     };
 
-    await Promise.all(browsers.map(prepare));
+    /**
+     * SERIAL, and that is the whole point of it.
+     *
+     * `prepare` BUILDS THE IMAGE as well as creating the container, so running
+     * it concurrently is what puts two playwright installs and then two
+     * `runc create`s in flight at once. That is the state the docker daemon
+     * has wedged in twice -- every client stuck in uninterruptible sleep, with
+     * `dockerd` still alive and even `_ping` hanging, and no way back from
+     * inside the devcontainer. It is not resource exhaustion; there was disk
+     * and memory to spare both times.
+     *
+     * Nothing is lost by waiting. A cached image creates in about a second,
+     * and the first run of a browser pays for its image once either way --
+     * the only difference is whether it pays alone.
+     */
+    for (const browser of browsers) await prepare(browser);
 
     const sessions = new Map<Browser, SessionWithTabs>();
     await Promise.all(

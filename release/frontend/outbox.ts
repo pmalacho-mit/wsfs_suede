@@ -23,6 +23,7 @@
  * business", and `writes.ts` puts them back on the way out.
  */
 import type { Digest, Store } from "./bytes";
+import { nowhere, type Kept } from "./kept";
 import { applyDelta, deltaBetween, type Delta } from "./delta";
 import {
   isWrite,
@@ -117,7 +118,15 @@ const elided = (request: Submitted): Held =>
 export const isElided = (request: Held): request is Elided =>
   isWrite(request as Submitted) && (request as Elided).content === null;
 
-export const queue = (held: Entry[] = []): Queue => {
+/**
+ * `kept` is told by the queue rather than by its callers.
+ *
+ * There are six places that move an item, three of them inside `writes.ts`,
+ * and one of them is not a call at all -- evicting an item hands the digest it
+ * was holding to the chained write behind it. A rule spread over six call
+ * sites is one that gets five of them.
+ */
+export const queue = (held: Entry[] = [], kept: Kept = nowhere): Queue => {
   const items = [...held];
 
   /**
@@ -151,6 +160,7 @@ export const queue = (held: Entry[] = []): Queue => {
     capture: (request, content, basis) => {
       const captured = stamped(elided(request), content, basis);
       items.push(captured);
+      kept.moved({ written: [captured] });
       return captured;
     },
 
@@ -162,16 +172,20 @@ export const queue = (held: Entry[] = []): Queue => {
       const stale = [item.content, item.basis?.content];
       item.content = content;
       delete item.basis;
+      kept.moved({ written: [item] });
       return freeing(stale);
     },
 
     evict: (transactions) => {
       const answered = new Set(transactions);
       const stale: (Digest | undefined)[] = [];
+      const gone: Transaction[] = [];
+      const amended: Entry[] = [];
       for (let at = items.length - 1; at >= 0; at -= 1) {
         const item = items[at]!;
         if (!answered.has(item.request.transaction)) continue;
         items.splice(at, 1);
+        gone.push(item.request.transaction);
         /**
          * A chained write behind this one is a delta against bytes that are
          * about to be forgotten. Hand it the digest on the way past: it is now
@@ -180,14 +194,41 @@ export const queue = (held: Entry[] = []): Queue => {
         const behind = items.find(
           (queued) => queued.basis?.after === item.request.transaction,
         );
-        if (behind?.basis !== undefined && item.content !== undefined)
+        if (behind?.basis !== undefined && item.content !== undefined) {
           behind.basis.content = item.content;
+          amended.push(behind);
+        }
         stale.push(item.content, item.basis?.content);
       }
+      /**
+       * One change, not two. A store told to remove these and separately to
+       * amend those could be killed between the two, and what came back would
+       * be a delta against a predecessor that is gone.
+       */
+      if (gone.length > 0) kept.moved({ written: amended, gone });
       return freeing(stale);
     },
   };
 };
+
+/**
+ * The bytes a queued write named are not there, and never will be.
+ *
+ * Told apart from every other failure a read can have, because the answers
+ * are opposite: a store that REFUSED will likely answer next time, so the
+ * write waits. Bytes that are GONE will not, so the write has to be given up
+ * and said out loud -- and anything that keeps retrying it stops the queue
+ * behind it moving at all.
+ */
+export class LostBytes extends Error {
+  constructor(
+    readonly transaction: Transaction,
+    message: string,
+  ) {
+    super(message);
+    this.name = "LostBytes";
+  }
+}
 
 /**
  * The text a queued write would send, whether it is holding the whole thing or
@@ -203,7 +244,10 @@ export const textOf = async (
 ): Promise<string> => {
   const stored = item.content === undefined ? undefined : await bytes.text(item.content);
   if (stored === undefined)
-    throw new Error(`Queued write ${item.request.transaction} has lost its bytes`);
+    throw new LostBytes(
+      item.request.transaction,
+      `Queued write ${item.request.transaction} has lost its bytes`,
+    );
   if (item.basis === undefined) return stored;
 
   /**
@@ -220,7 +264,8 @@ export const textOf = async (
         ? undefined
         : await textOf(ahead, queue, bytes);
   if (before === undefined)
-    throw new Error(
+    throw new LostBytes(
+      item.request.transaction,
       `Queued write ${item.request.transaction} is a delta against ` +
         `${item.basis.after}, which is no longer readable`,
     );
@@ -232,6 +277,19 @@ export const chained = (before: string, after: string): string =>
   JSON.stringify(deltaBetween(before, after));
 
 /**
+ * What a queued item could not say, and why.
+ *
+ * Its bytes are gone: the browser cleared the store, or the tab died between
+ * the payload landing and the row that names it. The work is not recoverable
+ * from anywhere -- but it is ONE transaction, and the queue behind it is
+ * fine, so this is reported rather than thrown.
+ */
+export type Unreadable = { transaction: Transaction; why: string };
+
+
+export type Presented = { presented: Submitted[]; unreadable: Unreadable[] };
+
+/**
  * What Initialize is given: the requests themselves, in the order they were
  * queued, with elided bodies filled back in.
  *
@@ -241,27 +299,50 @@ export const chained = (before: string, after: string): string =>
  * one. Replay is a single batch with no answers in it, so there is nowhere for
  * that agreement to happen; the followers go out afterwards, through the pump,
  * one answer at a time.
+ *
+ * NOTHING HERE THROWS. It used to, and the cost was the whole workspace: an
+ * item whose bytes could not be read failed Initialize, the loop backed off
+ * and re-entered at Initialize, and failed the same way for ever. One
+ * unreadable transaction stopped every OTHER queued transaction from ever
+ * being sent -- turning a single lost write into a queue that never drains
+ * again. What cannot be read is named and left for the caller to evict.
  */
 export const presenting = async (
   items: Entry[],
   queue: Queue,
   bytes: Store,
-): Promise<Submitted[]> => {
+): Promise<Presented> => {
   const led = new Set<Id>();
   const presented: Submitted[] = [];
+  const unreadable: Unreadable[] = [];
   for (const item of items) {
     if (isWrite(item.request as Submitted)) {
       if (led.has(item.request.id)) continue;
       led.add(item.request.id);
     }
-    presented.push(
-      isElided(item.request)
-        ? {
-            ...(item.request as Elided),
-            content: { type: "text", content: await textOf(item, queue, bytes) },
-          }
-        : (item.request as Submitted),
-    );
+    if (!isElided(item.request)) {
+      presented.push(item.request as Submitted);
+      continue;
+    }
+    try {
+      presented.push({
+        ...(item.request as Elided),
+        content: { type: "text", content: await textOf(item, queue, bytes) },
+      });
+    } catch (reason) {
+      /**
+       * The transaction the READ blames, which for a broken chain is not the
+       * one being presented: a delta three deep fails on whichever ancestor
+       * lost its bytes, and that is the one there is nothing left of.
+       */
+      unreadable.push({
+        transaction:
+          reason instanceof LostBytes
+            ? reason.transaction
+            : item.request.transaction,
+        why: reason instanceof Error ? reason.message : String(reason),
+      });
+    }
   }
-  return presented;
+  return { presented, unreadable };
 };

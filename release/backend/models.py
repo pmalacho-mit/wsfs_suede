@@ -58,7 +58,9 @@ from .diff import Delta
 DEFAULT_PREFIX = "wsfs"
 
 
-class Minted(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class Minted(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     """A row whose id whoever originated the transaction chose.
 
     Almost always the client, so that it can predict its own tokens; the
@@ -75,7 +77,9 @@ class Minted(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultiple
 UNSTAMPED = 0
 
 
-class Positioned(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class Positioned(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     position: int = Field(default=UNSTAMPED, index=True, nullable=False)
     """Where this landed in its workspace's one ordered stream.
 
@@ -136,7 +140,9 @@ class TransactionRow(Minted, Positioned, WithTime, IsAbstractClass):
     """
 
 
-class NamePayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class NamePayload(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     """What a change to a name says.
 
     Split from the log row because a REFUSED rename says exactly the same
@@ -147,7 +153,9 @@ class NamePayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMul
     name: str = Field(nullable=False)
 
 
-class ParentPayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class ParentPayload(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     parent_entry_id: ID | None
     """Absent means the workspace root."""
 
@@ -160,7 +168,9 @@ class ParentRow(TransactionRow, ParentPayload, IsAbstractClass):
     pass
 
 
-class DeletionPayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class DeletionPayload(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     deleted: bool = Field(default=False, nullable=False)
     """Stated, not implied by the row's existence.
 
@@ -179,7 +189,9 @@ class DeletionRow(TransactionRow, DeletionPayload, IsAbstractClass):
     pass
 
 
-class ContentPayload(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class ContentPayload(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     size: int = Field(default=0, nullable=False)
     mime: str = Field(default="text/plain", nullable=False)
 
@@ -257,6 +269,19 @@ class RefusedRow(WithID, WithTime, IsAbstractClass):
 
     utc_offset: int | None = Field(default=None, nullable=True)
     """The client's minutes east of UTC, as on `TransactionRow`."""
+
+    cleared: bool = Field(default=False, nullable=False, index=True)
+    """Whether the work in this row has since reached everybody else.
+
+    Only ever set on a DRAFT, and it is what separates two rows that are
+    identical in storage and opposite in meaning. A draft was made because one
+    client's text had reached nobody; it is cleared when that text has since
+    gone out. Uncleared and old means the work exists here and nowhere else.
+
+    OWNED BY THE SERVER, not by the client that made the draft. The case worth
+    reporting is the one where that machine never comes back, and a flag kept
+    only on the machine dies with it.
+    """
 
 
 class RefusedNameRow(RefusedRow, NamePayload, IsAbstractClass):
@@ -339,7 +364,25 @@ class TextCacheRow(WithID, IsAbstractClass):
     content: str = Field(nullable=False)
 
 
-class TokenRow(SQLModel, IsAbstractClass):  # pyright: ignore[reportUnsafeMultipleInheritance]
+class RoomRow(WithID, IsAbstractClass):
+    """One entry's shared room, as this host knows it.
+
+    A row EXISTING means the room has been created in liveblocks.
+    (Implicit assumption is that nothing will delete the rooms from liveblocks)
+    """
+
+    entry_id: ID
+    base: ID | None
+    """The stored write the room's text descends from, or null when nobody has
+    filled it yet. Null is what `rooms.unseeded` reads, and a room judged
+    unseeded is seeded again -- so this being wrongly null doubles a file's
+    contents. That is why the foreign key below refuses a delete rather than
+    nulling it."""
+
+
+class TokenRow(  # pyright: ignore[reportUnsafeMultipleInheritance]
+    SQLModel, IsAbstractClass
+):
     """Single-use, position-bound credential minted by Initialize."""
 
     token: str = Field(primary_key=True)
@@ -381,6 +424,7 @@ class Models:
     blob_content: type[BlobContentRow]
     text_cache: type[TextCacheRow]
     token: type[TokenRow]
+    room: type[RoomRow]
 
     refused_name: type[RefusedNameRow]
     refused_parent: type[RefusedParentRow]
@@ -447,6 +491,7 @@ class Models:
             self.text_cache,
             self.refused_text_cache,
             self.token,
+            self.room,
         )
 
 
@@ -556,7 +601,9 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
     class RefusedName(Refused, RefusedNameRow, named("refused_names"), table=True):
         pass
 
-    class RefusedParent(Refused, RefusedParentRow, named("refused_parentage"), table=True):
+    class RefusedParent(
+        Refused, RefusedParentRow, named("refused_parentage"), table=True
+    ):
         pass
 
     class RefusedDeletion(
@@ -564,10 +611,14 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
     ):
         pass
 
-    class RefusedText(Refused, RefusedTextRow, named("refused_text_content"), table=True):
+    class RefusedText(
+        Refused, RefusedTextRow, named("refused_text_content"), table=True
+    ):
         pass
 
-    class RefusedBlob(Refused, RefusedBlobRow, named("refused_blob_content"), table=True):
+    class RefusedBlob(
+        Refused, RefusedBlobRow, named("refused_blob_content"), table=True
+    ):
         pass
 
     class UnknownEntry(Refused, UnknownEntryRow, named("unknown_entries"), table=True):
@@ -576,7 +627,9 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
     class TakenId(Refused, TakenIdRow, named("taken_ids"), table=True):
         pass
 
-    class RefusedTextCache(RefusedTextCacheRow, named("refused_text_cache"), table=True):
+    class RefusedTextCache(
+        RefusedTextCacheRow, named("refused_text_cache"), table=True
+    ):
         user_id: ID = ForeignKeyField(users)
         refusal_id: ID = ForeignKeyField(RefusedText)
 
@@ -588,11 +641,21 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         entry_id: ID = ForeignKeyField(Entry)
         content_id: ID = ForeignKeyField(TextContent)
 
-        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (UniqueConstraint("entry_id"),)
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            UniqueConstraint("entry_id"),
+        )
 
     class StreamToken(TokenRow, named("stream_tokens"), table=True):
         user_id: ID = ForeignKeyField(users)
         workspace_id: ID = ForeignKeyField(workspaces)
+
+    class Room(RoomRow, named("rooms"), table=True):
+        entry_id: ID = ForeignKeyField(Entry)
+        base: ID | None = ForeignKeyField(TextContent, nullable=True, ondelete=None)
+
+        __table_args__: ClassVar[tuple[SchemaItem, ...]] = (
+            UniqueConstraint("entry_id"),
+        )
 
     return Models(
         entry=Entry,
@@ -603,6 +666,7 @@ def _tables(users: str, workspaces: str, prefix: str) -> Models:
         blob_content=BlobContent,
         text_cache=TextContentCache,
         token=StreamToken,
+        room=Room,
         refused_name=RefusedName,
         refused_parent=RefusedParent,
         refused_deletion=RefusedDeletion,

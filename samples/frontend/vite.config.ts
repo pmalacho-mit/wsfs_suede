@@ -1,6 +1,8 @@
 import { sveltekit } from "@sveltejs/kit/vite";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, type UserConfig } from "vite";
-import { applyConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
+import { applyConfig as applyMonacoConfig } from "../../wsfs_suede.python-monaco-suede/config/vite.js";
+import { applyConfig as applyKernelConfig } from "../../wsfs_suede.python-web-kernel-suede/config/vite.js";
 
 const BACKEND = process.env.WSFS_BACKEND ?? "http://localhost:8099";
 
@@ -14,7 +16,24 @@ const CHECKOUT = new URL("../../", import.meta.url).pathname;
  * looks like a file that will not open.
  */
 const config = defineConfig({
-  plugins: [sveltekit()],
+  plugins: [tailwindcss(), sveltekit()],
+  /**
+   * ONE COPY OF YJS, and it is not a nicety.
+   *
+   * The collaboration code ships from `release/`, which is outside this app,
+   * so it resolves its dependencies from the checkout's node_modules while
+   * everything under `src/` resolves them from this app's. Same versions,
+   * different instances -- and a Yjs root type made by one instance is not
+   * the type the other one finds under that name. The document then reports
+   * a `content` text 24 characters long that renders as the empty string,
+   * and the file a client had open comes back blank.
+   *
+   * Everything listed carries identity across a document: the CRDT itself,
+   * the store that reloads one, and the provider that syncs one.
+   */
+  resolve: {
+    dedupe: ["yjs", "y-indexeddb", "@liveblocks/client", "@liveblocks/yjs"],
+  },
   server: {
     // Reachable from outside this container, because the browser that runs
     // `npm run test:browser` is in one of its own: `--forward` publishes this
@@ -34,6 +53,8 @@ const config = defineConfig({
       /** Minting room tokens, and where two browsers under test meet. */
       "/liveblocks": { target: BACKEND, changeOrigin: true },
       "/rendezvous": { target: BACKEND, changeOrigin: true },
+      /** Asking the host to fill a shared room from the file. */
+      "/rooms": { target: BACKEND, changeOrigin: true },
     },
   },
   worker: { format: "es" },
@@ -45,8 +66,8 @@ const config = defineConfig({
  * resolves, and this app resolves its own -- two installs, structurally the
  * same and nominally different.
  */
-const configured = applyConfig(
-  config as Parameters<typeof applyConfig>[0],
+const configured = applyKernelConfig(
+  applyMonacoConfig(config as Parameters<typeof applyMonacoConfig>[0]),
 ) as UserConfig;
 
 export default configured;

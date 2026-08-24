@@ -2,7 +2,6 @@ import {
   default as EditorComponent,
   type Props as EditorProps,
 } from "./Editor.svelte";
-import { default as NotebookComponent } from "./Notebook.svelte";
 import { EditableFile } from "./models.svelte";
 import type { Chain, ChainedFile } from "./chained/registry";
 import type { PythonAnalysis } from "./language/settings";

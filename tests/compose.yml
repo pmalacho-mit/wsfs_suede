@@ -10,6 +10,10 @@ services:
       DB_USER: postgres
       DB_PASSWORD: postgres
       DB_NAME: postgres
+      # Goes nowhere. The sample host refuses to be built without one, and
+      # nothing in this suite reaches the collaboration server -- the keeper's
+      # tests hand it a fake.
+      LIVEBLOCKS_SECRET_KEY: sk_test_not-a-real-key
     # Live source, so editing a file needs no rebuild. Read-only so the container
     # can't drop __pycache__ / .pytest_cache into the working tree.
     volumes:
