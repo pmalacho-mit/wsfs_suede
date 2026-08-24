@@ -72,6 +72,8 @@ export const scripted = (told: Turn[] = [], more = false): Scripted => {
             failure: held.failure ?? null,
           };
         },
+        /** Not what these tests are about; the nudge has its own. */
+        progressing: async () => ({ progressing: true, why: "" }),
         said: async ({ before }) => {
           reads.push(before);
           if (broken > 0) {

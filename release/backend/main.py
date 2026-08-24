@@ -62,6 +62,8 @@ from .contract import (
     History,
     InitializeRequest,
     InitializeResponse,
+    Judged,
+    Judging,
     Occurrence,
     ReconstructionRequest,
     ReconstructionResponse,
@@ -916,6 +918,30 @@ def create_router(
                 before,
                 max(1, min(limit, 100)),
             )
+
+    @router.post("/workspaces/{workspace_id}/progress")
+    async def progress(
+        workspace_id: Annotated[UUID, APIPath()],
+        request: Judging,
+        _: UUID = Depends(authorize),
+    ) -> Judged:
+        """Whether a student has got anywhere since a few minutes ago.
+
+        NOT A QUESTION, and not part of anybody's conversation: no transcript
+        goes in and no turn comes out. It is one measurement, asked on a timer
+        by the client that is watching somebody work -- which is why it does
+        not stream, does not take a message id, and is not recorded. What is
+        recorded is the episode, and only if the answer is no.
+
+        Answered synchronously because the caller has nobody waiting on it.
+        """
+        progressing, why = await tutoring.judged(
+            backend.answering.tutor,
+            request.goal,
+            request.before,
+            request.after,
+        )
+        return Judged(progressing=progressing, why=why)
 
     # -- rooms -------------------------------------------------------------------------
 

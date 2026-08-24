@@ -824,6 +824,57 @@
         }
       }
     },
+    "/wsfs/workspaces/{workspace_id}/progress": {
+      "post": {
+        "summary": "Progress",
+        "description": "Whether a student has got anywhere since a few minutes ago.\n\nNOT A QUESTION, and not part of anybody's conversation: no transcript\ngoes in and no turn comes out. It is one measurement, asked on a timer\nby the client that is watching somebody work -- which is why it does\nnot stream, does not take a message id, and is not recorded. What is\nrecorded is the episode, and only if the answer is no.\n\nAnswered synchronously because the caller has nobody waiting on it.",
+        "operationId": "progress_wsfs_workspaces__workspace_id__progress_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Judging"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Judged"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/wsfs/workspaces/{workspace_id}/rooms/{entry_id}": {
       "post": {
         "summary": "Ensure Room",
@@ -1608,6 +1659,52 @@
         ],
         "title": "InitializeResponse",
         "description": "DEPARTURE: `applied` is transaction ids. The contract echoes back the\nfull requests, which the client already holds and evicts by id."
+      },
+      "Judged": {
+        "properties": {
+          "progressing": {
+            "type": "boolean",
+            "title": "Progressing"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "progressing"
+        ],
+        "title": "Judged"
+      },
+      "Judging": {
+        "properties": {
+          "goal": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Goal"
+          },
+          "before": {
+            "type": "string",
+            "maxLength": 200000,
+            "title": "Before",
+            "default": ""
+          },
+          "after": {
+            "type": "string",
+            "maxLength": 200000,
+            "title": "After",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "goal"
+        ],
+        "title": "Judging",
+        "description": "Two versions of one program, and what it was meant to do."
       },
       "Kind": {
         "type": "string",

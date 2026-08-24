@@ -17,10 +17,19 @@ export class Nudge {
     return this.#showing !== undefined;
   }
 
-  offer(help: () => void) {
+  /**
+   * `forMs` rather than forever.
+   *
+   * A proactive prompt is meant to be small and non-blocking: it says its
+   * piece and goes, whether or not anybody looked at it. One that waits
+   * indefinitely stops being an offer and becomes something else on screen to
+   * deal with -- and the protocol counts an ignored offer as an answer, which
+   * it cannot do if the offer never ends.
+   */
+  offer(help: () => void, forMs = Number.POSITIVE_INFINITY) {
     this.withdraw();
     this.#showing = toast(OFFER, {
-      duration: Number.POSITIVE_INFINITY,
+      duration: forMs,
       action: {
         label: "Ask the assistant",
         onClick: () => {
