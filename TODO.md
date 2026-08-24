@@ -235,3 +235,39 @@ silent until the first write, which happened twice.
     pair of eyes rather than an overnight commit.
 ```
 
+## 8. Coming back to a file you closed
+
+```
+[ ] OPEN A FILE, TYPE, CLOSE IT -- AND LATER OPEN IT AGAIN, and its last line
+    can appear twice while the line typed after reopening goes missing. At any
+    distance, not only straight away: it reproduces with the file untouched
+    for ten rounds in between. This is ordinary use, and it is why the UI soak
+    in `Sample.test.svelte` never opens a file twice. Take `everFresh` out of
+    that test and seeds 2, 3, 7, 13, 19 and 23 all show it.
+
+    WHAT IS ESTABLISHED. A panel closed -- or a page left -- before its room
+    is ready hands its text over as a WRITE, because no document holds it yet
+    (`keepWhatWasTyped`). That is right, and it is what stopped the work being
+    thrown away, but it puts the FILE ahead of the ROOM. The host repairs that
+    on the next settle by CARRYING the difference in (`plan()` -> `Carry` in
+    `release/backend/rooms.py`), which inserts the text as new items. When the
+    room gains that line by any other route as well, both survive -- Yjs is
+    right to keep them, they are two different insertions that happen to say
+    the same thing -- and a line typed while the repair is in flight is lost
+    with the reconciliation.
+
+    WHAT IS RULED OUT, both by experiment rather than argument:
+
+      - the client's persisted document. Disabling `recall` entirely does not
+        change it, so this is not the browser's copy merging with the room's.
+      - telling the host where the file stands only after the hand-over. That
+        leaves `base` behind, and a room whose base is behind while its text
+        is ahead is exactly what `Carry` is for -- so it makes the doubling
+        reliable rather than rare. The comment in `Room.send` records it.
+
+    WHERE TO LOOK. The question is what a room should do when the file is
+    ahead of it and somebody is typing into it. `plan()` already declines to
+    carry into a room whose text equals the file's; what it does not have is a
+    way to carry a change in with the identity it would have had, or a reason
+    to wait until the room is not being written to. Both are design decisions.
+```
