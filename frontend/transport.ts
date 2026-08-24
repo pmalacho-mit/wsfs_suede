@@ -7,6 +7,7 @@
  */
 import type { Payload } from "./content";
 import type {
+  History,
   Id,
   Response,
   Snapshot,
@@ -14,6 +15,10 @@ import type {
   Submitted,
   Transaction,
   Version,
+  Answering,
+  Asked,
+  Asking,
+  Transcript,
 } from "./contract";
 
 export type Authorized = () => HeadersInit | Promise<HeadersInit>;
@@ -38,7 +43,43 @@ export type Transport = {
     mime: string,
   ) => Promise<void>;
   cleared: (workspace: Id, transactions: Transaction[]) => Promise<void>;
+  /**
+   * The collaboration room for one entry, as this host serves it.
+   *
+   * ON THE TRANSPORT, with everything else that talks to the server. These
+   * were bare `fetch` calls to a path built by hand, which is how they went
+   * on calling routes that had moved -- and, once found, how they went on
+   * calling them without the caller's authorisation. One door, one base URL,
+   * one auth story.
+   */
+  settleRoom: (workspace: Id, entry: Id) => Promise<Version | null>;
+  warmRoom: (workspace: Id, entry: Id) => Promise<void>;
+  roomStored: (workspace: Id, entry: Id, version: Version) => Promise<void>;
+  handOver: (workspace: Id, entry: Id, update: Uint8Array) => Promise<void>;
+  /** What this file has said, newest first, as far back as `before`. */
+  history: (
+    workspace: Id,
+    entry: Id,
+    asking: { before?: string; limit?: number },
+  ) => Promise<History>;
   follow: (workspace: Id, token: string, reading: Reading) => Subscription;
+  /** Put a question to the tutor, and be told where to hear the answer. */
+  ask: (workspace: Id, asking: Asking) => Promise<Asked>;
+  /**
+   * The answer, delta by delta, until it ends.
+   *
+   * An async iterator rather than a subscription, because unlike the event
+   * stream this one ENDS, and a caller wants to await the end of it. Read with
+   * `fetch` for the same reason the event stream is -- see `read` below -- and
+   * for one more: `EventSource` reconnects on its own, and a reconnect here
+   * would replay an answer somebody has already read.
+   */
+  hear: (workspace: Id, token: string) => AsyncIterable<Answering>;
+  /** This person's conversation here, newest first. */
+  conversation: (
+    workspace: Id,
+    asking: { before?: string; limit?: number },
+  ) => Promise<Transcript>;
 };
 
 const REFUSED = 409;
@@ -125,6 +166,82 @@ export const http = (base: string, authorize: Authorized): Transport => {
 
     cleared: async (workspace, transactions) => {
       await posted(`${workspaces(workspace)}/drafts/cleared`, { transactions });
+    },
+
+    settleRoom: async (workspace, entry) =>
+      (
+        await json<{ base: Version | null }>(
+          await posted(`${workspaces(workspace)}/rooms/${entry}`, {}),
+        )
+      ).base,
+
+    warmRoom: async (workspace, entry) => {
+      await posted(`${workspaces(workspace)}/rooms/${entry}/warm`, {});
+    },
+
+    roomStored: async (workspace, entry, version) => {
+      await posted(`${workspaces(workspace)}/rooms/${entry}/stored`, { version });
+    },
+
+    handOver: async (workspace, entry, update) => {
+      await send(`${workspaces(workspace)}/rooms/${entry}/updates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: update as BodyInit,
+      });
+    },
+
+    ask: async (workspace, asking) =>
+      json<Asked>(await posted(`${workspaces(workspace)}/chat`, asking)),
+
+    hear: async function* (workspace, token) {
+      const response = await send(
+        `${workspaces(workspace)}/chat/stream?token=${encodeURIComponent(token)}`,
+      );
+      if (response.body === null) return;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const said = JSON.parse(line.slice("data: ".length)) as Answering;
+          yield said;
+          /**
+           * Read no further once it has ended. Nothing follows it, and
+           * holding the body open would hold a connection for nothing.
+           */
+          if (said.type === "ended") {
+            await reader.cancel().catch(() => undefined);
+            return;
+          }
+        }
+      }
+    },
+
+    conversation: async (workspace, { before, limit }) => {
+      const asked = new URLSearchParams();
+      if (before !== undefined) asked.set("before", before);
+      if (limit !== undefined) asked.set("limit", String(limit));
+      return json<Transcript>(
+        await send(`${workspaces(workspace)}/chat?${asked.toString()}`),
+      );
+    },
+
+    history: async (workspace, entry, { before, limit }) => {
+      const asked = new URLSearchParams();
+      if (before !== undefined) asked.set("before", before);
+      if (limit !== undefined) asked.set("limit", String(limit));
+      return json<History>(
+        await send(
+          `${workspaces(workspace)}/entries/${entry}/history?${asked.toString()}`,
+        ),
+      );
     },
 
     content: async (workspace, entry, version) => {

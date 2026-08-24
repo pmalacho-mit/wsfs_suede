@@ -19,11 +19,18 @@ import asyncio
 import json
 import os
 import secrets
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
-from typing import Annotated, Any, final
+from datetime import datetime, timedelta
+from typing import Annotated, Any, Protocol, final
 from uuid import UUID
 
 from fastapi import (
@@ -45,13 +52,28 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
+from . import history as history_of
+from . import records
+from . import tutor as tutoring
+from .minted import minted_at
+from . import clone as cloning
+from . import place as placing
 from . import reconstruct, refusals, service
 from .blobs import Blobs
+from .clone import Cloned
+from .place import Placed
 from .contract import (
+    Answering,
+    Asked,
+    Asking,
     Clearing,
     Create,
+    Executed,
+    Executions,
+    History,
     InitializeRequest,
     InitializeResponse,
+    Occurrence,
     ReconstructionRequest,
     ReconstructionResponse,
     Refusal,
@@ -59,10 +81,13 @@ from .contract import (
     Rejection,
     RoomStanding,
     RoomStored,
+    SnapshotEntry,
+    SnapshotTaken,
     StrandedDrafts,
     StreamEvent,
     Submitted,
     TextContentResponse,
+    Transcript,
 )
 from .controller import ControllerRegistry, WorkspaceController
 from .collaboration import ICollaboration
@@ -116,6 +141,7 @@ class Backend:
     heartbeat_seconds: float
     max_blob_bytes: int
     keeper: Keeper
+    answering: tutoring.Tutoring
 
     @classmethod
     def over(
@@ -128,6 +154,7 @@ class Backend:
         grace_seconds: float,
         max_blob_bytes: int,
         liveblocks: ICollaboration,
+        tutor: tutoring.ITutor,
     ) -> "Backend":
         schema = Workspaces.over(models)
         return cls(
@@ -144,6 +171,7 @@ class Backend:
                 files=WsfsFiles(schema, database),
                 standings=RememberedRooms(schema.models, database),
             ),
+            answering=tutoring.Tutoring(tutor, now),
         )
 
     @property
@@ -350,6 +378,78 @@ async def apply_within(
         return outcome, events
 
 
+async def clone_within(
+    backend: Backend, controller: WorkspaceController, user_id: UUID, source: UUID
+) -> tuple[Cloned, list[Emitted]]:
+    """ONE database transaction, in the TARGET's controller, for the same
+    reason Initialize is one: what is being appended is a tree, and a tree
+    half-appended is a workspace holding folders whose contents never arrived.
+
+    The source is only read, and reads do not go through its controller.
+    Holding both would be two locks in an order nothing agrees on, and a
+    workspace cloning itself would deadlock on the first one.
+    """
+    async with submitting(backend, controller, user_id) as submission:
+        cloned, events = await cloning.copied_into(submission, source)
+        await submission.session.commit()
+        return cloned, events
+
+
+async def place_within(
+    backend: Backend,
+    controller: WorkspaceController,
+    user_id: UUID,
+    wanted: Mapping[placing.Segments, str],
+    prune: bool,
+) -> tuple[Placed, list[Emitted]]:
+    """ONE database transaction, like Initialize and like a clone: what is
+    being appended is a tree, and a tree half-appended is a workspace holding
+    folders whose contents never arrived."""
+    async with submitting(backend, controller, user_id) as submission:
+        placed, events = await placing.placed_into(submission, wanted, prune=prune)
+        await submission.session.commit()
+        return placed, events
+
+
+WARMING_AT_ONCE = 8
+"""How many of a clone's rooms are filled concurrently.
+
+Filling one is three sequential calls to the collaboration server and about
+two seconds, so a thousand-file clone done one at a time would take half an
+hour -- and done all at once would open a thousand connections to a service
+that has an opinion about that. Neither number is tuned; this one is small
+enough to be polite and large enough that the wall clock is not the sum.
+"""
+
+
+async def warmed(backend: Backend, entries: Sequence[UUID]) -> None:
+    """Settle each of these files' rooms, the way the tree does when one is
+    made or written.
+
+    THE PATH BULK WORK SHOULD USE. A room that nobody filled costs the first
+    person to open that file 1.7-2.3 seconds, once, forever -- and a clone
+    makes every one of its files somebody's first open. Doing it here means
+    nobody is waiting for it (AUDIT.md, section 2). For a file that was
+    WRITTEN rather than created the room may already exist and be holding the
+    old text, and this is the same call that tells it otherwise.
+
+    FAILURES ARE SWALLOWED, and that is the whole of what they cost. The work
+    is already committed; a room this could not settle is settled on the next
+    open instead. Turning a collaboration server's bad minute into a failed
+    clone would be trading something durable for something that is only ever
+    an optimisation.
+    """
+    gate = asyncio.Semaphore(WARMING_AT_ONCE)
+
+    async def fill(entry: UUID) -> None:
+        async with gate:
+            _ = await backend.keeper.ensure(str(entry))
+
+    _ = await asyncio.gather(
+        *(fill(entry) for entry in entries), return_exceptions=True
+    )
+
+
 async def content_response(
     backend: Backend, session: AsyncSession, held: Any
 ) -> Response:
@@ -462,19 +562,179 @@ async def follow(
         yield sent(emitted.event.payload())
 
 
-# -- the router ----------------------------------------------------------------------
+# -- the router, and everything behind it -----------------------------------------------
+#
+# Each route's work is a closure over the backend, and each of them is handed
+# back beside the router. A host that mounts this and never looks at them has
+# lost nothing; a host that is ALSO the consumer -- an assistant assembling the
+# files a user can see, a job writing a file on somebody's behalf -- calls the
+# function instead of making an HTTP request to itself, which is the same work
+# without the serialisation, the socket, or a second copy of its own auth.
+#
+# THE ONE DIFFERENCE from calling over HTTP is who says which user. Over the
+# wire that is `authorize`, run by FastAPI from the request; called directly it
+# is an argument, because there is no request to read it from. That is exactly
+# the decision an in-process caller has to make on purpose, and making it an
+# argument is what stops it being made by default.
+
+
+class CloneWorkspace(Protocol):
+    """Copy one workspace's live tree into another.
+
+    DELIBERATELY NOT A ROUTE. Every route here asks `authorize` one question --
+    may this caller reach THIS workspace -- and a clone needs two answers about
+    two workspaces, read from one and written to the other. A dependency shaped
+    around a single path parameter cannot give both, and a route that took the
+    other workspace in its body would be asking the caller to name a workspace
+    nobody checked they may read. So the permission question stays where the
+    workspaces come from: the consumer that already knows why it is cloning.
+    """
+
+    async def __call__(
+        self, *, source: UUID, target: UUID, user: UUID, warm: bool = True
+    ) -> Cloned:
+        """Every file and folder the source can still see, appended to the
+        target as ordinary creates, and a row per copy saying where it came
+        from.
+
+        `user` is who this is done on behalf of: every create it writes is
+        attributed to them, and so is every clone record. NOTHING HERE CHECKS
+        THEM -- see the class docstring.
+
+        `warm` fills each copied file's collaboration room before returning,
+        which is what makes the first open of a cloned file instant. Turn it
+        off for a clone nobody is about to open, or to answer sooner and warm
+        the rooms yourself.
+        """
+        ...
+
+
+class PlaceFiles(Protocol):
+    """Make a workspace hold these files, at these paths, with this text.
+
+    NOT A ROUTE either, and for a different reason from `clone`'s. One
+    workspace is named, so `authorize` could perfectly well answer for it --
+    what it cannot answer is whether a caller may rewrite a whole workspace in
+    one call, without an outbox, without presenting a token for anything it
+    overwrites, and with a `prune` that deletes. Every write a CLIENT makes
+    says what it thought it was replacing; this one says "make it so", which
+    is a thing a host may mean and a browser may not.
+    """
+
+    async def __call__(
+        self,
+        *,
+        workspace: UUID,
+        files: Mapping[str, str],
+        user: UUID,
+        prune: bool = False,
+        warm: bool = True,
+    ) -> Placed:
+        """`files` maps a `/`-separated path to the text it should hold.
+        Folders along the way are created as needed and reused when they are
+        already there.
+
+        DECLARATIVE, and therefore worth calling twice: a path already holding
+        exactly that text is left completely alone -- no transaction, no
+        position, no event -- so a second call with the same argument is free
+        and silent.
+
+        `prune` deletes every live entry these paths did not name, which is
+        what turns "put these files here" into "make the workspace look like
+        this". Off by default because it is the one thing here that destroys
+        something.
+
+        `user` is who this is done on behalf of, and nothing here checks them
+        -- see the class docstring. `warm` settles each moved file's
+        collaboration room before returning.
+
+        Raises `place.Unusable`, before writing anything, for a call that
+        cannot be satisfied at all: a path that is not a path, one path given
+        twice, or one path asked to be both a file and the folder above
+        another. What the WORKSPACE declines comes back in `Placed.refused`.
+        """
+        ...
+
+
+Initialize = Callable[[UUID, InitializeRequest, UUID], Awaitable[InitializeResponse]]
+Transact = Callable[[UUID, Submitted, UUID], Awaitable[Response]]
+Store = Callable[[str, Request, UUID], Awaitable[Response]]
+FetchBlob = Callable[[UUID, str, UUID], Awaitable[Response]]
+FetchContent = Callable[[UUID, UUID, UUID | None, UUID], Awaitable[Response]]
+FetchHistory = Callable[[UUID, UUID, datetime | None, int, UUID], Awaitable[History]]
+FetchExecutions = Callable[[UUID, UUID, int, UUID], Awaitable[Executions]]
+FetchSnapshot = Callable[[UUID, UUID, UUID], Awaitable[SnapshotTaken]]
+FetchDrafts = Callable[[UUID, UUID], Awaitable[StrandedDrafts]]
+ClearDrafts = Callable[[UUID, Clearing, UUID], Awaitable[None]]
+Reconstruct = Callable[
+    [UUID, ReconstructionRequest, UUID], Awaitable[ReconstructionResponse]
+]
+Follow = Callable[[UUID, str], Awaitable[StreamingResponse]]
+EnsureRoom = Callable[[UUID, UUID, UUID], Awaitable[RoomStanding]]
+WarmRoom = Callable[[UUID, UUID, BackgroundTasks, UUID], Awaitable[None]]
+RecordStored = Callable[[UUID, UUID, RoomStored, UUID], Awaitable[None]]
+HandOver = Callable[[UUID, UUID, Request, UUID], Awaitable[Response]]
+"""One alias per route, in the order the routes are declared.
+
+POSITIONAL, every one of them, because that is all a `Callable` can express
+and because the last argument is the interesting one: where a request would
+have carried the user through `authorize`, an in-process caller passes it. The
+routes spell that parameter `_` when the route itself does not read it -- the
+dependency still runs -- so calling by keyword is not the way in.
+"""
+
+
+@final
+@dataclass(frozen=True)
+class Mounted:
+    """What a host gets back: the router, and the work behind every route.
+
+    `include_router(mounted.router)` is the whole of mounting it. Everything
+    else here is for the host that is also a consumer -- see the note above.
+    """
+
+    router: APIRouter
+
+    clone: CloneWorkspace
+    place: PlaceFiles
+    """The two pieces of work that are NOT routes, and the two reasons: a
+    clone's permission question spans two workspaces, and a placement is a
+    host saying "make it so" rather than a client saying what it saw."""
+
+    initialize: Initialize
+    transact: Transact
+    store: Store
+    fetch_blob: FetchBlob
+    content: FetchContent
+    history: FetchHistory
+    executions: FetchExecutions
+    snapshot: FetchSnapshot
+    drafts: FetchDrafts
+    clear_drafts: ClearDrafts
+    reconstruction: Reconstruct
+    stream: Follow
+    ensure_room: EnsureRoom
+    warm_room: WarmRoom
+    room_stored: RecordStored
+    hand_over: HandOver
 
 
 def create_router(
     *, backend: Backend, authorize: Authorize, prefix: str = "/wsfs"
-) -> APIRouter:
-    """A router to include in a host's app.
+) -> Mounted:
+    """A router to include in a host's app, and the work behind it.
 
     The backend is built by the host (`Backend.over`) rather than in here, so
     the host keeps a handle on it -- for `shutdown`, for its own queries, for
     whatever else it owns. The host owns the database and the blob store too,
     so it disconnects them; the only thing this router puts down is its own
     controllers, which it does in a lifespan of its own.
+
+    RETURNS `Mounted` rather than the router alone. The router is still the
+    only thing a host has to do anything with; the rest is there so that a
+    consumer in this process can do a thing directly instead of making an HTTP
+    request to itself, and so that `clone` -- which cannot be a route -- has
+    somewhere to be handed over.
     """
     refuse_to_split_the_brain()
     database = backend.database
@@ -491,6 +751,39 @@ def create_router(
         """The workspace's controller, held for the whole submission."""
         async with backend.registry.visiting(workspace_id) as controller:
             yield controller
+
+    async def clone_workspace(
+        *, source: UUID, target: UUID, user: UUID, warm: bool = True
+    ) -> Cloned:
+        """Not a route, and not registered on one. See `CloneWorkspace`."""
+        async with serving(target) as controller:
+            cloned = await controller.submit(
+                lambda: clone_within(backend, controller, user, source)
+            )
+        if warm:
+            # Outside the controller: the workspace's writes are done, and
+            # holding its one writer for a couple of seconds per file would
+            # stall everybody else in it for the sake of an optimisation.
+            await warmed(backend, cloned.files)
+        return cloned
+
+    async def place_files(
+        *,
+        workspace: UUID,
+        files: Mapping[str, str],
+        user: UUID,
+        prune: bool = False,
+        warm: bool = True,
+    ) -> Placed:
+        """Not a route, and not registered on one. See `PlaceFiles`."""
+        wanted = placing.parsed(files)  # raises before the controller is taken
+        async with serving(workspace) as controller:
+            placed = await controller.submit(
+                lambda: place_within(backend, controller, user, wanted, prune)
+            )
+        if warm:
+            await warmed(backend, placed.files)
+        return placed
 
     @router.post(
         "/workspaces/{workspace_id}/initialize", response_model_exclude_none=True
@@ -580,6 +873,95 @@ def create_router(
                 await resolve_content(
                     backend.schema, session, workspace_id, entry_id, content
                 ),
+            )
+
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/history")
+    async def history(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        before: datetime | None = None,
+        limit: int = 10,
+        user: UUID = Depends(authorize),
+    ) -> History:
+        """What this file has said, newest first.
+
+        Scoped to the CALLER for everything except what the workspace
+        accepted: a draft is work that reached nobody, so the author is the
+        only person who has ever seen it, and listing somebody else's would
+        publish typing they never shared.
+
+        Paged by `before` rather than by an offset, because rows arrive while
+        somebody is reading and an offset would show one twice or skip one.
+        """
+        async with database.session() as session:
+            versions, more = await history_of.of_entry(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                user,
+                before,
+                max(1, min(limit, 100)),
+            )
+            return History(versions=versions, more=more)
+
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/executions")
+    async def executions(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        limit: int = 20,
+        _: UUID = Depends(authorize),
+    ) -> Executions:
+        """What running this file has produced, newest first."""
+        async with database.session() as session:
+            rows = await records.executions_of(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                max(1, min(limit, 200)),
+            )
+            return Executions(
+                executions=[
+                    Executed(
+                        transaction=row.id,
+                        snapshot=row.snapshot,
+                        entry=row.entry_id,
+                        at=Occurrence(
+                            minted=minted_at(row.id),
+                            offset=row.utc_offset,
+                            accepted=row.timestamp,
+                        ),
+                        outputs=row.outputs,
+                        ok=row.ok,
+                    )
+                    for row in rows
+                ]
+            )
+
+    @router.get("/workspaces/{workspace_id}/snapshots/{snapshot_id}")
+    async def snapshot_taken(
+        workspace_id: Annotated[UUID, APIPath()],
+        snapshot_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> SnapshotTaken:
+        """Which entries a snapshot named, and at which versions."""
+        async with database.session() as session:
+            rows = await records.entries_in(
+                session, backend.models, workspace_id, snapshot_id
+            )
+            return SnapshotTaken(
+                snapshot=snapshot_id,
+                entries=[
+                    SnapshotEntry(
+                        entry=row.entry_id,
+                        name_version=row.name_version,
+                        parent_version=row.parent_version,
+                        deleted_version=row.deleted_version,
+                        content_version=row.content_version,
+                    )
+                    for row in rows
+                ],
             )
 
     @router.get("/workspaces/{workspace_id}/drafts")
@@ -678,6 +1060,138 @@ def create_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # -- the tutor ---------------------------------------------------------------------
+
+    @router.post("/workspaces/{workspace_id}/chat")
+    async def ask(
+        workspace_id: Annotated[UUID, APIPath()],
+        request: Asking,
+        user: UUID = Depends(authorize),
+    ) -> Asked:
+        """Put a question to the tutor, and say where to hear the answer.
+
+        TWO CALLS, NOT ONE. Answering takes seconds and a request should not,
+        so this records the question, starts the work and returns -- and the
+        stream below attaches to work that is already under way. A client that
+        never attaches changes nothing: the answer is written down when it
+        finishes, because a person who asks and closes the tab has still
+        asked.
+
+        ASKING TWICE IS ANSWERED ONCE. The message id is the client's, so a
+        retried request finds its own question already here. It still gets a
+        token, because the reason to retry is usually that the first answer
+        never arrived.
+        """
+        async with database.session() as session:
+            said = await tutoring.prompt(
+                session,
+                backend.models,
+                backend.schema.text,
+                workspace_id,
+                user,
+                request,
+                until=now(),
+            )
+            if not await tutoring.already_asked(session, backend.models, request.message):
+                for row in tutoring.rows_for(
+                    backend.models, workspace_id, user, request
+                ):
+                    session.add(row)
+                await session.commit()
+
+        async def record(text: str, failure: str | None, model: str) -> None:
+            """Written in a session of its own.
+
+            The request's is long closed by the time an answer finishes -- that
+            is the whole shape of this -- so the generation opens its own.
+            """
+            async with database.session() as writing:
+                writing.add(
+                    backend.models.answered(
+                        message_id=request.message,
+                        workspace_id=workspace_id,
+                        user_id=user,
+                        text=text,
+                        model=model,
+                        failure=failure,
+                    )
+                )
+                await writing.commit()
+
+        return Asked(
+            message=request.message,
+            token=backend.answering.start(said, record),
+        )
+
+    @router.get(
+        "/workspaces/{workspace_id}/chat/stream",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "model": Answering,
+                "content": {"text/event-stream": {}},
+                "description": (
+                    "One `data:` line per delta, then one saying it ended."
+                    " Declared so a client can be generated against it."
+                ),
+            }
+        },
+    )
+    async def hear(
+        workspace_id: Annotated[UUID, APIPath()],
+        token: str,
+        _: UUID = Depends(authorize),
+    ) -> StreamingResponse:
+        """The answer, as it is written.
+
+        The token names a generation running in this process rather than a
+        durable fact, so it is not spent by being read: a page that reloaded
+        mid-answer picks the same one up again. What retires it is the answer
+        being old, not somebody having heard it.
+        """
+        generation = backend.answering.claim(token)
+        if generation is None:
+            raise HTTPException(404, "nothing is being answered under that token")
+
+        async def written() -> AsyncIterator[str]:
+            async for delta in generation.follow():
+                yield sent(Answering(type="delta", delta=delta).model_dump(mode="json"))
+            yield sent(
+                Answering(
+                    type="ended",
+                    text=generation.text,
+                    failure=generation.failure,
+                ).model_dump(mode="json")
+            )
+
+        return StreamingResponse(
+            written(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.get("/workspaces/{workspace_id}/chat")
+    async def conversation(
+        workspace_id: Annotated[UUID, APIPath()],
+        before: datetime | None = None,
+        limit: int = 10,
+        user: UUID = Depends(authorize),
+    ) -> Transcript:
+        """This person's conversation here, newest first.
+
+        Scoped to the caller as well as the workspace: a workspace can have
+        more than one person in it, and what somebody asked a tutor is theirs.
+        """
+        async with database.session() as session:
+            return await tutoring.transcript(
+                session,
+                backend.models,
+                workspace_id,
+                user,
+                before,
+                max(1, min(limit, 100)),
+            )
 
     # -- rooms -------------------------------------------------------------------------
 
@@ -796,4 +1310,24 @@ def create_router(
         await backend.keeper.hand_over(str(entry_id), await request.body())
         return Response(status_code=204)
 
-    return router
+    return Mounted(
+        router=router,
+        clone=clone_workspace,
+        place=place_files,
+        initialize=initialize,
+        transact=transact,
+        store=store,
+        fetch_blob=fetch_blob,
+        content=content,
+        history=history,
+        executions=executions,
+        snapshot=snapshot_taken,
+        drafts=stranded_drafts,
+        clear_drafts=clear_drafts,
+        reconstruction=reconstruction,
+        stream=events,
+        ensure_room=ensure_room,
+        warm_room=warm_room,
+        room_stored=room_stored,
+        hand_over=hand_over,
+    )

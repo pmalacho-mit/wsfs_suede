@@ -37,7 +37,7 @@ from sqlalchemy import literal, union_all
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import minted, refusals, stream
+from . import minted, records, refusals, stream
 from .blobs import Blobs
 from .contract import (
     Acknowledged,
@@ -47,6 +47,7 @@ from .contract import (
     Delete,
     Kind,
     Metadata,
+    Execute,
     Move,
     Operation,
     Refusal,
@@ -58,6 +59,7 @@ from .contract import (
     Submitted,
     TextBody,
     Transacted,
+    Snapshot,
     Write,
 )
 from .diff import diff_to_delta
@@ -254,7 +256,13 @@ async def _cas(
 # -- judgement: why a request cannot be applied, if it cannot --------------------
 
 
-def _refuses_name(name: str) -> str | None:
+def refuses_name(name: str) -> str | None:
+    """Why this cannot be what an entry is called, or None.
+
+    PUBLIC because a path segment and an entry name are the same thing, and
+    `place` splits paths into them. Two definitions of what a name may be
+    would be two definitions that eventually disagree.
+    """
     if not name or name in (".", ".."):
         return Refusal.NAME_INVALID
     if UNNAMEABLE.search(name) or name != name.strip():
@@ -356,7 +364,7 @@ async def _overfull(submission: Submission, where: Destination) -> str | None:
 
 
 async def _refuses_create(submission: Submission, request: Create) -> str | None:
-    if (unnameable := _refuses_name(request.name)) is not None:
+    if (unnameable := refuses_name(request.name)) is not None:
         return unnameable
     if await _bytes_are_missing(submission, request.content):
         return Refusal.BYTES_NEVER_STORED
@@ -437,7 +445,7 @@ async def _refuses_rename(submission: Submission, request: Rename) -> str | None
         return Refusal.ENTRY_UNKNOWN
     if node.deleted:
         return Refusal.ENTRY_DELETED
-    if (unnameable := _refuses_name(request.name)) is not None:
+    if (unnameable := refuses_name(request.name)) is not None:
         return unnameable
     if (
         conflict := await _cas(
@@ -494,7 +502,7 @@ async def _refuses_move(submission: Submission, request: Move) -> str | None:
         return Refusal.ENTRY_UNKNOWN
     if node.deleted:
         return Refusal.ENTRY_DELETED
-    if (unnameable := _refuses_name(request.name)) is not None:
+    if (unnameable := refuses_name(request.name)) is not None:
         return unnameable
     if (stale := await _cas(
         submission, node, request.name_version,
@@ -1010,6 +1018,8 @@ async def kept(submission: Submission, request: Write) -> Outcome:
 
 
 async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
+    if isinstance(request, (Snapshot, Execute)):
+        return await _recorded(submission, request)
     if _asks_to_be_kept(request):
         return await kept(submission, cast(Write, request))
     applied = await _already_applied(submission, request)
@@ -1023,6 +1033,47 @@ async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
     if refused is not None:
         return await declined(submission, request, refused)
     return await _APPLICATION[request.op](submission, request)
+
+
+async def _recorded(
+    submission: Submission, request: Snapshot | Execute
+) -> Outcome:
+    """A claim, kept, that changes nothing.
+
+    OUT OF THE LOG MACHINERY ENTIRELY, and deliberately: neither of these
+    mutates an entry, so neither takes a position, writes a log, or announces
+    an event. Running them through it would put them in the stream, where a
+    subscriber folding an entry's history would have to learn to ignore them.
+
+    Refused for one thing only -- whether the claim refers to anything. A
+    snapshot naming a version nobody issued, or an execution against a
+    snapshot nobody took, is a sentence with no subject.
+    """
+    session, models = submission.session, submission.models
+    workspace_id = submission.workspace
+
+    if await records.already_recorded(session, models, request):
+        return Outcome(Acknowledged())  # a replay after a dropped response
+
+    reason = (
+        await records.refuses_snapshot(session, models, workspace_id, request)
+        if isinstance(request, Snapshot)
+        else await records.refuses_execution(session, models, workspace_id, request)
+    )
+    if reason is not None:
+        """Not through `declined`: that records what was asked in the refusal
+        store, which is shaped around entry properties -- and neither of these
+        is one. There is nothing here a later write could be diffed against."""
+        return Outcome(Rejected(reason=reason, version=None))
+
+    if isinstance(request, Snapshot):
+        for row in records.snapshot_rows(models, workspace_id, submission.user, request):
+            session.add(row)
+    else:
+        session.add(
+            records.execution_row(models, workspace_id, submission.user, request)
+        )
+    return Outcome(Acknowledged())
 
 
 async def snapshot(
