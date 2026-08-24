@@ -225,3 +225,63 @@ describe("more than one workspace", () => {
     returned.stop();
   });
 });
+
+describe("an answer that was current and then was not", () => {
+  it("is still accounted for once something supersedes it", async () => {
+    /**
+     * Found by a soak test, and it is the exact inverse of what `recorded`
+     * exists for. Answers used to be pruned against the confirmed map, on the
+     * reasoning that a current version is already spoken for. True until the
+     * next write to that file: the map only holds what an entry is at NOW, so
+     * a transaction pruned while current became -- the moment something
+     * superseded it -- one that neither the map nor the set could answer for,
+     * and `unsettled` called work that was safely on the server unsettled for
+     * ever.
+     */
+    const wire = server();
+    const here = machine();
+
+    const workspace = here.open("alpha", wire);
+    await settle();
+    await workspace.create("notes.py", "one\n").settled;
+    await settle();
+
+    const first = workspace.write("notes.py", "two\n");
+    await first.settled;
+    await settle();
+
+    /** A reconcile, which is where the pruning used to happen. */
+    workspace.nudge();
+    await settle();
+    await settle();
+    expect(workspace.unsettled([first.transaction])).toEqual([]);
+
+    /** And now a later write moves the file past it. */
+    await workspace.write("notes.py", "three\n").settled;
+    await settle();
+    expect(workspace.unsettled([first.transaction])).toEqual([]);
+    workspace.stop();
+  });
+
+  it("survives the reload that follows", async () => {
+    const wire = server();
+    const here = machine();
+
+    const first = here.open("alpha", wire);
+    await settle();
+    await first.create("notes.py", "one\n").settled;
+    await settle();
+    const early = first.write("notes.py", "two\n");
+    await early.settled;
+    await settle();
+    await first.write("notes.py", "three\n").settled;
+    await settle();
+    first.stop();
+
+    const again = here.open("alpha", wire);
+    await settle();
+    await settle();
+    expect(again.unsettled([early.transaction])).toEqual([]);
+    again.stop();
+  });
+});

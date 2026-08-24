@@ -22,6 +22,7 @@ import {
   type Write,
 } from "./contract";
 import * as effective from "./effective";
+import { merged, type Told } from "./history";
 import { nothing, nowhere, type Kept, type Restored } from "./kept";
 import { mint } from "./identity";
 import { offset } from "./minted";
@@ -96,6 +97,15 @@ export type Submitting = {
 export type Creating = Submitting & { entry: Id };
 
 export type Workspace = {
+  /**
+   * Which workspace this is.
+   *
+   * Every scoped endpoint needs it, and a consumer holding only this object
+   * would otherwise have to be handed the id separately and keep the two in
+   * step -- which is exactly how a client goes on calling routes for the
+   * wrong workspace, or for none.
+   */
+  id: Id;
   entries: () => effective.View;
   index: () => paths.Index;
   watch: (changed: Changed) => () => void;
@@ -117,6 +127,60 @@ export type Workspace = {
    * and the file may have been renamed since the version it is asking about.
    */
   at: (entry: Id, version: Version) => Promise<Payload>;
+  /**
+   * What this file has said, newest first: queued work, then what the server
+   * holds -- everything it accepted, and this user's own drafts and refusals.
+   *
+   * The queued half is the reason this is not just a call: a client with no
+   * network still has a history, and it is the half nobody else can rebuild.
+   */
+  history: (
+    entry: Id,
+    asking?: { before?: string; limit?: number },
+  ) => Promise<{ versions: Told[]; more: boolean; told: boolean }>;
+  /**
+   * Put back what this file said at that version.
+   *
+   * A NEW WRITE, not a rewind. It presents the token that is current now, so
+   * it is refused if somebody moved the file on -- which is right, because
+   * restoring over work you have not seen is how a restore loses more than it
+   * recovers. The version restored from is still in the history afterwards.
+   */
+  restore: (entry: Id, version: Version) => Promise<Submitting>;
+  /**
+   * This file's collaboration room, as this host serves it.
+   *
+   * Here rather than reached for directly, because these calls are scoped by
+   * workspace and authorised like every other -- and a caller holding this
+   * object already has both.
+   */
+  room: {
+    settle: (entry: Id) => Promise<Version | null>;
+    warm: (entry: Id) => Promise<void>;
+    stored: (entry: Id, version: Version) => Promise<void>;
+    handOver: (entry: Id, update: Uint8Array) => Promise<void>;
+  };
+  /**
+   * Record that the workspace looked like this.
+   *
+   * A transaction, so it goes through the outbox and survives being offline
+   * -- which is the whole reason it is one. It changes nothing, presents no
+   * token and cannot conflict; what it can be refused for is naming a version
+   * that was never issued.
+   */
+  snapshot: (entries: Id[]) => Submitting;
+  /**
+   * Record what running a file produced, against a snapshot.
+   *
+   * Output is only evidence if you can say what it was evidence ABOUT, which
+   * is what the snapshot is for.
+   */
+  executed: (
+    entry: Id,
+    snapshot: Transaction,
+    outputs: unknown[],
+    ok: boolean,
+  ) => Submitting;
   write: (
     path: paths.Path,
     content: string | Uint8Array,
@@ -190,6 +254,32 @@ const TEXT = "text/plain";
 const isText = (content: string | Uint8Array): content is string =>
   typeof content === "string";
 
+/**
+ * What a kernel produced, reduced to what can actually be stored.
+ *
+ * A queued transaction is WRITTEN DOWN, and IndexedDB stores it by structured
+ * clone -- which refuses a class instance, a proxy, a function. Kernel output
+ * is full of those, and the failure is not local: the clone throws, the whole
+ * durable write fails, and the client reports that the outbox has stopped
+ * reaching disk. One unstorable output turns into "your work is not being
+ * saved".
+ *
+ * JSON is the right filter rather than a lucky one: the server stores these
+ * as JSONB, so anything that does not survive the round trip was never going
+ * to be kept anyway. Doing it HERE means the queue only ever holds what the
+ * wire and the disk can both take.
+ */
+const plainly = (outputs: unknown[]): unknown[] => {
+  try {
+    return JSON.parse(JSON.stringify(outputs)) as unknown[];
+  } catch {
+    /** Circular, or holding a BigInt. Better to keep the run than the shape. */
+    return outputs.map((one) => ({
+      unstorable: Object.prototype.toString.call(one),
+    }));
+  }
+};
+
 export const connect = (options: Options): Workspace => {
   const { workspace, transport } = options;
   const bytes = options.bytes ?? inMemory();
@@ -214,10 +304,18 @@ export const connect = (options: Options): Workspace => {
    * An answer is the proof. Whatever the server decided, it wrote the
    * transaction down before saying so.
    *
-   * Written down with the queue, and pruned against every snapshot: an answer
-   * the confirmed map speaks for is one this set need not hold. What survives
-   * is only the three the map cannot answer, which is what makes keeping it
-   * across page loads cost almost nothing.
+   * Written down with the queue, and NEVER PRUNED.
+   *
+   * It used to drop whatever the confirmed map covered, on the reasoning that
+   * a current version is already answered for. That is true exactly until the
+   * next write to that file: the map only ever holds what an entry is at NOW,
+   * so a transaction pruned while it was current became, the moment something
+   * superseded it, a transaction neither the map nor this set could speak for
+   * -- and `unsettled` called work that was safely on the server unsettled,
+   * for ever.
+   *
+   * Which is the opposite of this set's whole purpose. It is three ids per
+   * answer; being complete is worth more than being small.
    */
   const recorded = new Set<Transaction>(restored.recorded);
 
@@ -420,7 +518,6 @@ export const connect = (options: Options): Workspace => {
         answers.forEach(answered);
         bytes.forget(queue.evict(answers));
         map = confirmed.snapshot(snapshot.entries);
-        forgetWhatTheMapNowAnswers();
         recomputed();
         snapshot.entries.forEach(readied);
         flight.resume();
@@ -441,6 +538,7 @@ export const connect = (options: Options): Workspace => {
   );
 
   return {
+    id: workspace,
     entries: () => shown.view,
     index: () => index,
     watch: (changed) => (
@@ -456,7 +554,126 @@ export const connect = (options: Options): Workspace => {
      * never asked about -- and reconciling is rare enough that a read costs
      * less than a second cache keyed a second way.
      */
-    at: (entry, version) => transport.content(workspace, entry, version),
+    at: async (entry, version) => {
+      /**
+       * The outbox first, because it holds versions the server has never
+       * heard of. Asking the wire for one of those gets a 404, which is the
+       * right answer to the wrong question: this client is the only place
+       * that write exists, and it is right here.
+       *
+       * Safe for every other caller. A room reconciling asks about versions
+       * it read off the STREAM, and those are applied by definition -- they
+       * cannot be sitting in this queue.
+       */
+      const queued = queue.find(version);
+      if (queued !== undefined) {
+        const text = await outbox.textOf(queued, queue, bytes);
+        return { kind: "text", text };
+      }
+      return transport.content(workspace, entry, version);
+    },
+
+    history: async (entry, asking = {}) => {
+      /**
+       * Queued work is only in front of the FIRST page. Later pages reach
+       * further back than anything this client is still holding, so putting
+       * the outbox in front of each would repeat it down the list.
+       */
+      const first = asking.before === undefined;
+      try {
+        const said = await transport.history(workspace, entry, asking);
+        return {
+          versions: first
+            ? merged(queue.entries(), entry, said.versions)
+            : said.versions.map((one) => one as Told),
+          more: said.more,
+          told: true,
+        };
+      } catch {
+        /**
+         * THE CASE THIS FEATURE IS MOST FOR. Somebody who cannot reach the
+         * server is exactly the person asking where their work went, and the
+         * answer is in the outbox -- which is here. Refusing to show it
+         * because the other half is unreachable would withhold the only half
+         * that was ever at risk.
+         *
+         * `told` is false so a reader can say the list is partial rather than
+         * letting it look like the whole history.
+         */
+        return {
+          versions: first ? merged(queue.entries(), entry, []) : [],
+          more: false,
+          told: false,
+        };
+      }
+    },
+
+    room: {
+      settle: (entry) => transport.settleRoom(workspace, entry),
+      warm: (entry) => transport.warmRoom(workspace, entry),
+      stored: (entry, version) => transport.roomStored(workspace, entry, version),
+      handOver: (entry, update) => transport.handOver(workspace, entry, update),
+    },
+
+    snapshot: (entries) => {
+      const transaction = mint();
+      const seen = entries
+        .map((id) => map.get(id) ?? shown.view.get(id))
+        .filter((held): held is Metadata => held !== undefined)
+        .map((held) => ({
+          id: held.id,
+          name_version: held.name_version,
+          parent_version: held.parent_version,
+          deleted_version: held.deleted_version,
+          content_version: held.content_version ?? null,
+        }));
+      const settled = submit({
+        op: "snapshot",
+        transaction,
+        /**
+         * The transaction names an entry because every transaction does. A
+         * snapshot is about the workspace rather than about one of them, so
+         * this is the first it holds -- enough for the server to scope it,
+         * and never read as the subject.
+         */
+        id: seen[0]?.id ?? transaction,
+        entries: seen,
+      } as Submitted);
+      return { transaction, settled };
+    },
+
+    executed: (entry, snapshot, outputs, ok) => {
+      const transaction = mint();
+      const settled = submit({
+        op: "execute",
+        transaction,
+        id: entry,
+        snapshot,
+        outputs: plainly(outputs),
+        ok,
+      } as Submitted);
+      return { transaction, settled };
+    },
+
+    restore: async (entry, version) => {
+      const held = await transport.content(workspace, entry, version);
+      if (held.kind !== "text")
+        throw new Error(
+          `Version ${version} of this file is ${held.mime}, and putting bytes ` +
+            "back is a copy rather than a write. Not yet supported.",
+        );
+      /**
+       * An ordinary write even when a document speaks for this entry, and
+       * rule one is why that is allowed rather than in spite of it: the rule
+       * closes the door on text that CAME OUT OF AN EDITOR, because typing it
+       * back in creates new characters and the same work survives twice.
+       * This text came out of the server's own history. Nobody's document
+       * holds a second copy of it, so it is diffed in exactly as a script's
+       * write is -- and the room hears about it the same way, by the server
+       * carrying it in.
+       */
+      return written(heldEntry(entry), held.text, TEXT);
+    },
 
     write: (path, payload, mime = TEXT) => {
       const entry = index.at(path);
@@ -547,20 +764,6 @@ export const connect = (options: Options): Workspace => {
     stop: sync.stop,
     nudge: sync.nudge,
   };
-
-  /**
-   * A snapshot has just said where every entry stands, so any answer this set
-   * holds that is also a current version is one it is keeping twice. What is
-   * left is the three the map cannot speak to -- drafts, refusals, and writes
-   * a later write moved past -- which is the only reason the set exists.
-   */
-  function forgetWhatTheMapNowAnswers(): void {
-    const spoken = [...recorded].filter((transaction) =>
-      currentVersions().has(transaction),
-    );
-    for (const transaction of spoken) recorded.delete(transaction);
-    if (spoken.length > 0) kept.redundant(spoken);
-  }
 
   function currentVersions(): Set<Transaction> {
     const held = new Set<Transaction>();

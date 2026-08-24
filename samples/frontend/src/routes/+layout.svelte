@@ -1,5 +1,5 @@
 <script lang="ts">
-  import "../app.css";
+  import "../../../../release/frontend/svelte/app.css";
   import Layout from "../../../../release/frontend/svelte/Layout.svelte";
 
   let { children } = $props();

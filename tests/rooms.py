@@ -177,3 +177,43 @@ def test_a_deletion_is_carried_too():
         carried(doc.get_update(), Change(before="one\ntwo\nthree\n", after="one\nthree\n"))
     )
     assert str(doc["content"]) == "zero\none\nthree\n"
+
+
+def test_a_removal_bigger_than_what_is_left_does_not_take_the_room_down():
+    """A removal counts characters in the version it was written against, and
+    the room has drifted from that version -- so the same span is a different
+    length here.
+
+    Adding the old length to a moved position walks off the end of the live
+    text, and pycrdt PANICS rather than raising: "couldn't remove 65 elements,
+    only 49 were removed". That took the room's whole settle with it, which is
+    a 500 on the one call every client makes when it opens a file.
+    """
+    before = "".join(f"line {at}\n" for at in range(20))
+    after = "line 0\n"
+
+    """The room has meanwhile lost most of what the writer was deleting."""
+    live = a_room("line 0\nline 1\n")
+    update = carried(live, Change(before=before, after=after))
+    held = applied(live, update)
+    assert "line 0" in held
+
+
+def test_a_removal_takes_the_region_rather_than_a_count():
+    """Somebody else inserted inside the span being deleted. Removing a fixed
+    number of characters would eat their text or stop short of the region;
+    moving both ends removes what the writer actually removed."""
+    live = Doc()
+    live["content"] = Text()
+    live.apply_update(a_room("one\ntwo\nthree\n"))
+    live["content"].insert(len("one\ntwo\n"), "mine\n")
+
+    update = carried(
+        live.get_update(),
+        Change(before="one\ntwo\nthree\n", after="one\nthree\n"),
+    )
+    live.apply_update(update)
+    held = str(live["content"])
+    assert "two" not in held
+    assert "mine" in held, "somebody else's line was inside the deleted span"
+    assert "one" in held and "three" in held

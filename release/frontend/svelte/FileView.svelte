@@ -9,6 +9,8 @@
   import type { IDockviewPanelProps } from "dockview";
 
   import { Editor } from "../../../wsfs_suede.python-monaco-suede";
+  import History from "./History.svelte";
+  import HistoryIcon from "@lucide/svelte/icons/history";
   import Preview from "./Preview.svelte";
   import Runner, { type Outcome } from "./Runner.svelte";
   import type { Workspace } from "../";
@@ -21,6 +23,12 @@
     workspace: Workspace;
     kernelPool: KernelPool;
     onFinished: (outcome: Outcome) => void;
+    /** Every run as it starts, with the promise it will finish by. */
+    onRun?: (started: {
+      entry: string | undefined;
+      at: string;
+      result: Promise<Outcome>;
+    }) => void;
   };
 
   let { params }: IDockviewPanelProps<Params> = $props();
@@ -85,6 +93,15 @@
   onMount(read);
 
   let runnable = $derived(params.opened.path.endsWith(".py"));
+
+  /**
+   * Offered on every open file, not only when something looks wrong.
+   *
+   * The moment a person needs this is the moment they believe work has gone,
+   * and that is the worst moment to go looking for where it lives. A line
+   * that is always there costs one row and is already known when it matters.
+   */
+  let showingHistory = $state(false);
 </script>
 
 {#if binary}
@@ -99,18 +116,43 @@
   {/if}
   <Preview path={params.opened.path} held={binary} />
 {:else if params.opened.sharedText}
-  {@const trouble = params.opened.sharedText.shared?.trouble}
-  {#if trouble}
-    <p
-      class="border-b px-3 py-2 text-sm {trouble.passing
-        ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
-        : 'bg-destructive/10 text-destructive border-destructive/30'}"
-      data-region="trouble"
-    >
-      {trouble.says} — what you type is kept, and goes when it can.
-    </p>
-  {/if}
-  <div class="text" class:runnable>
+  <button
+    type="button"
+    class="text-muted-foreground hover:bg-muted/60 flex w-full shrink-0 items-center gap-2 border-b px-3 py-1.5 text-left text-xs"
+    data-region="history-offer"
+    onclick={() => (showingHistory = true)}
+  >
+    <HistoryIcon class="size-3.5 shrink-0" />
+    <span class="truncate">
+      Missing something, or want to see how this looked before?
+      <span class="underline underline-offset-2">Open this file's history</span>
+    </span>
+  </button>
+  <History
+    workspace={params.workspace}
+    entry={params.opened.id}
+    path={params.opened.path}
+    bind:open={showingHistory}
+  />
+  <div class="text relative" class:runnable>
+    <!--
+      OVER the editor rather than above it.
+      A notice that takes a row pushes every line of code down the moment it
+      appears and pulls them back up when it goes -- and these come and go on
+      their own schedule, not the reader's. Floating it means the thing being
+      read never moves, which is the only way a transient notice is bearable.
+    -->
+    {#if params.opened.sharedText.shared?.trouble}
+      {@const trouble = params.opened.sharedText.shared.trouble}
+      <p
+        class="pointer-events-none absolute top-2 right-2 z-10 rounded-md border px-2 py-1 text-xs shadow-sm {trouble.passing
+          ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+          : 'bg-destructive/10 text-destructive border-destructive/30'}"
+        data-region="trouble"
+      >
+        {trouble.says} — what you type is kept, and goes when it can.
+      </p>
+    {/if}
     <!-- `props` is everything the editor was configured with and the file is
          the one thing that differs per panel. Spreading is what makes
          `onEditor` reach anybody -- it was being carried this far and dropped. -->
@@ -123,6 +165,7 @@
         kernelPool={params.kernelPool}
         shared={params.opened.sharedText}
         onFinished={params.onFinished}
+        onRun={params.onRun}
       />
     {/if}
   </div>

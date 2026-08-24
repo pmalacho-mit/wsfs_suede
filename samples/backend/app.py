@@ -167,58 +167,30 @@ def create_sample_app(
         return {"token": answer.json()["token"]}
 
     @app.post("/projects", status_code=201)
-    async def open_project() -> dict[str, str]:
+    async def open_project(project_id: UUID | None = None) -> dict[str, str]:
+        """Open the named project, or make one when none is named.
+
+        `= None` is load-bearing: a query parameter typed `UUID | None` with
+        no default is REQUIRED by FastAPI, nullability notwithstanding -- so
+        without it the half of this route that makes a project cannot be
+        reached at all, and every caller gets a 422.
+        """
         async with database.session() as session:
-            project = Project()
-            session.add(project)
-            await session.commit()
-            return {"id": str(project.id)}
+            if project_id is None:
+                project = Project()
+                session.add(project)
+                await session.commit()
+                return {"id": str(project.id)}
+            else:
+                project = (
+                    await session.exec(
+                        select(Project).where(col(Project.id) == project_id)
+                    )
+                ).one_or_none()
+                if project is None:
+                    raise HTTPException(404, "project not found")
 
-    @app.post("/rooms/{entry_id}/updates", status_code=204)
-    async def hand_over(entry_id: UUID, request: Request) -> None:
-        """Put a client's own document update into the room for it.
-
-        The one thing a client cannot do for itself when it can reach this
-        server and not the collaboration one.
-        """
-        await _rooms().hand_over(str(entry_id), await request.body())
-
-    @app.post("/rooms/{entry_id}/warm", status_code=202)
-    async def warm_room(entry_id: UUID, later: BackgroundTasks) -> None:
-        """Fill this entry's room now, so that opening it later is instant.
-
-        Creating a room, asking what it holds and filling it is three calls to
-        the collaboration server and takes a second or two. Somebody opening a
-        file has to wait for that, because an editor bound to a room that has
-        not been filled shows an empty file and then saves it over the real
-        one.
-
-        Nobody is waiting at creation time, so that is where it belongs --
-        whether the file was made by a person or by a workspace being cloned
-        for one.
-        """
-        later.add_task(_rooms().ensure, str(entry_id))
-
-    @app.post("/rooms/{entry_id}/stored", status_code=204)
-    async def room_stored(entry_id: UUID, body: dict[str, str]) -> None:
-        """A member of this room wrote the file.
-
-        Told rather than discovered. The room already holds the text, so the
-        only thing that changed is where this host believes it stands -- and
-        knowing that is what makes every other client's settle free.
-        """
-        await _rooms().stored(str(entry_id), body["version"])
-
-    @app.post("/rooms/{entry_id}")
-    async def ensure_room(entry_id: UUID) -> dict[str, str | None]:
-        """Make this entry's shared room exist and say what the file says.
-
-        Idempotent, and the only way a room is ever filled: the browsers used
-        to elect one of themselves to do it, which is a race no client can
-        settle because a document that has not synced looks exactly like an
-        empty one.
-        """
-        return {"base": await _rooms().ensure(str(entry_id))}
+                return {"id": str(project_id)}
 
     secret = os.environ.get("LIVEBLOCKS_SECRET_KEY")
 

@@ -22,7 +22,7 @@ import secrets
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any, final
 from uuid import UUID
 
@@ -45,10 +45,19 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ...wsfs_suede__sqlmodel_utils_suede.associations import now
 from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
+from . import history as history_of
+from . import records
+from .minted import minted_at
 from . import reconstruct, refusals, service
 from .blobs import Blobs
 from .contract import (
     Clearing,
+    Executed,
+    Executions,
+    History,
+    Occurrence,
+    SnapshotEntry,
+    SnapshotTaken,
     Create,
     InitializeRequest,
     InitializeResponse,
@@ -580,6 +589,95 @@ def create_router(
                 await resolve_content(
                     backend.schema, session, workspace_id, entry_id, content
                 ),
+            )
+
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/history")
+    async def history(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        before: datetime | None = None,
+        limit: int = 10,
+        user: UUID = Depends(authorize),
+    ) -> History:
+        """What this file has said, newest first.
+
+        Scoped to the CALLER for everything except what the workspace
+        accepted: a draft is work that reached nobody, so the author is the
+        only person who has ever seen it, and listing somebody else's would
+        publish typing they never shared.
+
+        Paged by `before` rather than by an offset, because rows arrive while
+        somebody is reading and an offset would show one twice or skip one.
+        """
+        async with database.session() as session:
+            versions, more = await history_of.of_entry(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                user,
+                before,
+                max(1, min(limit, 100)),
+            )
+            return History(versions=versions, more=more)
+
+    @router.get("/workspaces/{workspace_id}/entries/{entry_id}/executions")
+    async def executions(
+        workspace_id: Annotated[UUID, APIPath()],
+        entry_id: Annotated[UUID, APIPath()],
+        limit: int = 20,
+        _: UUID = Depends(authorize),
+    ) -> Executions:
+        """What running this file has produced, newest first."""
+        async with database.session() as session:
+            rows = await records.executions_of(
+                session,
+                backend.models,
+                workspace_id,
+                entry_id,
+                max(1, min(limit, 200)),
+            )
+            return Executions(
+                executions=[
+                    Executed(
+                        transaction=row.id,
+                        snapshot=row.snapshot,
+                        entry=row.entry_id,
+                        at=Occurrence(
+                            minted=minted_at(row.id),
+                            offset=row.utc_offset,
+                            accepted=row.timestamp,
+                        ),
+                        outputs=row.outputs,
+                        ok=row.ok,
+                    )
+                    for row in rows
+                ]
+            )
+
+    @router.get("/workspaces/{workspace_id}/snapshots/{snapshot_id}")
+    async def snapshot_taken(
+        workspace_id: Annotated[UUID, APIPath()],
+        snapshot_id: Annotated[UUID, APIPath()],
+        _: UUID = Depends(authorize),
+    ) -> SnapshotTaken:
+        """Which entries a snapshot named, and at which versions."""
+        async with database.session() as session:
+            rows = await records.entries_in(
+                session, backend.models, workspace_id, snapshot_id
+            )
+            return SnapshotTaken(
+                snapshot=snapshot_id,
+                entries=[
+                    SnapshotEntry(
+                        entry=row.entry_id,
+                        name_version=row.name_version,
+                        parent_version=row.parent_version,
+                        deleted_version=row.deleted_version,
+                        content_version=row.content_version,
+                    )
+                    for row in rows
+                ],
             )
 
     @router.get("/workspaces/{workspace_id}/drafts")

@@ -37,7 +37,7 @@ from sqlalchemy import literal, union_all
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import minted, refusals, stream
+from . import minted, records, refusals, stream
 from .blobs import Blobs
 from .contract import (
     Acknowledged,
@@ -47,6 +47,7 @@ from .contract import (
     Delete,
     Kind,
     Metadata,
+    Execute,
     Move,
     Operation,
     Refusal,
@@ -58,6 +59,7 @@ from .contract import (
     Submitted,
     TextBody,
     Transacted,
+    Snapshot,
     Write,
 )
 from .diff import diff_to_delta
@@ -1010,6 +1012,8 @@ async def kept(submission: Submission, request: Write) -> Outcome:
 
 
 async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
+    if isinstance(request, (Snapshot, Execute)):
+        return await _recorded(submission, request)
     if _asks_to_be_kept(request):
         return await kept(submission, cast(Write, request))
     applied = await _already_applied(submission, request)
@@ -1023,6 +1027,47 @@ async def adjudicate(submission: Submission, request: Submitted) -> Outcome:
     if refused is not None:
         return await declined(submission, request, refused)
     return await _APPLICATION[request.op](submission, request)
+
+
+async def _recorded(
+    submission: Submission, request: Snapshot | Execute
+) -> Outcome:
+    """A claim, kept, that changes nothing.
+
+    OUT OF THE LOG MACHINERY ENTIRELY, and deliberately: neither of these
+    mutates an entry, so neither takes a position, writes a log, or announces
+    an event. Running them through it would put them in the stream, where a
+    subscriber folding an entry's history would have to learn to ignore them.
+
+    Refused for one thing only -- whether the claim refers to anything. A
+    snapshot naming a version nobody issued, or an execution against a
+    snapshot nobody took, is a sentence with no subject.
+    """
+    session, models = submission.session, submission.models
+    workspace_id = submission.workspace
+
+    if await records.already_recorded(session, models, request):
+        return Outcome(Acknowledged())  # a replay after a dropped response
+
+    reason = (
+        await records.refuses_snapshot(session, models, workspace_id, request)
+        if isinstance(request, Snapshot)
+        else await records.refuses_execution(session, models, workspace_id, request)
+    )
+    if reason is not None:
+        """Not through `declined`: that records what was asked in the refusal
+        store, which is shaped around entry properties -- and neither of these
+        is one. There is nothing here a later write could be diffed against."""
+        return Outcome(Rejected(reason=reason, version=None))
+
+    if isinstance(request, Snapshot):
+        for row in records.snapshot_rows(models, workspace_id, submission.user, request):
+            session.add(row)
+    else:
+        session.add(
+            records.execution_row(models, workspace_id, submission.user, request)
+        )
+    return Outcome(Acknowledged())
 
 
 async def snapshot(

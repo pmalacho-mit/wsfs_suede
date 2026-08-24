@@ -6,6 +6,7 @@
   import { Nudge } from "../../../../../release/frontend/svelte/assistant/nudge";
 
   const IN_VIEW = ["/notebooks/analysis.py"];
+  const ATTACHED = IN_VIEW.map((path) => ({ path, executions: 0 }));
   const STUCK = "My last run ended in an error. Can you help?";
 
   class Pocket {
@@ -129,7 +130,7 @@
     data-region="toast-stage"
   >
     <Toaster position="top-center" richColors closeButton />
-    <Assistant conversation={pocket.conversation} attached={IN_VIEW} />
+    <Assistant conversation={pocket.conversation} attached={ATTACHED} />
   </div>
 {/snippet}
 

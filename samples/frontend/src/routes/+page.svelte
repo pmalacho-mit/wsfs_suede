@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   import WorkspaceFrame from "../../../../release/frontend/svelte/shell/WorkspaceFrame.svelte";
   import WorkspacePane from "../../../../release/frontend/svelte/shell/WorkspacePane.svelte";
@@ -7,14 +7,16 @@
   import {
     connect,
     http,
-    keeping,
-    persist,
     type Faltering,
+    type Keeping,
     type Reclamation,
     type Workspace as Client,
+    startPersistence,
+    createClient,
   } from "$wsfs";
-  import { createClient } from "@liveblocks/client";
   import { toast } from "svelte-sonner";
+  import { page } from "$app/state";
+  import { goto } from "$app/navigation";
 
   const USER = "ada@example.com";
   const BACKEND = "/wsfs";
@@ -33,7 +35,8 @@
    * saves, it is simply the only one in the room.
    */
   const key = import.meta.env.VITE_LIVEBLOCKS_KEY as string | undefined;
-  const liveblocks = key ? createClient({ publicApiKey: key }) : solo();
+
+  console.log(key);
 
   let workspace = $state<Client | undefined>(undefined);
   let failure = $state<string | undefined>(undefined);
@@ -49,6 +52,7 @@
    */
   let room = $state<Reclamation>({ phase: "idle" });
   let unwatch: (() => void) | undefined;
+  let kept: Keeping | undefined;
 
   /**
    * Queued work whose bytes are gone. An event, not a state -- it happened
@@ -77,40 +81,42 @@
     return ((await response.json()) as { id: string }).id;
   };
 
+  let id = $state("");
+  let liveblocks = $state<ReturnType<typeof createClient>>();
+
   const start = async () => {
     try {
-      const id = await project(USER);
-      /**
-       * Read before anything is served. A client that started answering reads
-       * and then found it had queued work would have shown a view missing its
-       * own -- so the queue is restored first, and `connect` is handed it.
-       */
-      const held = await keeping(id);
-      /**
-       * Asked once, here, rather than inside `keeping` -- in some browsers it
-       * prompts, and a library making a permission prompt appear as a side
-       * effect of opening a queue would be deciding something that is not its
-       * to decide. Not awaited for the workspace's sake: a browser that says
-       * no is a browser that may clear unsent work, not a reason to refuse to
-       * start.
-       */
-      void persist();
-      unwatch = held.watch(() => {
-        storage = held.faltering();
-        room = held.reclamation();
+      const { searchParams } = page.url;
+      const email = searchParams.get("user") ?? USER;
+      id = searchParams.get("project") ?? (await project(email));
+      const newUrl = new URL(page.url);
+      newUrl.searchParams.set("user", email);
+      newUrl.searchParams.set("project", id);
+      goto(newUrl.href, { keepFocus: true });
+      const persistence = await startPersistence(id, (issue, reclaiming) => {
+        storage = issue;
+        room = reclaiming;
       });
-      /**
-       * Once at startup, because a store that filled up during the last visit
-       * is still full at the start of this one and nothing else would notice
-       * until the first write failed.
-       */
-      void held.reclaim();
+
+      unwatch = persistence.unwatch;
+
+      liveblocks = createClient({
+        authEndpoint: async (room) => {
+          const answer = await fetch(
+            `/liveblocks/token?rooms=${encodeURIComponent(room ?? "")}`,
+            { headers: { "X-User-Email": email } },
+          );
+          if (!answer.ok)
+            throw new Error(`token: ${answer.status} ${await answer.text()}`);
+          return (await answer.json()) as { token: string };
+        },
+      });
       workspace = connect({
         workspace: id,
-        transport: http(BACKEND, asUser(USER)),
-        bytes: held.bytes,
-        kept: held.kept,
-        restored: held.restored,
+        transport: http(BACKEND, asUser(email)),
+        bytes: persistence.database.bytes,
+        kept: persistence.database.kept,
+        restored: persistence.database.restored,
         lost: (entries) => cannotBeSent(entries.length),
       });
     } catch (reason) {
@@ -118,8 +124,20 @@
     }
   };
 
-  void start();
-  onDestroy(() => (unwatch?.(), workspace?.stop()));
+  onMount(start);
+  /**
+   * Put down, and then waited for.
+   *
+   * A page that is navigating away can wait for the queue's bookkeeping to
+   * reach the disk, and a page that is being killed cannot -- so the one that
+   * can, does. Without it an answer still on its way is simply lost, and the
+   * next visit calls work that is safely on the server unsettled.
+   */
+  onDestroy(() => {
+    unwatch?.();
+    workspace?.stop();
+    void kept?.flushed();
+  });
 </script>
 
 <!-- The frame fills whatever it is given, so the page is what says "all of
@@ -128,7 +146,7 @@
   <WorkspaceFrame title={TITLE} event={EVENT} course={COURSE}>
     {#if failure}
       <p class="text-destructive p-4 text-sm">{failure}</p>
-    {:else if workspace}
+    {:else if workspace && liveblocks}
       <WorkspacePane {workspace} {liveblocks} {storage} {room} />
     {:else}
       <p class="text-muted-foreground p-4 text-sm">Opening a workspace…</p>

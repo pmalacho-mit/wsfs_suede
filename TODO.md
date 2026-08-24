@@ -112,9 +112,11 @@ silent until the first write, which happened twice.
     -- for a workspace nobody is looking at, the rows were queued offline and
     the server has never seen them -- so it buys a `blocked` verdict more than
     it buys space. Worth doing when the space is shown to be there
-[ ] Rows in `answers`. Three ids each, and every reconcile already prunes them
-    to the few a snapshot cannot answer for. Dropping them would cost the
-    accuracy of `unsettled` to save almost nothing
+[ ] Rows in `answers`. Three ids each, and NOT pruned -- pruning them against
+    the confirmed map was a bug, because a transaction the map covers now is
+    one it stops covering the moment something supersedes it. They accumulate
+    for the life of a workspace. Bounding them needs a rule that does not
+    depend on what is current, and there is not an obvious one
 ```
 
 ## 3. Blobs to object storage
@@ -200,4 +202,72 @@ silent until the first write, which happened twice.
 [ ] blobs are never exercised by a browser test, because every one of them is
     text. A binary round trip through `crypto.subtle` and the workspace-scoped
     blob routes is the gap
+```
+
+## 7. Reading your own write
+
+```
+[ ] A CLIENT CAN READ A FILE AND BE TOLD WHAT IT SAID BEFORE THE WRITE IT JUST
+    MADE. `workspace.write`/`shares` mints the transaction and returns
+    synchronously, but the view that `read` answers from is derived from the
+    OUTBOX -- `effective.of(map, queue.entries())` -- and the row does not
+    join the queue until the payload has been hashed and stored. Between
+    those two moments the file still says the old thing to its own author.
+
+    Reproduce: type into a file, close the tab, and click it open again in
+    the same frame. The panel opens on the text from before, and anything
+    typed on top of that is written over the newer version. The UI soak in
+    `Sample.test.svelte` does exactly this, which is why it now waits a beat
+    before reopening -- see the comment there.
+
+    Not fixed because the fix is in the write pump, where the ordering is the
+    most safety-critical in the codebase: the row is captured before the
+    bytes on purpose (bytes with no row are work gone unnoticed), the row
+    carries the content digest, and the delta chain reads the tail. The two
+    candidates:
+
+      - capture the queue row synchronously and fill in its digest after, so
+        the view has something to overlay from the first instant
+      - keep a small "issued, not yet queued" overlay in `workspace.ts` that
+        `recomputed` folds in and `flight.write` clears
+
+    Both are real changes to how the outbox is written and want a second
+    pair of eyes rather than an overnight commit.
+```
+
+## 8. Coming back to a file you closed
+
+```
+[ ] OPEN A FILE, TYPE, CLOSE IT -- AND LATER OPEN IT AGAIN, and its last line
+    can appear twice while the line typed after reopening goes missing. At any
+    distance, not only straight away: it reproduces with the file untouched
+    for ten rounds in between. This is ordinary use, and it is why the UI soak
+    in `Sample.test.svelte` never opens a file twice. Take `everFresh` out of
+    that test and seeds 2, 3, 7, 13, 19 and 23 all show it.
+
+    WHAT IS ESTABLISHED. A panel closed -- or a page left -- before its room
+    is ready hands its text over as a WRITE, because no document holds it yet
+    (`keepWhatWasTyped`). That is right, and it is what stopped the work being
+    thrown away, but it puts the FILE ahead of the ROOM. The host repairs that
+    on the next settle by CARRYING the difference in (`plan()` -> `Carry` in
+    `release/backend/rooms.py`), which inserts the text as new items. When the
+    room gains that line by any other route as well, both survive -- Yjs is
+    right to keep them, they are two different insertions that happen to say
+    the same thing -- and a line typed while the repair is in flight is lost
+    with the reconciliation.
+
+    WHAT IS RULED OUT, both by experiment rather than argument:
+
+      - the client's persisted document. Disabling `recall` entirely does not
+        change it, so this is not the browser's copy merging with the room's.
+      - telling the host where the file stands only after the hand-over. That
+        leaves `base` behind, and a room whose base is behind while its text
+        is ahead is exactly what `Carry` is for -- so it makes the doubling
+        reliable rather than rare. The comment in `Room.send` records it.
+
+    WHERE TO LOOK. The question is what a room should do when the file is
+    ahead of it and somebody is typing into it. `plan()` already declines to
+    carry into a room whose text equals the file's; what it does not have is a
+    way to carry a change in with the identity it would have had, or a reason
+    to wait until the room is not being written to. Both are design decisions.
 ```

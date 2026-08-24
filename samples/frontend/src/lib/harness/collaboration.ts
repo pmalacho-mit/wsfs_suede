@@ -22,7 +22,7 @@ import {
   connect,
   contract,
   http,
-  keeping,
+  persistenceMechanism,
   type Keeping,
   type Transport,
   type Workspace,
@@ -37,7 +37,7 @@ import {
 } from "../../../../../release/frontend/svelte/room.svelte";
 
 import {
-  hosted,
+  hostedIn,
   persisting,
   untilSynchronized,
 } from "../../../../../release/frontend/svelte/collaborator";
@@ -139,7 +139,7 @@ const BACKEND = "/wsfs";
 
 const asUser = (email: string) => async () => ({ "X-User-Email": email });
 
-export const clientAs = (email: string): LiveblocksClient =>
+export const liveblocksClientAs = (email: string): LiveblocksClient =>
   createClient({
     authEndpoint: async (room) => {
       const answer = await fetch(
@@ -200,6 +200,20 @@ export const switchable = (
       reach(),
       wire.store(workspace, digest, bytes, mime)
     ),
+    settleRoom: (workspace, entry) => (reach(), wire.settleRoom(workspace, entry)),
+    warmRoom: (workspace, entry) => (reach(), wire.warmRoom(workspace, entry)),
+    roomStored: (workspace, entry, version) => (
+      reach(),
+      wire.roomStored(workspace, entry, version)
+    ),
+    handOver: (workspace, entry, update) => (
+      reach(),
+      wire.handOver(workspace, entry, update)
+    ),
+    history: (workspace, entry, asking) => (
+      reach(),
+      wire.history(workspace, entry, asking)
+    ),
     cleared: (workspace, transactions) => (
       reach(),
       wire.cleared(workspace, transactions)
@@ -246,10 +260,17 @@ export class Collaborator {
    * its queued work afterwards would have shown a view missing its own.
    */
   static async opened(part: Part, workspaceId: string): Promise<Collaborator> {
-    return new Collaborator(part, workspaceId, await keeping(workspaceId));
+    return new Collaborator(
+      part,
+      workspaceId,
+      await persistenceMechanism(workspaceId),
+    );
   }
 
+  readonly held: Keeping;
+
   constructor(part: Part, workspaceId: string, held: Keeping) {
+    this.held = held;
     this.part = part;
     this.workspaceId = workspaceId;
     this.email = emailOf(part);
@@ -274,11 +295,11 @@ export class Collaborator {
       restored: held.restored,
       shared: (entry) => this.rooms.speaksFor(entry),
     });
-    this.liveblocks = clientAs(this.email);
+    this.liveblocks = liveblocksClientAs(this.email);
     this.rooms = new Rooms(
       this.workspace,
       enteringWith(this.liveblocks),
-      hosted,
+      hostedIn(this.workspace),
       persisting,
     );
   }
@@ -567,5 +588,13 @@ export class Collaborator {
   async dispose(): Promise<void> {
     await this.rooms.dispose();
     this.workspace.stop();
+    /**
+     * And wait for the queue's own bookkeeping to reach the disk.
+     *
+     * This teardown CAN wait, so not waiting would throw away answers that
+     * were on their way -- and the next client to open would call work that
+     * is safely on the server unsettled.
+     */
+    await this.held.flushed();
   }
 }

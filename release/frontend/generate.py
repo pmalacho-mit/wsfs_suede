@@ -33,6 +33,7 @@ TYPES = HERE / "schema.generated.d.ts"
 sys.path.insert(0, str(PACKAGE.parent))
 
 from wsfs_suede.release.backend.blobs import Blobs  # noqa: E402
+from wsfs_suede.release.backend.collaboration import ICollaboration  # noqa: E402
 from wsfs_suede.release.backend.main import Backend, create_router  # noqa: E402
 from wsfs_suede.release.backend.models import build_models  # noqa: E402
 from wsfs_suede.wsfs_suede__sqlmodel_utils_suede.postgres.db import Database  # noqa: E402
@@ -61,6 +62,9 @@ def _stub() -> "FastAPI":
                 heartbeat_seconds=15.0,
                 grace_seconds=30.0,
                 max_blob_bytes=0,
+                # Nor this: the collaboration server is reached when a room is
+                # filled, and describing an endpoint never fills one.
+                liveblocks=cast(ICollaboration, _absent),
             ),
             authorize=never_asked,
         )
