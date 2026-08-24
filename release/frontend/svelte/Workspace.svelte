@@ -716,6 +716,22 @@
         if (!id) return false;
         const sharedText = openFiles.get(id)?.sharedText;
         /**
+         * The editor writing back what it is already showing.
+         *
+         * It does this as it opens a file, and storing it is never right. At
+         * best it is a version identical to the one before it. At worst --
+         * and this is the one that cost somebody a line -- a write of this
+         * person's own is still in flight, so what the panel opened on is the
+         * text from BEFORE it, and putting that back is that write undone by
+         * the act of looking at the file.
+         *
+         * Taken and dropped rather than passed on, because there is nothing
+         * in it: it is a copy of what this panel is holding. A write that
+         * says something new -- a script's, an assistant's -- is not this,
+         * and goes on down.
+         */
+        if (sharedText !== undefined && value === sharedText.source) return true;
+        /**
          * A room that has not said what it holds is not a room this write can
          * go into: editing a document that has not received its own content
          * merges the two rather than replacing one with the other, which is

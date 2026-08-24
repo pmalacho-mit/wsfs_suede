@@ -177,6 +177,22 @@
   const texted = (held: { kind: string; text?: string } | undefined) =>
     held?.kind === "text" ? (held.text ?? "") : "";
 
+  /**
+   * What another client has for a path, or nothing if it has not heard of it.
+   *
+   * `holding` throws for a path its client does not know, which is a fair
+   * answer to "what does this file say" and the wrong one inside a poll: a
+   * second client hears about a file on a stream, so "not yet" is an ordinary
+   * state on the way to the answer, not a failure to report.
+   */
+  const heldBy = (client: Client, path: string) => {
+    try {
+      return texted(client.workspace.holding(path));
+    } catch {
+      return undefined;
+    }
+  };
+
   const action = (label: string): HTMLButtonElement => {
     const button = [...document.querySelectorAll("button")].find(
       (candidate) => candidate.textContent?.trim() === label,
@@ -824,8 +840,8 @@
     // the file was being replaced by what the editor happened to be showing.
     await until(
       "the other client has the typing",
-      () => texted(other.workspace.holding("draft.md")) === "before after",
-      () => JSON.stringify(other.workspace.holding("draft.md")),
+      () => heldBy(other, "draft.md") === "before after",
+      () => JSON.stringify(heldBy(other, "draft.md")),
       15_000,
     );
     void harness.capture("png", tall);
@@ -1175,8 +1191,8 @@
 
     await until(
       "the typing to reach the server",
-      () => texted(other.workspace.holding("hasty.md")) === "before after",
-      () => JSON.stringify(other.workspace.holding("hasty.md")),
+      () => heldBy(other, "hasty.md") === "before after",
+      () => JSON.stringify(heldBy(other, "hasty.md")),
       20_000,
     );
   }}
@@ -1249,8 +1265,8 @@
 
     await until(
       "the typing to reach the server",
-      () => texted(other.workspace.holding("leaving.md")) === "before after",
-      () => JSON.stringify(other.workspace.holding("leaving.md")),
+      () => heldBy(other, "leaving.md") === "before after",
+      () => JSON.stringify(heldBy(other, "leaving.md")),
       20_000,
     );
   }}
@@ -1335,10 +1351,10 @@
     // And it was a real submission, not a promise to make one.
     await until(
       "the other client has what was snapshotted",
-      () => texted(other.workspace.holding("draft.py")) === "start more",
+      () => heldBy(other, "draft.py") === "start more",
       () =>
         JSON.stringify({
-          other: other.workspace.holding("draft.py"),
+          other: heldBy(other, "draft.py"),
           resolved,
           here: take().entries.find((one: any) => one.path === "draft.py"),
         }),
@@ -1386,3 +1402,184 @@
     border-radius: 6px;
   }
 </style>
+
+<Sweater
+  name="a person editing through the real UI loses nothing, round after round"
+  lazy
+  body={async (harness) => {
+    /**
+     * The soak that types.
+     *
+     * `Soak.test.svelte` drives the client's API, and that is the right shape
+     * for the outbox, the wire and the room. It is the wrong shape for what
+     * actually goes wrong in front of a person: every fault this file found
+     * in one night lived between a Monaco model and a panel's lifetime, and
+     * none of them was reachable from an API the tests could call.
+     *
+     * So this one is a person. It opens files by clicking them, types with a
+     * caret, shuts tabs, and leaves the page -- and after every round it asks
+     * a SECOND client what the file says, because a client showing its own
+     * work proves nothing about what was kept.
+     *
+     * Seeded, so a failure is a number to put back in.
+     */
+    const SEED = 5;
+    const ROUNDS = 18;
+    let held = SEED >>> 0;
+    const roll = () => ((held = (held * 1664525 + 1013904223) >>> 0), held / 0x100000000);
+    const pick = <T,>(from: T[]): T => from[Math.floor(roll() * from.length)]!;
+
+    const pocket = harness.set(new Pocket());
+    const { id, workspace } = await opened();
+    const other = alongside(id);
+    showing(pocket, workspace);
+    harness.onAbort(() => (workspace.dispose(), other.dispose()));
+
+    const files = ["soak-one.md", "soak-two.md", "soak-three.md"];
+    const believed = new Map(files.map((path) => [path, `${path}\n`]));
+    for (const path of files)
+      await workspace.workspace.create(path, believed.get(path)!).settled;
+
+    const { root } = await harness.definition("root");
+    for (const path of files)
+      await until(
+        `${path} to be drawn`,
+        () => !!rowFor(root, path),
+        () => drawn(root).join(" | "),
+      );
+
+    /** Which file has a panel. One at a time, which is most people. */
+    let open: string | undefined;
+    /** What has been done, so a failure names the sequence that caused it. */
+    const acted: string[] = [];
+
+    const shut = () => {
+      if (open === undefined) return;
+      const tab = tabs(root).find((one) => one.textContent?.includes(open!));
+      if (tab) closeTab(tab);
+      open = undefined;
+      pocket.editor = undefined;
+    };
+
+    /** Click the row, and wait only for an editor -- not for its room. */
+    const openFile = async (path: string) => {
+      shut();
+      await clickRow(rowFor(root, path)!);
+      await until(
+        `an editor for ${path}`,
+        () => pocket.editor !== undefined,
+      );
+      open = path;
+    };
+
+    /**
+     * The check, and the only one that counts: does somebody ELSE have it.
+     *
+     * Bounded rather than instant, because none of this is synchronous --
+     * a store is a round trip and the other client hears about it on a
+     * stream. What it must not do is never arrive.
+     */
+    const andNobodyLostIt = async (path: string, round: number) => {
+      await until(
+        `round ${round}: ${path} to reach the other client`,
+        () => heldBy(other, path) === believed.get(path),
+        () =>
+          JSON.stringify({
+            wanted: believed.get(path),
+            got: heldBy(other, path),
+            acted,
+            mineSays: [...workspace.workspace.entries().values()]
+              .filter((one: any) => one.name === path)
+              .map((one: any) => one.content_version),
+            otherSays: [...other.workspace.entries().values()]
+              .filter((one: any) => one.name === path)
+              .map((one: any) => one.content_version),
+            shell: pocket
+              .take?.()
+              .entries.filter((one: any) => one.path === path),
+          }),
+        25_000,
+      );
+    };
+
+    const typed = (path: string, round: number) => {
+      const said = `r${round} `;
+      typeInto(pocket.editor!, said);
+      believed.set(path, believed.get(path)! + said);
+    };
+
+    for (let round = 0; round < ROUNDS; round += 1) {
+      const act = pick([
+        "type",
+        "type",
+        "typeAndShut",
+        "openAndTypeAtOnce",
+        "typeAndLeave",
+        "reopen",
+      ]);
+
+      // Everything here needs something open, so an empty screen just opens.
+      if (open === undefined && act !== "openAndTypeAtOnce")
+        await openFile(pick(files));
+
+      /** Named before anything happens to it: shutting forgets which it was. */
+      let touched = open;
+
+      if (act === "type") {
+        typed(open!, round);
+      } else if (act === "typeAndShut") {
+        typed(open!, round);
+        shut();
+      } else if (act === "typeAndLeave") {
+        typed(open!, round);
+        window.dispatchEvent(new Event("pagehide"));
+      } else if (act === "reopen") {
+        const path = open!;
+        typed(path, round);
+        shut();
+        /**
+         * A beat before opening it again, because a person is not faster than
+         * a frame. Without one this asks the client to read a file in the
+         * same millisecond it wrote it, and it answers with what the file
+         * said before -- the outbox row that carries a write is captured
+         * after the payload is hashed and stored, and until it exists the
+         * view has nothing to overlay. See "reading your own write" in
+         * TODO.md: it is real, and it is not what this test is for.
+         */
+        await new Promise((carry) => setTimeout(carry, 250));
+        await openFile(path);
+      } else {
+        // Opened and typed into in the same breath, with no wait between --
+        // the window where no document holds the file yet, and where every
+        // fault found tonight lived.
+        const path = pick(files);
+        await new Promise((carry) => setTimeout(carry, 250));
+        await openFile(path);
+        typed(path, round);
+        touched = path;
+      }
+
+      acted.push(`${round}:${act}:${touched}`);
+      pocket.opened = [...acted.slice(-6)];
+      await andNobodyLostIt(touched!, round);
+    }
+
+    // And at the very end, every file -- not just the one last touched.
+    shut();
+    for (const path of files) await andNobodyLostIt(path, ROUNDS);
+  }}
+>
+  {#snippet vest(p: Pocket)}
+    <div class="stage" bind:this={p.root}>
+      {#if p.workspace}
+        <Shell
+          workspace={p.workspace.workspace}
+          liveblocks={live}
+          entering={liveRoom.entering}
+          onEditor={(editor) => ((p.editor = editor), { dispose: () => {} })}
+          onSnapshot={(take) => (p.take = take)}
+        />
+      {/if}
+    </div>
+  {/snippet}
+</Sweater>

@@ -468,6 +468,20 @@ export class Room {
     void settled.then((answer) => {
       if (answer.rejected) return;
       this.base = transaction;
+      /**
+       * TOLD AT ONCE, and not after the hand-over, which was tried and is
+       * worse. Waiting until the others really had it sounds safer -- an
+       * unsaid note leaves the host thinking the room is where it last was,
+       * so the next settle fills it from the file. But the note is also what
+       * keeps `base` level with the file, and a room whose base is behind
+       * while its text is ahead is the one case the host CARRIES a change
+       * into: it computes what the file gained since that base and applies
+       * it to a document that already has it, so the line is said twice.
+       *
+       * Losing the note is the cheaper failure. The host compares the room's
+       * text with the file before carrying anything, so a room that already
+       * says it is rebased rather than written to.
+       */
       void this.held.host.stored(this.entry, transaction);
     });
     return { held: false, transaction, settled };
@@ -669,7 +683,18 @@ export class Room {
    * the work with it -- and an update still on its way to storage when the
    * document is torn down is exactly that loss.
    */
+  /**
+   * Whether this room is on its way out.
+   *
+   * Set before the flush rather than after it, because the flush is the slow
+   * part and shutting a tab and opening the same file again is something a
+   * person does inside it. Anybody who finds this room in the register during
+   * that window is finding one that is going, and must build its own.
+   */
+  going = false;
+
   async dispose(): Promise<void> {
+    this.going = true;
     this.detach();
     await this.#stopKeeping?.();
     this.#stopKeeping = undefined;
@@ -773,7 +798,10 @@ export class Rooms {
    * theirs to write, and the file ends up saying everything twice.
    */
   async open(entry: string): Promise<Room> {
-    const room = this.held.get(entry) ?? new Room(entry, this);
+    const already = this.held.get(entry);
+    /** Never one that is being put down -- see `Room.going`. */
+    const room =
+      already !== undefined && !already.going ? already : new Room(entry, this);
     this.held.set(entry, room);
     room.opening = "recalling";
     await room.recall();
@@ -800,9 +828,44 @@ export class Rooms {
     return room;
   }
 
+  /**
+   * Put this file's room down.
+   *
+   * OUT OF THE REGISTER FIRST, then closed -- and that order is the whole
+   * point. Closing a room flushes what it is holding, which takes as long as
+   * a write to storage takes, and shutting a tab and opening the same file
+   * again is something a person does inside that. Deleting afterwards deleted
+   * whatever was registered by THEN, which was the room the reopen had just
+   * made: the file ended up with a live room and an editor bound to it that
+   * the register did not know about, so nothing told it when the file
+   * changed, no write was allowed to go around it, and the next close found
+   * nothing to close and never flushed it.
+   *
+   * Taking it out first also means a reopen during the flush builds a fresh
+   * room rather than adopting one that is being put down.
+   */
   async close(entry: string): Promise<void> {
-    await this.held.get(entry)?.dispose();
-    this.held.delete(entry);
+    const room = this.held.get(entry);
+    if (room === undefined) return;
+    await room.dispose();
+    /**
+     * ONLY IF IT IS STILL THIS ROOM.
+     *
+     * Closing flushes what the room was holding, which takes as long as a
+     * write to storage takes, and shutting a tab and opening the same file
+     * again is something a person does inside that. Deleting whatever was
+     * registered by THEN deleted the room the reopen had just made: the file
+     * ended up with a live room and an editor bound to it that the register
+     * did not know about, so nothing told it when the file changed, the next
+     * close found nothing to close and never flushed it, and -- worst --
+     * writing text around the document stopped being refused, which is the
+     * one rule that keeps the editor's buffer from being saved over the file.
+     *
+     * Removed after the flush rather than before it for that last reason: for
+     * as long as anything here is holding this file, text must not go round
+     * it.
+     */
+    if (this.held.get(entry) === room) this.held.delete(entry);
   }
 
   async dispose(): Promise<void> {
