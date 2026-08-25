@@ -162,6 +162,17 @@ export const regions = (within: HTMLElement): string[] =>
     (element) => element.getAttribute("data-region") ?? "",
   );
 
+/** The three panels the shell lays out, left to right. */
+const PANELS = ["explorer", "documents", "assistant"] as const;
+
+/** Whether the shell has drawn all three of them yet. */
+export const laidOut = (root: HTMLElement) => () =>
+  PANELS.every((name) => !!region(root, name));
+
+/** Where a region sits, so an assertion can talk about left and right. */
+export const box = (root: HTMLElement, name: string): DOMRect =>
+  region(root, name)!.getBoundingClientRect();
+
 /** The dock's tabs, which is where an open file announces itself. */
 export const tabs = (within: HTMLElement): HTMLElement[] =>
   [...within.querySelectorAll(".dv-tab")] as HTMLElement[];
@@ -187,6 +198,60 @@ export const clickRow = async (row: HTMLElement): Promise<void> => {
   row.dispatchEvent(new MouseEvent("mouseup", at));
   row.dispatchEvent(new MouseEvent("click", at));
   await new Promise(requestAnimationFrame);
+};
+
+/**
+ * A right click at a point, as the tree's own handlers see one.
+ *
+ * `composed` matters: a row lives in a shadow root, and an event that cannot
+ * leave it is one the tree's OWN menu opens for and the surrounding component
+ * never hears about.
+ */
+export const menuAt = async (
+  target: Element,
+  x: number,
+  y: number,
+): Promise<void> => {
+  target.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      composed: true,
+      clientX: x,
+      clientY: y,
+    }),
+  );
+  // Long enough for the menu's opening animation to finish. A capture taken
+  // during it records the frame it caught, which is a menu at nearly zero
+  // opacity -- and a screenshot of nothing looks exactly like a bug.
+  await new Promise((wake) => setTimeout(wake, 200));
+};
+
+/** A right click on a row, near its top left corner. */
+export const menuOn = async (row: HTMLElement): Promise<void> => {
+  const { top, left } = row.getBoundingClientRect();
+  await menuAt(row, left + 4, top + 4);
+};
+
+/** The context menu open within `within`, wherever on the page it ended up. */
+export const openMenu = (within: ParentNode): HTMLElement | null =>
+  within.querySelector('[data-file-tree-context-menu-root="true"]');
+
+/**
+ * An action in the menu a test opened, by what it reads.
+ *
+ * SCOPED TO THE TEST'S OWN SUBTREE, and that is not a nicety: every test on
+ * the page keeps its panel, so a lookup across the document finds the menu of
+ * whichever test ran first, and then acts on a workspace that is not this one.
+ */
+export const action = (
+  within: ParentNode,
+  label: string,
+): HTMLButtonElement => {
+  const button = [...within.querySelectorAll('[data-file-tree-context-menu-root="true"]')]
+    .flatMap((menu) => [...menu.querySelectorAll("button")])
+    .find((candidate) => candidate.textContent?.trim() === label);
+  if (!button) throw new Error(`no "${label}" in the menu`);
+  return button;
 };
 
 /**
