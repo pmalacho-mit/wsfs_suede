@@ -46,7 +46,7 @@
 </script>
 
 <section
-  class="bg-muted/40 flex min-h-0 flex-col border-b"
+  class="bg-muted/40 flex min-h-0 min-w-0 flex-col border-b"
   data-region="problem-header"
 >
   <button
@@ -79,7 +79,7 @@
 
   {#if open}
     <div
-      class="max-h-56 min-h-0 overflow-x-hidden overflow-y-auto px-3 pt-0.5 pb-3"
+      class="max-h-56 min-h-0 min-w-0 overflow-x-hidden overflow-y-auto px-3 pt-0.5 pb-3"
       data-region="problem-header-body"
     >
       <MessageResponse {content} class={PROSE} />

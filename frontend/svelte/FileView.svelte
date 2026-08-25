@@ -196,6 +196,15 @@
   .text {
     display: grid;
     grid-template-rows: 1fr;
+    /* A COLUMN THAT MAY BE NARROWER THAN WHAT IS IN IT.
+       The implicit column a grid makes for itself is `auto`, and `auto` will
+       not go below the widest thing inside -- so one long line of code in the
+       problem statement set the width of this whole panel, and dragging the
+       splitter left could not take it back. The panel got smaller; the row
+       did not, and the code block's buttons went out past the edge with it.
+       `minmax(0, 1fr)` is the same column with permission to shrink, which
+       hands the overflow back to the things built to scroll it. */
+    grid-template-columns: minmax(0, 1fr);
     height: 100%;
     min-height: 0;
   }
