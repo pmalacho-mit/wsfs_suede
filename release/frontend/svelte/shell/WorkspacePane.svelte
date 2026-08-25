@@ -20,9 +20,12 @@
     liveblocks,
     storage,
     room,
+    courseEvent,
   }: {
     workspace: WSFS;
     liveblocks: ReturnType<typeof createClient>;
+    /** Which sitting of which course this is, for the study's records. */
+    courseEvent?: string;
     /** What is wrong with writing the queue down, if anything. */
     storage?: Faltering;
     /** What the last pass at making room found. */
@@ -72,6 +75,6 @@
     </p>
   {/if}
   <div class="min-h-0 flex-1" data-region="workspace-body">
-    <Workspace {workspace} {liveblocks} {model} />
+    <Workspace {workspace} {liveblocks} {model} {courseEvent} />
   </div>
 </div>

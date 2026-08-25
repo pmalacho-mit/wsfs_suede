@@ -75,7 +75,7 @@
 
   const takeOffer = (container: HTMLElement) =>
     [...(offered(container)?.querySelectorAll("button") ?? [])].find(
-      (button) => button.textContent?.trim() === "Ask the assistant",
+      (button) => button.textContent?.trim() === "Yes, show me",
     );
 </script>
 
@@ -94,9 +94,7 @@
     await delay({ seconds: 1 });
 
     expect(pocket.nudge.offered).toBe(true);
-    expect(offered(container)?.textContent).toContain(
-      "Looks like you're stuck",
-    );
+    expect(offered(container)?.textContent).toContain("Want a hint?");
 
     await capture("png").uri;
 

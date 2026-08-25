@@ -26,6 +26,9 @@ import {
   type Transcript,
   type Version,
   type Write,
+  type Accepted,
+  type Detected,
+  type Recorded,
 } from "./contract";
 import * as effective from "./effective";
 import { merged, type Told } from "./history";
@@ -184,6 +187,26 @@ export type Workspace = {
      * conversation: no transcript goes in and none comes out. See the route.
      */
     progressing: (asking: Judging) => Promise<Judged>;
+  };
+  /**
+   * The nudge study's records: episodes, accepted offers, and what a student
+   * did inside a post-episode window.
+   *
+   * POSTED AND FORGOTTEN, unlike everything else on this object. There is no
+   * outbox behind these and there is not meant to be: losing a write loses a
+   * student's program, and losing one of these loses one observation of one
+   * term. Paying for the second with the machinery that guarantees the first
+   * would be paying with the editor's responsiveness. See `study.py`.
+   *
+   * The clock is filled in here when a caller does not, like everywhere else.
+   */
+  study: {
+    detected: (told: Detected) => Promise<void>;
+    accepted: (told: Accepted) => Promise<void>;
+    activity: (
+      told: Recorded,
+      options?: { keepalive?: boolean },
+    ) => Promise<void>;
   };
   /**
    * Record that the workspace looked like this.
@@ -645,6 +668,14 @@ export const connect = (options: Options): Workspace => {
       hear: (token) => transport.hear(workspace, token),
       said: (asking) => transport.conversation(workspace, asking),
       progressing: (asking) => transport.progress(workspace, asking),
+    },
+
+    study: {
+      detected: (told) =>
+        transport.detected(workspace, { ...told, offset: told.offset ?? offset() }),
+      accepted: (told) =>
+        transport.accepted(workspace, { ...told, offset: told.offset ?? offset() }),
+      activity: (told, options) => transport.activity(workspace, told, options),
     },
 
     room: {

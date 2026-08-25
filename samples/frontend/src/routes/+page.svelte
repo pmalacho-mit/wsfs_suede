@@ -147,7 +147,7 @@
     {#if failure}
       <p class="text-destructive p-4 text-sm">{failure}</p>
     {:else if workspace && liveblocks}
-      <WorkspacePane {workspace} {liveblocks} {storage} {room} />
+      <WorkspacePane {workspace} {liveblocks} {storage} {room} courseEvent={EVENT} />
     {:else}
       <p class="text-muted-foreground p-4 text-sm">Opening a workspace…</p>
     {/if}

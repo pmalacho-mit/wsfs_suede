@@ -12,6 +12,7 @@ import {
   errorNamed,
   settingsFrom,
   Stuck,
+  tickFor,
   type Episode,
   type Settings,
 } from "../../release/frontend/svelte/assistant/stuck";
@@ -25,18 +26,25 @@ const quick: Settings = {
   banner: 20,
 };
 
-/** A clock the test winds, and a coin the test loads. */
-const rigged = (over: Partial<Settings> = {}, lands = 0) => {
+/** A clock the test winds, a coin the test loads, and names it can predict. */
+const rigged = (
+  over: Partial<Settings> = {},
+  lands = 0,
+  looking?: () => { entry?: string; path: string; text: string } | undefined,
+) => {
   let at = 0;
   const offered: Episode[] = [];
   const logged: Episode[] = [];
   let coin = lands;
+  let named = 0;
   const stuck = new Stuck({
     settings: { ...quick, ...over },
     now: () => at,
     roll: () => coin,
+    mint: () => `episode-${(named += 1)}`,
     offer: (episode) => offered.push(episode),
     record: (episode) => logged.push(episode),
+    ...(looking === undefined ? {} : { looking }),
   });
   return {
     stuck,
@@ -371,5 +379,108 @@ describe("whether the code moved", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(logged).toHaveLength(0);
+  });
+});
+
+describe("what an episode is, for whoever reads it back", () => {
+  it("names itself, so everything about it can name it too", () => {
+    /** The offer somebody accepted, the cooldown it started, the window it
+     *  opened and every keystroke inside that window are four tables joined
+     *  by this and nothing else. */
+    const held = rigged();
+    held.wind(100);
+    held.wind(1000);
+    const [first, second] = held.logged;
+    expect(first!.id).toBe("episode-1");
+    expect(second!.id).toBe("episode-2");
+    expect(held.offered[0]!.id, "and the offer is handed the same one").toBe(
+      first!.id,
+    );
+  });
+
+  it("carries the code as it stood at onset", () => {
+    let text = "print(1)";
+    const held = rigged({}, 0, () => ({
+      entry: "an-entry",
+      path: "demo.py",
+      text,
+    }));
+    held.wind(100);
+    text = "print(2)";
+    held.wind(1000);
+
+    expect(held.logged[0]!.code).toEqual({
+      entry: "an-entry",
+      path: "demo.py",
+      text: "print(1)",
+    });
+    expect(
+      held.logged[1]!.code!.text,
+      "the second episode is evidence about the second program",
+    ).toBe("print(2)");
+  });
+
+  it("says nothing about code when nothing was on screen", () => {
+    const held = rigged({}, 0, () => undefined);
+    held.wind(100);
+    expect(held.logged[0]!.code).toBeUndefined();
+  });
+
+  it("carries both ends of every period it opened", () => {
+    /** Precalculated, and recorded, because the settings that decide the
+     *  lengths are configurable -- so recomputing them later would describe
+     *  today's configuration rather than the student's afternoon. */
+    const held = rigged();
+    held.wind(100);
+    const episode = held.logged[0]!;
+    expect(episode.window).toEqual({ from: 100, until: 100 + quick.window });
+    expect(episode.cooldown).toEqual({
+      from: 100,
+      until: 100 + quick.cooldown,
+    });
+  });
+
+  it("a silent episode opens a window and starts no cooldown", () => {
+    const held = rigged({ offerRate: 0 });
+    held.wind(100);
+    expect(held.logged[0]!.window).toEqual({
+      from: 100,
+      until: 100 + quick.window,
+    });
+    expect(held.logged[0]!.cooldown).toBeUndefined();
+  });
+
+  it("an episode the protocol held back opens neither", () => {
+    const held = rigged();
+    held.wind(100);
+    held.wind(100);
+    const heldBack = held.logged.at(-1)!;
+    expect(heldBack.became).toBe("held back by the cooldown");
+    expect(heldBack.window, "there is already one open").toBeUndefined();
+    expect(heldBack.cooldown).toBeUndefined();
+    expect(
+      heldBack.code,
+      "and it is still evidence about a student being stuck",
+    ).toBeUndefined();
+  });
+});
+
+describe("how often the rules are asked", () => {
+  it("is half the shortest rule, so a short one is honoured", () => {
+    /** The bug this exists for: a fixed five-second tick against
+     *  `?nudge.idle=4` -- a threshold the tick cannot resolve, which looks
+     *  from the outside like a setting that does nothing. */
+    expect(tickFor({ ...DEFAULTS, idle: 4_000 })).toBe(2_000);
+    expect(tickFor({ ...DEFAULTS, progress: 6_000 })).toBe(3_000);
+  });
+
+  it("is never slower than five seconds, whatever the rules are set to", () => {
+    expect(tickFor(DEFAULTS)).toBe(5_000);
+  });
+
+  it("is never fast enough to spin the page", () => {
+    /** `?nudge.idle=0` is a legitimate thing to ask for -- see the note in
+     *  `settingsFrom` about zero being a number of seconds. */
+    expect(tickFor({ ...DEFAULTS, idle: 0 })).toBe(250);
   });
 });
