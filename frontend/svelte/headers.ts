@@ -18,7 +18,7 @@
  */
 import { nameOf } from "./paths";
 
-const headers: Record<string, string> = {
+export const headers = {
   "demo.py": `Write a program to display "hello world" twice.`,
 
   "Test.py": `Print "Hello World" and the result of 2+3.`,
@@ -67,7 +67,10 @@ tasks.
 };
 
 const byName = new Map(
-  Object.entries(headers).map(([name, text]) => [name.toLowerCase(), text.trim()]),
+  Object.entries(headers).map(([name, text]) => [
+    name.toLowerCase(),
+    text.trim(),
+  ]),
 );
 
 /** The problem this file is an answer to, if anybody wrote one down. */
