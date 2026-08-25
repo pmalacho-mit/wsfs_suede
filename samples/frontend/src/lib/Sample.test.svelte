@@ -1,15 +1,22 @@
 <script lang="ts">
   /**
-   * The whole browser suite, in ONE component, on purpose.
+   * A workspace being edited: files opened, typed into, renamed, run, shared,
+   * and still right at the other end.
    *
-   * The report driver opens a tab per test component and runs them all at
+   * EVERY TEST THAT TYPES IS IN HERE, and that is the rule this file exists
+   * to keep. The report driver opens a tab per component and runs them all at
    * once, and only one tab is ever focused; a `config` Sweater's `serial` is
    * one container's queue, and two containers run alongside each other. Both
    * roads lead to two tests typing at the same moment, and a rename input
-   * that loses focus mid-word fails somewhere else entirely. So: one file,
-   * one category, and every test in it named after its own subject.
+   * that loses focus mid-word fails somewhere else entirely. So everything
+   * that touches a keyboard shares this one file and this one serial queue.
    *
-   * The one other rule of sharing a page: no two tests may name the same
+   * `FileTree.test.svelte` is the other half, split off because it asks a
+   * different question -- what the explorer's menus offer, and what leaves
+   * and enters through them -- and because nothing in it types. A test that
+   * grows a keyboard belongs back here.
+   *
+   * The one rule both files share: no two tests anywhere may name the same
    * file. The editor registers a workspace's paths in a filesystem that is
    * global to the page, and a repeated name collides there rather than in
    * the backend, where the workspaces are genuinely separate.
@@ -29,6 +36,10 @@
     drawn,
     everythingIn,
     focused,
+    action,
+    box,
+    laidOut,
+    menuOn,
     menuOnEmptySpace,
     opened,
     quiet,
@@ -145,33 +156,12 @@
   const holds = (client: Client, path: string) => () =>
     client.paths.includes(path);
 
-  const menuOn = async (row: HTMLElement) => {
-    const { top, left } = row.getBoundingClientRect();
-    row.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        clientX: left + 4,
-        clientY: top + 4,
-      }),
-    );
-    await new Promise(requestAnimationFrame);
-  };
-
-  const WANTED = ["explorer", "documents", "assistant"] as const;
-
-  const laidOut = (root: HTMLElement) => () =>
-    WANTED.every((name) => !!region(root, name));
-
   /**
    * A report card gives each test a slice of one screen, and nine tests make
    * that slice shorter than the shell it is showing. The capture is taken of
    * a clone, so telling the clone how tall it is renders the whole thing.
    */
   const tall = { height: 500, style: { height: "500px" } };
-
-  /** Where a region sits, so an assertion can talk about left and right. */
-  const box = (root: HTMLElement, name: string) =>
-    region(root, name)!.getBoundingClientRect();
 
   /** The text of a held file, or nothing at all -- binaries have none. */
   const texted = (held: { kind: string; text?: string } | undefined) =>
@@ -193,13 +183,6 @@
     }
   };
 
-  const action = (label: string): HTMLButtonElement => {
-    const button = [...document.querySelectorAll("button")].find(
-      (candidate) => candidate.textContent?.trim() === label,
-    );
-    if (!button) throw new Error(`no "${label}" in the menu`);
-    return button;
-  };
 </script>
 
 <Sweater config category="Sample app" orientation="vertical" mode="serial" />
@@ -279,7 +262,7 @@
 
     await menuOn(rowFor(root, "anchor.md")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("New file"));
+      await userEvent.click(action(root, "New file"));
       await userEvent.keyboard("greeting.py{Enter}");
     });
 
@@ -324,7 +307,7 @@
 
     await menuOn(rowFor(root, "before.md")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Rename"));
+      await userEvent.click(action(root, "Rename"));
       await userEvent.keyboard("{Control>}a{/Control}after.md{Enter}");
     });
 
@@ -367,7 +350,7 @@
 
     await menuOn(rowFor(root, "doomed.md")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Delete"));
+      await userEvent.click(action(root, "Delete"));
     });
 
     await until(
@@ -409,11 +392,11 @@
     await menuOnEmptySpace(region(root, "tree")!);
     // Captured with the menu open: the two actions an entry cannot offer.
     void harness.capture("png", tall);
-    harness.expect(action("Add file")).toBeTruthy();
-    harness.expect(action("Add folder")).toBeTruthy();
+    harness.expect(action(root, "Add file")).toBeTruthy();
+    harness.expect(action(root, "Add folder")).toBeTruthy();
 
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Add file"));
+      await userEvent.click(action(root, "Add file"));
       await userEvent.keyboard("root-note.md{Enter}");
     });
 
@@ -454,7 +437,7 @@
 
     await menuOnEmptySpace(region(root, "tree")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Add folder"));
+      await userEvent.click(action(root, "Add folder"));
       await userEvent.keyboard("library{Enter}");
     });
 
@@ -506,10 +489,14 @@
     harness.expect(explorer.right).toBeLessThanOrEqual(documents.left + 1);
     harness.expect(documents.right).toBeLessThanOrEqual(assistant.left + 1);
 
-    // The tree reaches the bottom edge of the explorer, which is what makes
-    // the space under the last entry a place worth right-clicking.
+    // The tree reaches the strip of buttons under it and the strip reaches
+    // the explorer's bottom edge, which together are what keep the space
+    // below the last entry a place worth right-clicking.
     const tree = box(root, "tree");
-    harness.expect(Math.abs(tree.bottom - explorer.bottom)).toBeLessThan(2);
+    const strip = box(root, "tree-actions");
+    harness.expect(strip.height).toBeGreaterThan(20);
+    harness.expect(Math.abs(tree.bottom - strip.top)).toBeLessThan(2);
+    harness.expect(Math.abs(strip.bottom - explorer.bottom)).toBeLessThan(2);
 
     void harness.capture("png", tall);
   }}
@@ -604,7 +591,7 @@
     // Right-click the empty explorer -> Add file.
     await menuOnEmptySpace(region(root, "tree")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Add file"));
+      await userEvent.click(action(root, "Add file"));
     });
 
     // The row is there, being named, and the box is EMPTY -- the user types a
@@ -696,7 +683,7 @@
 
     await menuOnEmptySpace(region(root, "tree")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Add file"));
+      await userEvent.click(action(root, "Add file"));
       await userEvent.keyboard("{Enter}");
     });
 
@@ -752,7 +739,7 @@
 
     await menuOnEmptySpace(region(root, "tree")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Add file"));
+      await userEvent.click(action(root, "Add file"));
       await userEvent.keyboard("taken.md{Enter}");
     });
 
@@ -963,7 +950,7 @@
 
     await menuOn(rowFor(root, "told.md")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Rename"));
+      await userEvent.click(action(root, "Rename"));
       await userEvent.keyboard("{Control>}a{/Control}heard.md{Enter}");
     });
     await until(
@@ -974,7 +961,7 @@
 
     await menuOn(rowFor(root, "heard.md")!);
     await harness.withUserFocus(async (userEvent) => {
-      await userEvent.click(action("Delete"));
+      await userEvent.click(action(root, "Delete"));
     });
     await until(
       "the delete was announced",

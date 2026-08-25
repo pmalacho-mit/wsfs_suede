@@ -35,6 +35,25 @@
   const sanitizeForTree = (path: string, folder: boolean) =>
     folder ? `${path}/` : path;
 
+  /** Either spelling of a path names the same row, so both are asked about. */
+  const bothSpellings = (path: string) => [
+    path,
+    path.endsWith("/") ? path.slice(0, -1) : `${path}/`,
+  ];
+
+  /**
+   * The same numbering the tree gives a draft whose name is taken, so an
+   * upload that lands beside an entry of the same name reads like every other
+   * duplicate here rather than like a second convention.
+   */
+  const numbered = (path: string, suffix: number) => {
+    if (path.endsWith("/")) return `${path.slice(0, -1)}-${suffix}/`;
+    const dot = path.lastIndexOf(".");
+    return dot > path.lastIndexOf("/")
+      ? `${path.slice(0, dot)}-${suffix}${path.slice(dot)}`
+      : `${path}-${suffix}`;
+  };
+
   const depth = (path: string) => path.split("/").length;
 
   /**
@@ -187,6 +206,8 @@
     | "create"
     | "remove"
     | "watch"
+    /** Downloading a copy of a file is the one thing here that READS one. */
+    | "read"
   >;
 
   /**
@@ -230,6 +251,16 @@
         paths: [],
         renaming: true,
         dragAndDrop: true,
+        /**
+         * A folder whose only child is another folder keeps its own row.
+         *
+         * The tree's default is to draw `a/b/` as one row, which reads well
+         * in a diff and badly in an explorer somebody is USING: the outer
+         * folder then has nothing of its own to right click, to drop onto, or
+         * to drag -- so the one gesture available on it is the one that acts
+         * on the inner folder instead.
+         */
+        flattenEmptyDirectories: false,
       });
     }
 
@@ -341,6 +372,11 @@
   import { themes } from "../../../wsfs_suede.pierre-trees-svelte-suede/themes";
   import { appearance } from "./appearance.svelte";
   import { pointAsRect } from "./utils";
+  import MenuLayer from "./MenuLayer.svelte";
+  import { Button } from "./shadcn/ui/button";
+  import DownloadIcon from "@lucide/svelte/icons/download";
+  import UploadIcon from "@lucide/svelte/icons/upload";
+  import { chosen, download, foldersFor, type Chosen } from "./transfer";
 
   let { model }: Props = $props();
 
@@ -373,6 +409,41 @@
    * lose a path, and cannot lose an id.
    */
   const awaiting = new Set<Id>();
+
+  /**
+   * What an uploaded file holds, waiting for the tree to ask for it.
+   *
+   * An upload is a hand-made entry with something already in it, and this is
+   * the only difference between the two. It is left here rather than passed,
+   * because passing it would mean a SECOND way to create an entry -- and the
+   * one below is the way that keeps the mapping, the deferred announcements
+   * and the outbox in step. So the upload adds a row like a person does, and
+   * `add` finds the content here when it goes to create it.
+   */
+  const uploading = new Map<Path, Chosen>();
+
+  /**
+   * What the create `add` last made is waiting for.
+   *
+   * An upload is the only thing that needs it, and it needs it badly. A
+   * create names its parent by ID, and two of them sent in the same breath
+   * are two requests in flight at once -- which the server is free to answer
+   * in either order. Answer the child first and it names a folder that does
+   * not exist yet, and it is refused, along with everything under it.
+   *
+   * Everywhere else these are seconds apart, because a person is typing
+   * between them, and nothing has ever had to wait.
+   */
+  let lastSubmitted: Submitting | undefined;
+
+  /**
+   * What it is waiting for, read through a call.
+   *
+   * The assignment that fills it in happens inside the tree's own event, so
+   * it is not one the compiler can see -- and a plain read straight after
+   * clearing it is narrowed to `undefined` and refuses to have a `settled`.
+   */
+  const settling = (): Promise<unknown> | undefined => lastSubmitted?.settled;
 
   const workspaceToTreeOperation = {
     removed: (entry: Id): Tree.BatchOperation | undefined => {
@@ -490,15 +561,23 @@
 
   const add = (path: string) => {
     const isFolder = path.endsWith("/");
+    const carried = uploading.get(path);
+    uploading.delete(path);
     const submission = submissions.trackUntilSettled(
-      isFolder ? workspace.folder(path) : workspace.create(path, ""),
+      isFolder
+        ? workspace.folder(path)
+        : workspace.create(path, carried?.content ?? "", carried?.mime),
     );
     const { entry } = submission;
+    lastSubmitted = submission;
     model.performAndDeferAnyAnnouncements(() => mapping.set(entry, path));
-    if (!isFolder) {
-      awaiting.add(entry);
-      void warmOnceMade(submission);
-    }
+    if (isFolder) return;
+    // An uploaded file is neither opened nor warmed. A person naming a file
+    // is about to type into it, and one choosing forty of them is not -- and
+    // forty rooms nobody has asked for is forty round trips to the host.
+    if (carried !== undefined) return;
+    awaiting.add(entry);
+    void warmOnceMade(submission);
   };
 
   const move = (from: string, to: string) => {
@@ -563,13 +642,118 @@
   onDestroy(() => tree.dispose());
 
   /**
+   * Keeps a copy of what is at `path` -- the file, or the folder as a zip.
+   *
+   * `""` is the workspace itself, which is what the buttons below and the
+   * menu on the tree's own empty space both act on.
+   */
+  const keepACopy = (path: Path) => {
+    void download(workspace, path).catch((trouble) =>
+      console.error(`could not download ${path || "the workspace"}`, trouble),
+    );
+  };
+
+  /**
+   * A path no row in the tree is using, under either spelling -- and that
+   * nothing else in the same upload has already been promised.
+   */
+  const vacant = (path: Path, claimed: ReadonlySet<Path>): Path => {
+    const taken = (candidate: Path) =>
+      bothSpellings(candidate).some(
+        (spelling) => tree.item(spelling) !== null || claimed.has(spelling),
+      );
+    let suffix = 0;
+    let candidate = path;
+    while (taken(candidate)) candidate = numbered(path, ++suffix);
+    return candidate;
+  };
+
+  /**
+   * Where an uploaded path lands.
+   *
+   * Only its FIRST segment can collide with anything already here -- what is
+   * below that is inside something this upload is bringing with it -- so that
+   * is the only segment renamed, and every file under a folder renamed this
+   * way follows it. Merging into an existing folder of the same name would be
+   * the other answer, and it is the one that can overwrite somebody's work.
+   */
+  const placing = () => {
+    const settled = new Map<string, string>();
+    // Nothing in the tree yet, because nothing has been added yet -- so the
+    // names this upload has already spoken for are only written down here.
+    const claimed = new Set<string>();
+    return (path: Path): Path => {
+      const [head = "", ...rest] = path.split("/");
+      const inFolder = rest.length > 0;
+      const key = inFolder ? `${head}/` : head;
+      let free = settled.get(key);
+      if (free === undefined) {
+        free = vacant(key, claimed);
+        settled.set(key, free);
+        for (const spelling of bothSpellings(free)) claimed.add(spelling);
+      }
+      return inFolder ? `${free}${rest.join("/")}` : free;
+    };
+  };
+
+  /**
+   * Files from a disk, added exactly as a person adds them.
+   *
+   * Folders first and shallowest first, because a create names its parent by
+   * id and the parent has to exist before the child asks for it. Everything
+   * after that is `tree.add`, which is the same call the tree makes when a
+   * draft is finally named -- so the workspace, the mapping and the outbox
+   * hear about these the one way they hear about anything.
+   */
+  const receive = async (files: readonly File[]) => {
+    if (files.length === 0) return;
+    const place = placing();
+    const landing = (await chosen(files)).map((one) => ({
+      ...one,
+      path: place(one.path),
+    }));
+
+    // One at a time, and waiting: see `lastSubmitted`. The ROW appears at
+    // once either way -- what is being waited for is the server's answer,
+    // and only so that what goes inside has somewhere to go.
+    for (const folder of foldersFor(landing.map((one) => one.path))) {
+      if (tree.item(folder) !== null) continue;
+      lastSubmitted = undefined;
+      tree.add(folder);
+      await settling();
+    }
+
+    for (const one of landing) {
+      uploading.set(one.path, one);
+      tree.add(one.path);
+      // A row the tree declined to draw is a file that will never be created,
+      // and its bytes would otherwise sit here until the page went away.
+      uploading.delete(one.path);
+    }
+  };
+
+  let picker = $state<HTMLInputElement>();
+
+  const askForFiles = () => picker?.click();
+
+  const picked = (event: Event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    // Cleared before the work starts, so choosing the same file twice in a
+    // row is still a change the input reports.
+    input.value = "";
+    void receive(files).catch((trouble) =>
+      console.error("could not upload", trouble),
+    );
+  };
+
+  /**
    * The tree's own menu belongs to an entry, so a right click that misses
    * every entry gets nothing -- and the space below the last one is most of
    * the panel. That click opens this menu instead: the same surface, anchored
    * to the pointer, acting on the root.
    */
   let at = $state<{ x: number; y: number } | undefined>(undefined);
-  let anchor = $state<HTMLElement>();
   let surface = $state<HTMLElement>();
 
   const dismiss = () => (at = undefined);
@@ -581,18 +765,10 @@
     at = { x: event.clientX, y: event.clientY };
   };
 
-  // The anchor is placed within the tree so the menu travels with it; the
-  // rect it reports is the viewport point, which is what the menu flips on.
-  const placed = $derived.by(() => {
-    if (!at || !surface) return undefined;
-    const box = surface.getBoundingClientRect();
-    return { left: at.x - box.left, top: at.y - box.top };
-  });
-
   const context = $derived.by((): Context | undefined => {
-    if (!at || !anchor) return undefined;
+    if (!at || !surface) return undefined;
     return {
-      anchorElement: anchor,
+      anchorElement: surface,
       anchorRect: pointAsRect(at.x, at.y),
       close: dismiss,
       restoreFocus: () => {},
@@ -600,8 +776,9 @@
   });
 
   /**
-   * Two of the four the tree's own menu offers, because the other two need an
-   * entry to act on and this menu has none.
+   * Two of the four the tree's own menu offers -- the other two need an entry
+   * to act on and this menu has none -- and the two that are ABOUT the
+   * workspace as a whole, which is the one thing only this menu can name.
    */
   const rootActions = (open: Context): ContextMenu.Action[] => {
     // Adding hands focus straight to the tree's rename input, which the
@@ -619,7 +796,29 @@
         label: "Add folder",
         run: handOver(() => entries.add(tree, root, "folder")),
       },
+      { label: "Download", divided: true, run: handOver(() => keepACopy("")) },
+      { label: "Upload", run: handOver(askForFiles) },
     ];
+  };
+
+  /**
+   * The tree's four, plus a copy of this entry to keep.
+   *
+   * Slid in ahead of the destructive one rather than appended, so Delete
+   * stays where a hand already expects it: at the bottom, behind a divider.
+   */
+  const entryActions = (item: Item, open: Context): ContextMenu.Action[] => {
+    const standard = ContextMenu.actions({ model: tree, item, context: open });
+    const destructive = standard.findIndex((action) => action.danger === true);
+    const keeping: ContextMenu.Action = {
+      label: "Download",
+      run: () => {
+        open.close({ restoreFocus: false });
+        keepACopy(item.path);
+      },
+    };
+    const before = destructive < 0 ? standard.length : destructive;
+    return [...standard.slice(0, before), keeping, ...standard.slice(before)];
   };
 
   $effect(() => {
@@ -636,49 +835,93 @@
   });
 </script>
 
-<!-- The tree fills this, so the empty space below the last entry is still the
-     tree's -- which is the whole point of the menu above. -->
-<div
-  class="tree"
-  data-region="tree"
-  bind:this={surface}
-  oncontextmenu={asked}
-  role="presentation"
->
-  <Tree.Component model={tree} style="height: 100%; {theme}">
-    {#snippet contextMenu(item, opened)}
-      <ContextMenu.Component
-        context={opened}
-        actions={ContextMenu.actions({ model: tree, item, context: opened })}
-      />
-    {/snippet}
-  </Tree.Component>
-
+<!-- Two rows: the tree, which fills what is left so the empty space below the
+     last entry is still the tree's -- which is the whole point of the menu
+     above -- and the strip of the two things that are about all of it. -->
+<div class="explorer">
   <div
-    class="anchor"
-    bind:this={anchor}
-    style:left="{placed?.left ?? 0}px"
-    style:top="{placed?.top ?? 0}px"
+    class="tree"
+    data-region="tree"
+    bind:this={surface}
+    oncontextmenu={asked}
+    role="presentation"
   >
+    <Tree.Component model={tree} style="height: 100%; {theme}">
+      {#snippet contextMenu(item, opened)}
+        <MenuLayer anchor={opened.anchorRect}>
+          <ContextMenu.Component
+            context={opened}
+            actions={entryActions(item, opened)}
+          />
+        </MenuLayer>
+      {/snippet}
+    </Tree.Component>
+
     {#if context}
-      <ContextMenu.Component {context} actions={rootActions(context)} />
+      <MenuLayer anchor={context.anchorRect}>
+        <ContextMenu.Component {context} actions={rootActions(context)} />
+      </MenuLayer>
     {/if}
+  </div>
+
+  <div class="flex shrink-0 gap-1 border-t p-1.5" data-region="tree-actions">
+    <Button
+      variant="ghost"
+      size="sm"
+      class="flex-1"
+      title="Download the whole workspace"
+      onclick={() => keepACopy("")}
+    >
+      <DownloadIcon />
+      Download
+    </Button>
+    <Button
+      variant="ghost"
+      size="sm"
+      class="flex-1"
+      title="Add files from this machine"
+      onclick={askForFiles}
+    >
+      <UploadIcon />
+      Upload
+    </Button>
   </div>
 </div>
 
+<!-- Outside the tree, because the tree is where a right click means the root
+     and a click landing on this would be one. Nobody ever sees it: the
+     buttons and the menu both reach it by asking it to open. -->
+<input
+  class="picker"
+  type="file"
+  multiple
+  bind:this={picker}
+  onchange={picked}
+  tabindex="-1"
+  aria-hidden="true"
+/>
+
 <style>
+  .explorer {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    height: 100%;
+    min-height: 0;
+  }
+
   .tree {
     position: relative;
     height: 100%;
     min-height: 0;
   }
 
-  /* Nothing of its own: a zero-sized origin at the pointer, for the menu to
-     hang off exactly as it hangs off a row's. */
-  .anchor {
-    position: absolute;
+  /* Present rather than displayed: `display: none` makes an input one some
+     browsers refuse to open a picker for. */
+  .picker {
+    position: fixed;
     width: 0;
     height: 0;
-    z-index: 60;
+    opacity: 0;
+    pointer-events: none;
   }
 </style>

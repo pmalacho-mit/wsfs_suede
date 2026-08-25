@@ -68,6 +68,14 @@ that the tree, the context menu and the editor really drive a workspace --
 needs a browser, and lives beside the components as `*.test.svelte`, run by
 [sweater-vest-suede](../../sweater-vest-suede/README.md).
 
+The two that drive the workspace are split by one line: **anything that types
+is in `Sample.test.svelte`.** The driver opens a tab per file and runs them at
+once, and a rename input that loses focus mid-word fails somewhere else
+entirely -- so every keyboard gesture shares that file's one serial queue.
+`FileTree.test.svelte` is the explorer panel on its own: what its menus offer,
+what leaves and enters through them, and whether an open menu is really on top
+of the page. It clicks and it hands files to an input; it never types.
+
 The chrome's tests need no backend at all: `offline.ts` answers the wire with
 entries to draw and refuses every mutation, which is enough to photograph the
 layout and nothing like enough to prove anything about storing.
