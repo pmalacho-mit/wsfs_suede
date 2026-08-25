@@ -54,6 +54,7 @@ from ...wsfs_suede__sqlmodel_utils_suede.postgres.db import Database
 
 from . import history as history_of
 from . import records
+from . import study as studying
 from . import tutor as tutoring
 from .minted import minted_at
 from . import clone as cloning
@@ -63,19 +64,24 @@ from .blobs import Blobs
 from .clone import Cloned
 from .place import Placed
 from .contract import (
+    Accepted,
     Answering,
     Asked,
     Asking,
     Clearing,
     Create,
+    Detected,
     Executed,
     Executions,
     History,
     InitializeRequest,
     InitializeResponse,
+    Judged,
+    Judging,
     Occurrence,
     ReconstructionRequest,
     ReconstructionResponse,
+    Recorded,
     Refusal,
     Rejected,
     Rejection,
@@ -673,6 +679,9 @@ Follow = Callable[[UUID, str], Awaitable[StreamingResponse]]
 Ask = Callable[[UUID, Asking, UUID], Awaitable[Asked]]
 Hear = Callable[[UUID, str, UUID], Awaitable[StreamingResponse]]
 FetchTranscript = Callable[[UUID, datetime | None, int, UUID], Awaitable[Transcript]]
+RecordDetection = Callable[[UUID, Detected, UUID], Awaitable[None]]
+RecordAcceptance = Callable[[UUID, Accepted, UUID], Awaitable[None]]
+RecordActivity = Callable[[UUID, Recorded, UUID], Awaitable[None]]
 EnsureRoom = Callable[[UUID, UUID, UUID], Awaitable[RoomStanding]]
 WarmRoom = Callable[[UUID, UUID, BackgroundTasks, UUID], Awaitable[None]]
 RecordStored = Callable[[UUID, UUID, RoomStored, UUID], Awaitable[None]]
@@ -719,6 +728,9 @@ class Mounted:
     ask: Ask
     hear: Hear
     conversation: FetchTranscript
+    detected: RecordDetection
+    accepted: RecordAcceptance
+    activity: RecordActivity
     ensure_room: EnsureRoom
     warm_room: WarmRoom
     room_stored: RecordStored
@@ -1199,6 +1211,72 @@ def create_router(
                 max(1, min(limit, 100)),
             )
 
+    @router.post("/workspaces/{workspace_id}/progress")
+    async def progress(
+        workspace_id: Annotated[UUID, APIPath()],
+        request: Judging,
+        _: UUID = Depends(authorize),
+    ) -> Judged:
+        """Whether a student has got anywhere since a few minutes ago.
+
+        NOT A QUESTION, and not part of anybody's conversation: no transcript
+        goes in and no turn comes out. It is one measurement, asked on a timer
+        by the client that is watching somebody work -- which is why it does
+        not stream, does not take a message id, and is not recorded. What is
+        recorded is the episode, and only if the answer is no.
+
+        Answered synchronously because the caller has nobody waiting on it.
+        """
+        progressing, why = await tutoring.judged(
+            backend.answering.tutor,
+            request.goal,
+            request.before,
+            request.after,
+        )
+        return Judged(progressing=progressing, why=why)
+
+    # -- the study ---------------------------------------------------------------------
+
+    #
+    # Where the nudge protocol writes down what it saw. Three routes, all
+    # write-only, all answering 204 whether or not there was anything to
+    # write -- see `study.py` for why this is the one part of this package
+    # allowed to lose a row.
+    #
+    # UNDER A WORKSPACE like everything else, so `authorize` answers the one
+    # question it answers: may this caller reach this workspace. The student
+    # is whoever that says, never whoever the body claims.
+
+    @router.post("/workspaces/{workspace_id}/study/episodes", status_code=204)
+    async def stuck_episode(
+        workspace_id: Annotated[UUID, APIPath()],
+        told: Detected,
+        user: UUID = Depends(authorize),
+    ) -> None:
+        """A student was detected as stuck, and what the protocol did about it."""
+        async with database.session() as session:
+            await studying.detected(session, backend.models, workspace_id, user, told)
+
+    @router.post("/workspaces/{workspace_id}/study/offers", status_code=204)
+    async def stuck_offer(
+        workspace_id: Annotated[UUID, APIPath()],
+        told: Accepted,
+        user: UUID = Depends(authorize),
+    ) -> None:
+        """A student took a prompt that was offered to them."""
+        async with database.session() as session:
+            await studying.accepted(session, backend.models, workspace_id, user, told)
+
+    @router.post("/workspaces/{workspace_id}/study/activity", status_code=204)
+    async def stuck_activity(
+        workspace_id: Annotated[UUID, APIPath()],
+        told: Recorded,
+        user: UUID = Depends(authorize),
+    ) -> None:
+        """A batch of what a student did inside a post-episode window."""
+        async with database.session() as session:
+            await studying.recorded(session, backend.models, workspace_id, user, told)
+
     # -- rooms -------------------------------------------------------------------------
 
     #
@@ -1335,6 +1413,9 @@ def create_router(
         ask=ask,
         hear=hear,
         conversation=conversation,
+        detected=stuck_episode,
+        accepted=stuck_offer,
+        activity=stuck_activity,
         ensure_room=ensure_room,
         warm_room=warm_room,
         room_stored=room_stored,

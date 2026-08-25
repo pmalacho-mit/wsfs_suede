@@ -18,7 +18,12 @@ import type {
   Answering,
   Asked,
   Asking,
+  Judged,
+  Judging,
   Transcript,
+  Accepted,
+  Detected,
+  Recorded,
 } from "./contract";
 
 export type Authorized = () => HeadersInit | Promise<HeadersInit>;
@@ -75,11 +80,33 @@ export type Transport = {
    * would replay an answer somebody has already read.
    */
   hear: (workspace: Id, token: string) => AsyncIterable<Answering>;
+  /** Whether a program has moved toward its goal since a few minutes ago. */
+  progress: (workspace: Id, asking: Judging) => Promise<Judged>;
   /** This person's conversation here, newest first. */
   conversation: (
     workspace: Id,
     asking: { before?: string; limit?: number },
   ) => Promise<Transcript>;
+  /**
+   * The study's three write-only routes.
+   *
+   * POSTED AND FORGOTTEN. Everything else on this transport is somebody's
+   * work and is retried until it lands; these are a study's observations, and
+   * the trade is the other way round -- see `study.py`. The promises still
+   * reject, so a caller that wants to know can look; nothing in this codebase
+   * does anything but ignore them.
+   *
+   * `keepalive` is for the last flush of a window, which happens as a page is
+   * going away: an ordinary fetch is cancelled with the document, and ten
+   * minutes of recording would be lost at the last hurdle.
+   */
+  detected: (workspace: Id, told: Detected) => Promise<void>;
+  accepted: (workspace: Id, told: Accepted) => Promise<void>;
+  activity: (
+    workspace: Id,
+    told: Recorded,
+    options?: { keepalive?: boolean },
+  ) => Promise<void>;
 };
 
 const REFUSED = 409;
@@ -146,8 +173,9 @@ export const http = (base: string, authorize: Authorized): Transport => {
     return response;
   };
 
-  const posted = (path: string, body: unknown) =>
+  const posted = (path: string, body: unknown, init: RequestInit = {}) =>
     send(path, {
+      ...init,
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -222,6 +250,23 @@ export const http = (base: string, authorize: Authorized): Transport => {
           }
         }
       }
+    },
+
+    progress: async (workspace, asking) =>
+      json<Judged>(await posted(`${workspaces(workspace)}/progress`, asking)),
+
+    detected: async (workspace, told) => {
+      await posted(`${workspaces(workspace)}/study/episodes`, told);
+    },
+
+    accepted: async (workspace, told) => {
+      await posted(`${workspaces(workspace)}/study/offers`, told);
+    },
+
+    activity: async (workspace, told, { keepalive = false } = {}) => {
+      await posted(`${workspaces(workspace)}/study/activity`, told, {
+        keepalive,
+      });
     },
 
     conversation: async (workspace, { before, limit }) => {

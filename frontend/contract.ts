@@ -112,3 +112,15 @@ export type Attaching = Schemas["Attaching"];
 export type Attached = Schemas["Attached"];
 export type Turn = Schemas["Turn"];
 export type Transcript = Schemas["Transcript"];
+export type Judging = Schemas["Judging"];
+export type Judged = Schemas["Judged"];
+
+/**
+ * The study's records -- see `study.py` for why these are the one part of
+ * this contract a client is allowed to post and forget about.
+ */
+export type Detected = Schemas["Detected"];
+export type Accepted = Schemas["Accepted"];
+export type Recorded = Schemas["Recorded"];
+export type Moment = Schemas["Moment"];
+export type Span = Schemas["Span"];

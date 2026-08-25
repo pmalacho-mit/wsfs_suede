@@ -543,6 +543,10 @@
   import Assistant from "./assistant/Assistant.svelte";
   import { Conversation } from "./assistant/conversation.svelte";
   import { Nudge } from "./assistant/nudge";
+  import { goalOf } from "./assistant/goals";
+  import { mint } from "../identity";
+  import { settingsFrom, Stuck, tickFor, type Episode } from "./assistant/stuck";
+  import { Activity } from "./assistant/activity";
   import type { Outcome } from "./Runner.svelte";
   import { WithEvents } from "../../../wsfs_suede.with-events-suede";
 
@@ -553,6 +557,8 @@
     entering,
     onEditor,
     onSnapshot,
+    onStuck,
+    courseEvent,
   }: {
     model: Model;
     workspace: Workspace;
@@ -574,12 +580,131 @@
     /** Handed the snapshot taker once there is one, for anything outside
      *  this component that needs to describe what the user is looking at. */
     onSnapshot?: (take: (options?: Taking) => Snapshot) => void;
+    /**
+     * Every stuck episode, whatever became of it.
+     *
+     * Handed out rather than sent anywhere, because where it goes is a host's
+     * decision and not this component's -- and because the ones that were
+     * randomized into silence are the half a study cannot do without.
+     */
+    onStuck?: (episode: Episode) => void;
+    /**
+     * Which sitting of which course this is, as the host names it.
+     *
+     * Carried rather than derived, because this component knows about
+     * workspaces and files and has never heard of a course. It goes on every
+     * study record so that a term's data can be grouped by the thing a
+     * researcher actually cares about.
+     */
+    courseEvent?: string;
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
 
   const conversation = new Conversation();
+
+  /**
+   * Watching for somebody who is stuck.
+   *
+   * Built here rather than inside `onAPI` so it exists for the whole life of
+   * the panel -- a person can be idle before the dock has finished laying
+   * itself out, and that minute counts.
+   */
+  let stuck = $state<Stuck | undefined>(undefined);
   const nudge = new Nudge();
+
+  /**
+   * The rich record of a post-episode window.
+   *
+   * Armed by every eligible episode, offered and silent alike, and quiet the
+   * rest of the time -- which is nearly all of it. See `activity.ts` for why
+   * this is allowed to lose a batch and the outbox is not.
+   */
+  const activity = new Activity({
+    flush: ({ episode, moments }, closing) =>
+      workspace.study.activity(
+        {
+          episode,
+          moments: moments.map(({ at, ...rest }) => ({
+            ...rest,
+            at: new Date(at).toISOString(),
+          })),
+        },
+        /** The last batch is often sent as the page is going away, and an
+         *  ordinary fetch dies with the document. */
+        { keepalive: closing },
+      ),
+  });
+
+  /**
+   * A plain click, keystroke or scroll anywhere in the workspace.
+   *
+   * THE CATCH-ALL BEHIND `acted`, which is below. The named doors -- an edit,
+   * a run, a question -- cover the things worth naming; this covers the rest,
+   * because "idle" in the protocol means nobody is there, and somebody
+   * reading their own traceback, scrolling through their code or dragging a
+   * panel is there.
+   *
+   * The idle clock is reset EVERY time and the log is written at most every
+   * couple of seconds: the first is free and the second, unthrottled, would
+   * be a line per keystroke on top of the edits already recorded.
+   */
+  const STIR = 2_000;
+  let stirred = 0;
+  const stir = (how: string) => {
+    stuck?.acted();
+    const at = Date.now();
+    if (at - stirred < STIR) return;
+    stirred = at;
+    activity.note("interaction", { how });
+  };
+
+  let shell = $state<HTMLElement | undefined>(undefined);
+
+  /**
+   * Listened for imperatively, and on the shell rather than on the window.
+   *
+   * ON THE SHELL because the workspace is one region of somebody else's page,
+   * and a click in their header is not this student working. IN CAPTURE
+   * because a handler further in may stop the event -- an editor that
+   * swallows keystrokes would otherwise make typing look like idleness. And
+   * ADDED IN CODE rather than as attributes because a `<div>` carrying key
+   * handlers is a thing every a11y linter is right to ask about, and the
+   * answer here -- it is not a control, it is a room -- is not one an
+   * attribute can give.
+   */
+  $effect(() => {
+    const on = shell;
+    if (on === undefined) return;
+    const pointer = () => stir("pointer");
+    const key = () => stir("key");
+    const wheel = () => stir("wheel");
+    on.addEventListener("pointerdown", pointer, true);
+    on.addEventListener("keydown", key, true);
+    on.addEventListener("wheel", wheel, { capture: true, passive: true });
+    return () => {
+      on.removeEventListener("pointerdown", pointer, true);
+      on.removeEventListener("keydown", key, true);
+      on.removeEventListener("wheel", wheel, true);
+    };
+  });
+
+  /**
+   * Anything the person did, wherever they did it.
+   *
+   * ONE DOOR, and everything that counts as working goes through it: typing
+   * in a file, typing to the tutor, running something, opening a tab, or a
+   * plain click anywhere in the workspace. The idle rule is about a PERSON --
+   * "idle" in the protocol means nobody is there -- and a student reading
+   * their own traceback or scrolling through their code is there.
+   *
+   * `stuck` rather than a captured instance because this is called from the
+   * markup as well as from `onAPI`, and the watcher is built inside it.
+   */
+  const acted = (kind: string, what: Record<string, unknown> = {}) => {
+    stuck?.acted();
+    activity.note(kind, what);
+  };
 
   /**
    * What the assistant is asked on the person's behalf when they take the
@@ -588,6 +713,22 @@
    */
   const stuckOn = ({ because }: Extract<Outcome, { ok: false }>) =>
     `My last run ended in an error:\n\n\`\`\`\n${because}\n\`\`\`\n\nCan you help me work out why?`;
+
+
+  /**
+   * What the person is asked on their behalf, given why they look stuck.
+   *
+   * Phrased as THEM asking, because that is what the panel will show and what
+   * the tutor will answer -- and because a question that opens by telling
+   * somebody a system decided they were stuck is a worse question.
+   */
+  const becauseOf = (episode: Episode) => {
+    if (episode.rule === "the same error twice")
+      return `I keep getting the same error -- ${episode.detail}. Can you help me work out why?`;
+    if (episode.rule === "no progress")
+      return "I think I am stuck on this. Can you point me at what to try next?";
+    return "I am not sure what to do next here. Can you help me get started?";
+  };
 
   const snippets = { explorer, dock, assistant };
   const tabs = { file: FileView };
@@ -720,6 +861,18 @@
            * of this setup runs.
            */
           ask: (text: string) => void askTheTutor(text),
+          /**
+           * The chat box counts as working too. Idleness is about a PERSON,
+           * not about a pane, so somebody composing a long question to the
+           * tutor is not idle -- and used to be told so after three minutes.
+           *
+           * The LENGTH goes in the record and the text does not: what a
+           * student is drafting to a tutor is theirs until they send it, and
+           * how much of it there is at each moment is what a study of when
+           * they reached for help actually needs.
+           */
+          typed: (length: number) =>
+            acted("prompt typing", { length }),
         },
         {
           size: 340,
@@ -846,7 +999,118 @@
       workspace,
       (entry) => workspace.index().of(entry) ?? entry,
     );
+
+    /**
+     * The stuck watcher, and the one tick that drives its time-based rules.
+     *
+     * A single interval rather than a timer per rule: the rules are questions
+     * about elapsed time, so asking them together on a coarse tick is both
+     * simpler and cheaper than three timers being reset by every keystroke.
+     * The tick is short relative to the shortest rule so that "three minutes"
+     * means three minutes and not three-and-a-tick.
+     */
+    const settings = settingsFrom(
+      typeof window === "undefined" ? "" : window.location.search,
+    );
+
+    const held = new Stuck({
+      settings,
+      offer: (episode, forMs) =>
+        nudge.offer(() => {
+          /**
+           * TAKING THE OFFER IS A FACT ABOUT THE STUDENT, and it is recorded
+           * before the question goes anywhere: what is being measured is
+           * whether they accepted, not whether the tutor answered.
+           */
+          void offerTaken(episode);
+          acted("offer accepted", { episode: episode.id });
+          void askTheTutor(becauseOf(episode));
+        }, forMs),
+      record: (episode) => {
+        onStuck?.(episode);
+        /**
+         * The window opens for BOTH arms, which is the whole comparison --
+         * and only for episodes that opened one, so a detection held back by
+         * a cooldown cannot start a second recording inside the first.
+         */
+        if (episode.window)
+          activity.open(episode.id, episode.window.until);
+        activity.note("stuck", {
+          episode: episode.id,
+          rule: episode.rule,
+          became: episode.became,
+        });
+        void recordEpisode(episode);
+      },
+      looking: () => {
+        const open = snapshot().visible.at(0);
+        if (open === undefined) return undefined;
+        const showing = openFiles.get(open.entry)?.sharedText;
+        return showing === undefined
+          ? undefined
+          : { entry: open.entry, path: open.path, text: showing.source };
+      },
+      goalFor: goalOf,
+      judging: (asking) => workspace.tutor.progressing(asking),
+    });
+    stuck = held;
+    /**
+     * ONE INTERVAL, sized from the settings rather than fixed.
+     *
+     * A five-second tick is fine for a three-minute rule and useless for a
+     * four-second one, which is what somebody testing with `?nudge.idle=4`
+     * asks for: they set a threshold the tick cannot resolve and conclude the
+     * setting does nothing. See `tickFor`.
+     */
+    const ticking = setInterval(() => (held.check(), activity.check()), tickFor(settings));
+    cleanup.add(() => (held.stop(), activity.dispose(), clearInterval(ticking)));
     onSnapshot?.(snapshot);
+
+    /**
+     * The study's records, posted and forgotten.
+     *
+     * `catch` on every one of them, and it is the point rather than an
+     * oversight: an unhandled rejection here would be a study's bookkeeping
+     * showing up as an error in a student's console. See `study.py`.
+     */
+    const when = (at: number) => new Date(at).toISOString();
+
+    const recordEpisode = (episode: Episode) =>
+      workspace.study
+        .detected({
+          episode: episode.id,
+          at: when(episode.at),
+          rule: episode.rule,
+          became: episode.became,
+          /**
+           * TRIMMED TO WHAT THE CONTRACT ACCEPTS. A refused body is a lost
+           * episode, and a student with a very long path or a very large file
+           * is exactly the student a study should not quietly drop.
+           */
+          detail: episode.detail.slice(0, 2_000),
+          course_event: courseEvent?.slice(0, 200) ?? null,
+          entry: episode.code?.entry ?? null,
+          path: episode.code?.path.slice(0, 1_000) ?? null,
+          code: episode.code?.text.slice(0, 400_000) ?? null,
+          cooldown: episode.cooldown
+            ? { began: when(episode.cooldown.from), ends: when(episode.cooldown.until) }
+            : null,
+          window: episode.window
+            ? { began: when(episode.window.from), ends: when(episode.window.until) }
+            : null,
+        })
+        .catch(() => undefined);
+
+    const offerTaken = (episode: Episode) =>
+      workspace.study
+        .accepted({
+          offer: mint(),
+          episode: episode.id,
+          at: new Date().toISOString(),
+          course_event: courseEvent?.slice(0, 200) ?? null,
+          entry: episode.code?.entry ?? null,
+        })
+        .catch(() => undefined);
 
     const kernelPool = new WarmPool<Kernel>({
       create: () =>
@@ -857,12 +1121,25 @@
     });
 
     /**
-     * A run that ended badly is the only reason to offer help, and typing
-     * again is the only reason needed to withdraw it.
+     * A run is one of the things `Stuck` watches, and the only one that can
+     * fire the repeated-error rule.
+     *
+     * NOT AN OFFER IN ITSELF any more. A failing run used to prompt every
+     * time, which is both more often than the protocol allows and a worse
+     * signal than the protocol asks for: one error is somebody working, and
+     * the SAME error twice is somebody stuck. Whether anything is said is
+     * decided in one place now -- see `stuck.ts`.
      */
     const finished = (outcome: Outcome) => {
-      if (outcome.ok) return nudge.withdraw();
-      nudge.offer(() => void askTheTutor(stuckOn(outcome)));
+      if (outcome.ok) nudge.withdraw();
+      activity.note("ran", {
+        ok: outcome.ok,
+        ...(outcome.ok ? {} : { because: outcome.because.slice(0, 2_000) }),
+      });
+      /** `ran` counts as acting, so this is the idle clock too. */
+      stuck?.ran(
+        outcome.ok ? { ok: true } : { ok: false, because: outcome.because },
+      );
     };
 
     /**
@@ -885,6 +1162,12 @@
       result: Promise<Outcome>;
     }) => {
       if (entry === undefined) return;
+      /**
+       * STARTING a run is acting, and it is not the same event as finishing
+       * one. A program that takes a minute used to leave the person who
+       * started it looking idle for that minute.
+       */
+      acted("run", { entry });
       const taken = workspace.snapshot(
         snapshot().entries.map((held) => held.entry),
       );
@@ -933,10 +1216,17 @@
      * error about bookkeeping.
      */
     const askTheTutor = async (text: string) => {
+      /**
+       * SENDING is acting, and it is not covered by typing.
+       *
+       * A question can be pasted and clicked, or taken from a suggestion, and
+       * a student who has just asked for help is the least idle person in the
+       * room. This used to be reachable only through the chat box's `oninput`.
+       */
+      acted("asked", { length: text.length });
       const held = snapshot({ resolveDirty: true });
       const taken = workspace.snapshot(held.entries.map((one) => one.entry));
       const attached = held.visible
-        .filter((one) => one.type !== "folder")
         .map((one) => ({
           entry: one.entry,
           path: one.path,
@@ -957,7 +1247,22 @@
 
     const editorProps: EditorHooks = {
       onEditor,
-      onUserEdit: () => nudge.withdraw(),
+      /**
+       * Typing is the clearest evidence somebody is not stuck: it withdraws
+       * an offer that is already up, and it is what the idle rule counts.
+       */
+      onUserEdit: (edit) => {
+        nudge.withdraw();
+        acted("edit", {
+          did: edit.did,
+          via: edit.via,
+          offset: edit.at,
+          removed: edit.removed,
+          inserted: edit.inserted.slice(0, 1_000),
+          shared: edit.shared,
+          version: edit.version,
+        });
+      },
     };
 
     /**
@@ -972,8 +1277,13 @@
      * gives: registering `beforeunload` disqualifies the page from the
      * back/forward cache in several browsers, and this needs no prompt.
      */
-    const keepWhatNobodySaved = () =>
+    const keepWhatNobodySaved = () => {
       openFiles.forEach((open) => open.sharedText?.keepWhatWasTyped());
+      /** And whatever the window has recorded and not yet sent. `close`
+       *  flushes with `keepalive`, which is the only kind of request that
+       *  outlives the document it was made from. */
+      activity.close();
+    };
     if (typeof window !== "undefined") {
       window.addEventListener("pagehide", keepWhatNobodySaved);
       cleanup.add(() =>
@@ -981,13 +1291,29 @@
       );
     }
 
+    /**
+     * Which files the person can actually see, as a list of paths.
+     *
+     * Read off the same snapshot everything else reads, so "visible" means
+     * here what it means everywhere else -- dockview shows one panel per
+     * GROUP, so two groups side by side are two visible files.
+     */
+    const onScreen = () => snapshot().visible.map((one) => one.path);
+
     cleanup.add(
       () => openFiles.forEach((open) => open.sharedText?.dispose()),
-      tabsAPI.onDidActivePanelChange(({ panel }) => tree.select(panel?.id)),
-      tabsAPI.onDidAddPanel((panel) => inView.watch(panel)),
+      tabsAPI.onDidActivePanelChange(({ panel }) => {
+        tree.select(panel?.id);
+        acted("panel active", { entry: panel?.id, visible: onScreen() });
+      }),
+      tabsAPI.onDidAddPanel((panel) => {
+        inView.watch(panel);
+        acted("panel opened", { entry: panel.id, visible: onScreen() });
+      }),
       tabsAPI.onDidRemovePanel((panel) => {
         tree.deselect(panel.id);
         inView.forget(panel.id);
+        acted("panel closed", { entry: panel.id, visible: onScreen() });
         // Closing is the last chance to keep what was typed, and letting the
         // file go is what makes reopening it start clean rather than resume.
         openFiles.get(panel.id)?.sharedText?.dispose();
@@ -1086,19 +1412,22 @@
 {/snippet}
 
 {#snippet assistant({
-  params: { snapshot, conversation, ask },
+  params: { snapshot, conversation, ask, typed },
 }: PanelProps<
   "grid",
   {
     snapshot: () => Snapshot;
     conversation: Conversation;
     ask: (text: string) => void;
+    typed: (length: number) => void;
   }
 >)}
   <div class="h-full min-h-0 border-l" data-region="assistant">
     <Assistant
       {conversation}
       onAsk={ask}
+      oninput={(event: Event) =>
+        typed((event.currentTarget as HTMLTextAreaElement | null)?.value.length ?? 0)}
       attached={snapshot().visible.map(({ path, executions, entry }) => ({
         entry,
         path,
@@ -1108,7 +1437,11 @@
   </div>
 {/snippet}
 
-<div class="bg-background h-full min-h-0 w-full {chrome}" data-region="shell">
+<div
+  class="bg-background h-full min-h-0 w-full {chrome}"
+  data-region="shell"
+  bind:this={shell}
+>
   <GridView
     {snippets}
     orientation={Orientation.HORIZONTAL}
