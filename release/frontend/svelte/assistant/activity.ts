@@ -85,14 +85,29 @@ export class Activity {
   /**
    * Start recording for one episode, until the moment its window closes.
    *
-   * A SECOND CALL WHILE ONE IS OPEN IS IGNORED, which is the protocol's
-   * "overlapping post-episode windows are not created" said in the one place
-   * that would otherwise create one. The episode being recorded is the one
-   * whose window is open; a detection inside it was held back and has no
-   * window of its own.
+   * A SECOND CALL WHILE ONE IS STILL RUNNING IS IGNORED, which is the
+   * protocol's "overlapping post-episode windows are not created" said in the
+   * one place that would otherwise create one. The episode being recorded is
+   * the one whose window is open; a detection inside it was held back and has
+   * no window of its own.
+   *
+   * STILL RUNNING, and not merely still here. A window that has passed its
+   * end and has not been swept up yet is not a window -- it is bookkeeping
+   * waiting for the next tick, and the caller's tick asks the rules BEFORE it
+   * asks this. So a detection that lands in the gap between a window ending
+   * and being closed used to be turned away by the corpse of the one before
+   * it: the server was told a window had opened, and the client recorded
+   * nothing in it for ten minutes. An empty window and an idle student are
+   * indistinguishable in the data, which is the worst way for this to fail.
+   *
+   * So the old one is closed here rather than refused, which also sends what
+   * it was holding.
    */
   open(episode: string, until: number): void {
-    if (this.#episode !== undefined) return;
+    if (this.#episode !== undefined) {
+      if (this.#now() < this.#until) return;
+      this.close();
+    }
     this.#episode = episode;
     this.#until = until;
     this.#moments = [];

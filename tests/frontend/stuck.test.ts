@@ -24,6 +24,7 @@ const quick: Settings = {
   cooldown: 1000,
   window: 500,
   banner: 20,
+  floor: 5,
 };
 
 /** A clock the test winds, a coin the test loads, and names it can predict. */
@@ -93,6 +94,26 @@ describe("what counts as stuck", () => {
       held.logged,
       "fixing one name and tripping over the next is the case this is for",
     ).toHaveLength(1);
+  });
+
+  it("counts a failure nobody could name as a kind of its own", () => {
+    const { stuck, logged } = rigged();
+    stuck.ran({ ok: false, because: "Segmentation fault" });
+    expect(logged, "one unreadable failure is a student working").toHaveLength(
+      0,
+    );
+    stuck.ran({ ok: false, because: "the kernel went away" });
+    expect(logged, "two in a row is the same corner twice").toHaveLength(1);
+    expect(logged[0]?.rule).toBe("the same error twice");
+    expect(logged[0]?.detail).toContain("unreadable");
+  });
+
+  it("an unreadable failure breaks a run of named ones", () => {
+    const { stuck, logged } = rigged();
+    stuck.ran({ ok: false, because: "NameError: x" });
+    stuck.ran({ ok: false, because: "Segmentation fault" });
+    stuck.ran({ ok: false, because: "NameError: x" });
+    expect(logged, "something else happened in between").toHaveLength(0);
   });
 
   it("a run that worked forgets the error before it", () => {
@@ -261,6 +282,18 @@ describe("the settings", () => {
     expect(DEFAULTS.offerRate).toBe(0.5);
     expect(DEFAULTS.cooldown).toBe(20 * 60_000);
     expect(DEFAULTS.window).toBe(10 * 60_000);
+    expect(DEFAULTS.banner).toBe(20_000);
+    expect(DEFAULTS.floor, "long enough to read, short enough to ignore").toBe(
+      1_500,
+    );
+  });
+
+  it("lets somebody set the floor without a deploy, like everything else", () => {
+    expect(settingsFrom("?nudge.floor=2").floor).toBe(2_000);
+    expect(settingsFrom("?nudge.floor=0", DEFAULTS).floor, "zero is a floor").toBe(
+      0,
+    );
+    expect(settingsFrom("?nudge.floor=banana").floor).toBe(DEFAULTS.floor);
   });
 });
 

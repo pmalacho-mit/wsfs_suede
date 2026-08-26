@@ -74,6 +74,14 @@ export type Settings = {
   window: number;
   /** How long the prompt stays on screen. */
   banner: number;
+  /**
+   * The shortest the prompt stays on screen before working takes it away.
+   *
+   * A floor under `banner` rather than a second duration: it changes nothing
+   * about an offer nobody interrupts. See `nudge.ts` for why an offer that
+   * can vanish inside one keystroke makes the `offered` arm mean less.
+   */
+  floor: number;
 };
 
 const SECOND = 1_000;
@@ -85,6 +93,7 @@ export const DEFAULTS: Settings = {
   cooldown: 20 * 60 * SECOND,
   window: 10 * 60 * SECOND,
   banner: 20 * SECOND,
+  floor: 1.5 * SECOND,
 };
 
 /**
@@ -124,6 +133,7 @@ export const settingsFrom = (
     cooldown: seconds("cooldown", base.cooldown),
     window: seconds("window", base.window),
     banner: seconds("banner", base.banner),
+    floor: seconds("floor", base.floor),
     offerRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : base.offerRate,
   };
 };
@@ -162,6 +172,22 @@ export const errorNamed = (because: string): string | undefined =>
   /^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt|Exit|Iteration|Warning))\b/.exec(
     because.trim(),
   )?.[1];
+
+/**
+ * A FAILURE WHOSE NAME NOBODY COULD READ, standing in for one.
+ *
+ * A category, not a gap. A run that ends badly in a way `errorNamed` cannot
+ * parse -- a bare `SystemExit`, an interpreter's own complaint, a traceback
+ * mangled on its way here -- is still a run that ended badly, and two of them
+ * in a row is still a student going round the same corner twice. Treating it
+ * as "no error" instead lost those episodes AND let a real name survive
+ * across it, so `NameError` then rubbish then `NameError` counted as the same
+ * error twice with something else in between.
+ *
+ * SPELLED SO IT CANNOT COLLIDE. Every name `errorNamed` can return matches
+ * `[A-Za-z_][A-Za-z0-9_]*`, which no string with spaces in it does.
+ */
+export const UNREADABLE = "an unreadable error";
 
 export type Judging = (asking: {
   goal: string;
@@ -244,8 +270,7 @@ export class Stuck {
       this.#lastError = undefined;
       return;
     }
-    const named = errorNamed(outcome.because ?? "");
-    if (named === undefined) return;
+    const named = errorNamed(outcome.because ?? "") ?? UNREADABLE;
     const again = this.#lastError === named;
     this.#lastError = named;
     if (!again) return;
@@ -283,6 +308,21 @@ export class Stuck {
   /** For a caller that wants to show what has been noticed. */
   get lastEpisode(): Episode | undefined {
     return this.episodes.at(-1);
+  }
+
+  /**
+   * When the running cooldown ends, and when the open window closes.
+   *
+   * Zero when neither is running, which is what "no deadline" is here. Read
+   * rather than set, and only by whoever is REPORTING on the protocol: a
+   * detection that was held back knows that it was, and these say until when.
+   */
+  get cooldownUntil(): number {
+    return this.#cooldownUntil;
+  }
+
+  get windowUntil(): number {
+    return this.#windowUntil;
   }
 
   #current() {

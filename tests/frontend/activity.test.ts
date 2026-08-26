@@ -36,6 +36,8 @@ const rigged = (over: { every?: number; cap?: number; limit?: number } = {}) => 
     /** Make the next flush hang, as a slow network does. */
     stall: () => (hold = true),
     release: () => (hold = false, answer()),
+    /** The clock alone, WITHOUT the sweep -- the gap a real tick leaves. */
+    advance: (by: number) => (at += by),
     wind: (by: number) => {
       at += by;
       activity.check();
@@ -95,6 +97,40 @@ describe("what is recorded, and when", () => {
     held.activity.note("edit");
     held.wind(250);
     expect(held.sent, "nothing after a window is its business").toHaveLength(1);
+  });
+
+  it("takes over from a window whose time is up, rather than being turned away", async () => {
+    /**
+     * The caller's tick asks the stuck rules BEFORE it sweeps up expired
+     * windows, so a detection can land in the gap between a window ending and
+     * being closed. Turned away there, the server is told a window opened and
+     * nothing is ever recorded in it -- which reads back as a student who sat
+     * still for ten minutes.
+     */
+    const { activity, sent, advance } = rigged();
+    activity.open("first", 100);
+    activity.note("typed");
+
+    advance(100);
+    expect(activity.recording, "still here, not yet swept up").toBe("first");
+
+    activity.open("second", 200);
+    expect(activity.recording).toBe("second");
+    expect(sent.at(-1)?.episode, "and the first one's moments went").toBe(
+      "first",
+    );
+
+    /** One request at a time, so the handover's flush has to land before the
+     *  next one can go -- which on a real network it does, long before the
+     *  window it belongs to is over. */
+    await Promise.resolve();
+
+    activity.note("typed again");
+    activity.close();
+    expect(sent.at(-1)).toEqual({
+      episode: "second",
+      moments: [{ at: 100, kind: "typed again" }],
+    });
   });
 
   it("does not open a second window inside the first", () => {
