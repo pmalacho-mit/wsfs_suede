@@ -18,6 +18,6 @@ export type Destination = {
 
 export const navigation: Destination[] = [
   { label: "Back", icon: ArrowLeftIcon, go: () => history.back() },
-  { label: "Home", icon: HouseIcon, go: () => void goto("/") },
-  { label: "Courses", icon: GraduationCapIcon, go: () => void goto("/courses") },
+  // { label: "Home", icon: HouseIcon, go: () => void goto("/") },
+  // { label: "Courses", icon: GraduationCapIcon, go: () => void goto("/courses") },
 ];

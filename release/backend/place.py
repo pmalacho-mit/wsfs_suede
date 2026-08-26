@@ -24,12 +24,18 @@ are a blob that has to be stored before anything can name it, and pretending
 otherwise -- taking a `bytes` and uploading it here -- would hide a network
 call inside something that looks like a dictionary.
 
-NOT A ROUTE, and unlike `clone` that is not because the permission question is
-hard. It is that this rewrites a whole workspace in one call, without an
-outbox, without a token presented for anything, and with a `prune` that
-deletes. Every write a CLIENT makes has to say what it thought it was
-overwriting; this says "make it so", which is a thing a host may mean and a
-browser may not.
+HALF OF IT IS A ROUTE, and which half is the point. `overwrite=False` with no
+`prune` only ever ADDS -- a path already holding something else comes back
+`PATH_OCCUPIED` and nothing of that file is touched -- so it destroys nothing
+and clobbers nothing, and a client logged in on behalf of a user may perfectly
+well mean it. That is what `POST /workspaces/{id}/files` exposes.
+
+The other half stays in-process. Overwriting without presenting a token is a
+caller saying "whatever is there, this now" about text somebody may have open,
+and `prune` deletes every path the call did not name; together they are "make
+the workspace look like this", which is a thing a host may mean and a browser
+may not. Both are arguments here and neither is a field on the wire, so the
+only way to reach them is to already be inside the process. See `PlaceFiles`.
 """
 
 from __future__ import annotations
@@ -299,7 +305,11 @@ class Placed:
 
 
 async def placed_into(
-    submission: Submission, wanted: Mapping[Segments, str], *, prune: bool = False
+    submission: Submission,
+    wanted: Mapping[Segments, str],
+    *,
+    prune: bool = False,
+    overwrite: bool = True,
 ) -> tuple[Placed, list[Emitted]]:
     """Make this workspace hold exactly these files, at these paths.
 
@@ -310,6 +320,17 @@ async def placed_into(
     ONE UNIT OF WORK, in the workspace's controller, like Initialize and like
     a clone: what is being appended is a tree, and a tree half-appended is a
     workspace holding folders whose contents never arrived.
+
+    `overwrite=False` turns "make it so" into "add these": a path already
+    holding text that differs is refused `PATH_OCCUPIED` instead of written
+    over, and every other path still lands. It is checked AFTER the
+    text-equality test, so a call repeated verbatim is still all `UNCHANGED`
+    rather than suddenly all refused -- what the flag withholds is the right
+    to change text, not the right to say what the text already is.
+
+    Folders are unaffected by it. Creating the folders a path needs takes
+    nothing away from anybody, and a folder already there is reused rather
+    than written, so there is nothing for the flag to protect.
     """
     schema, session = submission.schema, submission.session
     placed = Placed(workspace=submission.workspace)
@@ -413,6 +434,12 @@ async def placed_into(
             placed.entries.append(
                 PlacedEntry(pretty, held.id, Type.FILE, Change.UNCHANGED)
             )
+            continue
+        if not overwrite:
+            """Told to add, and something else is already here. Refused rather
+            than raised: one occupied path is not a reason to throw away the
+            files that had nowhere to conflict with."""
+            placed.refused.append(NotPlaced(pretty, Refusal.PATH_OCCUPIED))
             continue
         if held.content_version is None:
             raise LookupError(f"file {held.id} holds no content to write against")

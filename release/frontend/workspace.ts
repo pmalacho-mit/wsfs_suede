@@ -177,6 +177,12 @@ export type Workspace = {
    * object already has both.
    */
   tutor: {
+    /**
+     * `system`, if sent, is standing instructions for this question -- said
+     * after the tutor's own system prompt and before any of the conversation.
+     * Per-question and never written down, so a caller that wants it on the
+     * next question sends it again. See `Asking.system` on the server.
+     */
     ask: (asking: Omit<Asking, "message"> & { message?: Id }) => Promise<Asked>;
     hear: (token: string) => AsyncIterable<Answering>;
     said: (asking: { before?: string; limit?: number }) => Promise<Transcript>;

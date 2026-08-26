@@ -33,7 +33,9 @@
    * writes to, so running a file runs what is on screen -- including imports
    * of siblings nobody has saved by hand.
    */
-  import { Square, Play, Eraser } from "@lucide/svelte";
+  import Square from "@lucide/svelte/icons/square";
+  import Play from "@lucide/svelte/icons/play";
+  import Eraser from "@lucide/svelte/icons/eraser";
   import { snippets } from "../../../wsfs_suede.python-web-kernel-suede";
   import { Button } from "./shadcn/ui/button";
   import { Separator } from "./shadcn/ui/separator";
@@ -77,7 +79,16 @@
   let live = $state<Output.Specific[]>([]);
   let failure = $state<string | undefined>(undefined);
 
-  const run = async () => {
+  /**
+   * Run what is on screen.
+   *
+   * EXPORTED, so that whoever mounted this can start a run without a click --
+   * `FileView` binds the keyboard to it. A run that is already going is
+   * refused rather than queued: the button says "Stop" while one is, and a
+   * second kernel job over the same file is not what anybody meant by
+   * pressing the key twice.
+   */
+  export const run = async () => {
     if (running) return;
     failure = undefined;
     live = [];

@@ -50,6 +50,7 @@
 }
 
 /**
+<<<<<<< HEAD
  * The sizes this app names that Tailwind's scale has no word for.
  *
  * Declared rather than written into the markup as `text-[0.68rem]`, because
@@ -122,6 +123,85 @@
  */
 [data-text-scale="chrome"] {
   --wsfs-text-scale: 1;
+=======
+ * MATH, SIZED AND SPACED FOR WHERE IT ACTUALLY APPEARS.
+ *
+ * KaTeX ships defaults tuned for an article: `1.21em`, and `1em` of air above
+ * and below a display equation. Both are too generous here. The problem
+ * header is `text-sm` in a box capped at fourteen rem, so a formula at
+ * KaTeX's size stands a head above the sentence containing it and a display
+ * equation spends a seventh of the panel on margin.
+ *
+ * PLAIN CSS, KEYED OFF STREAMDOWN'S OWN DATA ATTRIBUTES, and it has to be
+ * both. `katex.min.css` arrives through a JS import, so it is UNLAYERED --
+ * which beats every rule in Tailwind's `utilities` layer no matter how
+ * specific, and quietly wins against any `[&_.katex]:...` written on the
+ * component. And these selectors are (0,2,0) against KaTeX's (0,1,0), so they
+ * win on specificity rather than on which stylesheet happens to land second.
+ */
+
+[data-streamdown-inline-math] .katex {
+  /* Down from 1.21em, not to 1em. Maths glyphs read smaller than the UI face
+     beside them, so some of that bump is real; all of it is too much. */
+  font-size: 1.1em;
+}
+
+[data-streamdown-block-math] .katex {
+  /* A shade larger than inline: a display equation is the thing being looked
+     at, not something passed through in a sentence. */
+  font-size: 1.15em;
+}
+
+[data-streamdown-block-math] .katex-display {
+  margin: 0.7em 0;
+}
+
+/**
+ * The scroller streamdown puts around a display equation, taught to centre.
+ *
+ * `safe` is the whole point. A plain `center` looks right until the equation
+ * is wider than the panel, and then it centres the overflow too -- the left
+ * end goes out past the edge where no amount of scrolling reaches it, because
+ * scrolling only ever moves toward the right. `safe center` centres while it
+ * fits and falls back to flush-left the moment it does not, which is the one
+ * case where being able to read the start of the line matters most.
+ *
+ * A browser too old for `safe` drops the declaration and gets flex's default
+ * flush-left -- the fallback we would have chosen anyway.
+ */
+[data-streamdown-block-math] > div {
+  display: flex;
+  justify-content: safe center;
+  /* `overflow-x: auto` makes the other axis `auto` as well, so a tall
+     expression -- a fraction, a sum with limits -- sits right against the
+     edge of its own scroller. This is the room it needs not to. */
+  padding-block: 0.25rem;
+  scrollbar-width: thin;
+}
+
+/**
+ * Tighter still where the box is smallest.
+ *
+ * The problem header is capped and scrolled so the editor keeps the panel;
+ * every rem a margin takes is a rem of the problem the reader cannot see
+ * without scrolling for it.
+ */
+[data-region="problem-header-body"] [data-streamdown-block-math] .katex-display {
+  margin: 0.45em 0;
+}
+
+/**
+ * Don't hand the screen reader's copy to the clipboard.
+ *
+ * KaTeX renders every expression twice -- MathML for assistive technology,
+ * HTML for eyes -- and hides the first with a clip-path rather than by taking
+ * it out of the document. A student selecting a problem statement to paste
+ * into a question therefore copies both, and gets the formula twice running.
+ * Unselectable, not undisplayed: screen readers still read it.
+ */
+.katex-mathml {
+  user-select: none;
+>>>>>>> 3ff44ff675d3e9d5f6e8e9ffcb8091f069743a8e
 }
 
 @custom-variant dark (&:is(.dark *));

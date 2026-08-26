@@ -14,7 +14,7 @@
  */
 import type { ChatStatus } from "../shadcn/ai-elements/prompt-input";
 import type { Attaching, Id, Turn as Told, Workspace } from "../../";
-
+import { gsu } from "./system-prompts";
 export type Turn = {
   id: string;
   from: "user" | "assistant";
@@ -126,7 +126,9 @@ export class Conversation {
               reason instanceof Error ? reason.message : String(reason);
             return;
           }
-          await new Promise((carry) => setTimeout(carry, BACKOFF_MS * (attempt + 1)));
+          await new Promise((carry) =>
+            setTimeout(carry, BACKOFF_MS * (attempt + 1)),
+          );
           if (this.#gone) return;
         }
       }
@@ -167,7 +169,8 @@ export class Conversation {
   async ask(text: string, attached: Attachment[], snapshot?: string) {
     const asked = text.trim();
     const workspace = this.#workspace;
-    if (asked === "" || this.status !== "ready" || workspace === undefined) return;
+    if (asked === "" || this.status !== "ready" || workspace === undefined)
+      return;
 
     const sent = attached.map((one) => one.path);
     this.status = "submitted";
@@ -176,6 +179,7 @@ export class Conversation {
 
     try {
       const { message, token } = await workspace.tutor.ask({
+        system: gsu.week1,
         text: asked,
         snapshot: snapshot ?? null,
         attached: attached.map(
@@ -227,7 +231,13 @@ export class Conversation {
 
   #answered(id: string, text: string, failed: string | undefined) {
     const at = this.turns.findIndex((turn) => turn.id === id);
-    const turn: Turn = { id, from: "assistant", text, sent: [], ...(failed ? { failed } : {}) };
+    const turn: Turn = {
+      id,
+      from: "assistant",
+      text,
+      sent: [],
+      ...(failed ? { failed } : {}),
+    };
     this.turns =
       at === -1
         ? [...this.turns, turn]

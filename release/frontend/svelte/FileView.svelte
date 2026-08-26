@@ -134,6 +134,50 @@
    * that is always there costs one row and is already known when it matters.
    */
   let showingHistory = $state(false);
+
+  /**
+   * The terminal underneath, while there is one.
+   *
+   * Bound rather than reached for, because whether this file can be run is
+   * the whole condition on the shortcut below: a `.py` file has a runner and
+   * this holds it; anything else has none and this stays undefined.
+   */
+  let runner = $state<Runner>();
+
+  /**
+   * The keys that run the file, for somebody whose hands are in the editor.
+   *
+   * SAVE RUNS IT. There is nothing to save -- what is typed is already in the
+   * room and already what the kernel reads -- so ctrl/cmd+S is a key people
+   * press out of habit that would otherwise offer to write the page to disk.
+   * Shift+Enter is the other one those hands already know, from every
+   * notebook they have used.
+   *
+   * ON THE EDITOR, not on the window: this is what somebody typing meant, and
+   * a document being read or a question being written to the tutor is not.
+   * Both are stopped as well as prevented -- prevented so the browser's save
+   * dialog stays shut, stopped so the workbench underneath does not also act
+   * on a key that has already been answered here.
+   */
+  $effect(() => {
+    const editor = params.opened.sharedText?.editor;
+    const mounted = runner;
+    if (editor === undefined || mounted === undefined) return;
+    const bound = editor.onKeyDown((event) => {
+      const key = event.browserEvent.key;
+      const saving =
+        (event.ctrlKey || event.metaKey) && key.toLowerCase() === "s";
+      /** Plain shift: ctrl+shift+enter is the editor's own, and stays it. */
+      const asked =
+        event.shiftKey && key === "Enter" && !event.ctrlKey && !event.metaKey;
+      if (!saving && !asked) return;
+      event.preventDefault();
+      event.stopPropagation();
+      /** Refused while a run is going -- see `run` in `Runner.svelte`. */
+      void mounted.run();
+    });
+    return () => bound.dispose();
+  });
 </script>
 
 <!--
@@ -251,7 +295,72 @@
       Opening {params.opened.path}…
     </p>
   {/if}
+<<<<<<< HEAD
 </div>
+=======
+  <Preview path={params.opened.path} held={binary} />
+{:else if params.opened.sharedText}
+  <button
+    type="button"
+    class="text-muted-foreground hover:bg-muted/60 flex w-full shrink-0 items-center gap-2 border-b px-3 py-1.5 text-left text-xs"
+    data-region="history-offer"
+    onclick={() => (showingHistory = true)}
+  >
+    <HistoryIcon class="size-3.5 shrink-0" />
+    <span class="truncate">
+      Missing something, or want to see how this looked before?
+      <span class="underline underline-offset-2">Open this file's history</span>
+    </span>
+  </button>
+  <History
+    workspace={params.workspace}
+    entry={params.opened.id}
+    path={params.opened.path}
+    bind:open={showingHistory}
+  />
+  <div class="text relative" class:runnable class:headed={problem !== undefined}>
+    {#if problem !== undefined}
+      <ProblemHeader content={problem} />
+    {/if}
+    <!--
+      OVER the editor rather than above it.
+      A notice that takes a row pushes every line of code down the moment it
+      appears and pulls them back up when it goes -- and these come and go on
+      their own schedule, not the reader's. Floating it means the thing being
+      read never moves, which is the only way a transient notice is bearable.
+    -->
+    {#if params.opened.sharedText.shared?.trouble}
+      {@const trouble = params.opened.sharedText.shared.trouble}
+      <p
+        class="pointer-events-none absolute top-2 right-2 z-10 rounded-md border px-2 py-1 text-xs shadow-sm {trouble.passing
+          ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+          : 'bg-destructive/10 text-destructive border-destructive/30'}"
+        data-region="trouble"
+      >
+        {trouble.says} — what you type is kept, and goes when it can.
+      </p>
+    {/if}
+    <!-- `props` is everything the editor was configured with and the file is
+         the one thing that differs per panel. Spreading is what makes
+         `onEditor` reach anybody -- it was being carried this far and dropped. -->
+    <Editor.Component
+      {...params.opened.sharedText.props}
+      file={params.opened.sharedText.file}
+    />
+    {#if runnable}
+      <Runner
+        bind:this={runner}
+        kernelPool={params.kernelPool}
+        shared={params.opened.sharedText}
+        onFinished={params.onFinished}
+        onRun={params.onRun}
+      />
+    {/if}
+  </div>
+{:else}
+  <p class="text-muted-foreground p-4 text-sm">Opening {params.opened.path}…</p>
+{/if}
+>>>>>>> 3ff44ff675d3e9d5f6e8e9ffcb8091f069743a8e
 
 <!--
   Both notices are SAID rather than hidden. Typing into a document that is
@@ -283,7 +392,20 @@
   .text {
     display: grid;
     grid-template-rows: 1fr;
+<<<<<<< HEAD
     flex: 1 1 auto;
+=======
+    /* A COLUMN THAT MAY BE NARROWER THAN WHAT IS IN IT.
+       The implicit column a grid makes for itself is `auto`, and `auto` will
+       not go below the widest thing inside -- so one long line of code in the
+       problem statement set the width of this whole panel, and dragging the
+       splitter left could not take it back. The panel got smaller; the row
+       did not, and the code block's buttons went out past the edge with it.
+       `minmax(0, 1fr)` is the same column with permission to shrink, which
+       hands the overflow back to the things built to scroll it. */
+    grid-template-columns: minmax(0, 1fr);
+    height: 100%;
+>>>>>>> 3ff44ff675d3e9d5f6e8e9ffcb8091f069743a8e
     min-height: 0;
     position: relative;
   }
