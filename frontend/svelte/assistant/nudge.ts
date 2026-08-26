@@ -7,7 +7,17 @@
  */
 import { toast } from "svelte-sonner";
 
-const OFFER = "Looks like you're stuck, click here for some help";
+/**
+ * THE PROTOCOL'S OWN WORDING, and it is not decoration.
+ *
+ * "Looks like you're stuck" tells a student that a system has decided
+ * something about them, which is a worse thing to read than an offer -- the
+ * same argument `Workspace.svelte` makes about how the question is phrased
+ * when they take it. What is being measured is whether they WANT help, and a
+ * prompt that opens by diagnosing them is measuring something else.
+ */
+const OFFER = "Want a hint?";
+const TAKE = "Yes, show me";
 
 export class Nudge {
   #showing: string | number | undefined;
@@ -31,7 +41,7 @@ export class Nudge {
     this.#showing = toast(OFFER, {
       duration: forMs,
       action: {
-        label: "Ask the assistant",
+        label: TAKE,
         onClick: () => {
           this.#showing = undefined;
           help();

@@ -12,13 +12,13 @@
   /** The workspace root, spelled the way the menu's mutations expect it. */
   const root: Item = { kind: "directory", name: "", path: "" };
 
-  /** A right click landed on an entry if the tree drew one under it. */
-  const onEntry = (event: MouseEvent): boolean =>
+  /** The row a click landed on, if the tree drew one under it. */
+  const rowUnder = (event: MouseEvent): HTMLElement | undefined =>
     event
       .composedPath()
-      .some(
+      .find(
         (node) => node instanceof HTMLElement && node.dataset.type === "item",
-      );
+      ) as HTMLElement | undefined;
 
   const inMenu = (event: Event): boolean =>
     event
@@ -36,6 +36,10 @@
     folder ? `${path}/` : path;
 
   const depth = (path: string) => path.split("/").length;
+
+  /** The last segment, whichever kind of path it is. */
+  const nameIn = (path: string) =>
+    path.replace(/\/+$/, "").split("/").pop() ?? "";
 
   /**
    * What the mapping tells the world about, so nothing else has to.
@@ -563,22 +567,67 @@
   onDestroy(() => tree.dispose());
 
   /**
-   * The tree's own menu belongs to an entry, so a right click that misses
-   * every entry gets nothing -- and the space below the last one is most of
-   * the panel. That click opens this menu instead: the same surface, anchored
-   * to the pointer, acting on the root.
+   * EVERY MENU IN THIS PANEL IS THIS ONE.
+   *
+   * The tree draws its own for a row, and it used to. Two things were wrong
+   * with leaving it to: a right click that misses every entry gets nothing
+   * from it, and the space below the last row is most of the panel -- and it
+   * places a row's menu `position: fixed` at the pointer's VIEWPORT
+   * coordinates, which the browser then multiplies again by whatever the
+   * panel is zoomed to. At 200% the menu opened twice as far down the page as
+   * the click. (The zoom is below, and is what makes the tree readable from
+   * the back of a room.)
+   *
+   * So the tree is composed without one -- no snippet, no menu -- and this
+   * surface answers both. It sits OUTSIDE the zoomed tree, which is what
+   * makes the placement plain: a row's menu hangs under that row, a click on
+   * empty space hangs from the pointer, and neither has heard of the text
+   * size.
    */
   let at = $state<{ x: number; y: number } | undefined>(undefined);
+  /** Whose menu is open: an entry's, or -- when nothing -- the root's. */
+  let on = $state<Item | undefined>(undefined);
   let anchor = $state<HTMLElement>();
   let surface = $state<HTMLElement>();
 
-  const dismiss = () => (at = undefined);
+  /** The gap between a row and the menu it opened. A constant, in pixels. */
+  const BELOW = 4;
+
+  const dismiss = () => ((at = undefined), (on = undefined));
+
+  /** The entry a row stands for, spelled the way the mutations expect it. */
+  const itemIn = (row: HTMLElement): Item | undefined => {
+    const path = row.dataset.itemPath;
+    if (path === undefined) return undefined;
+    const handle = tree.item(path);
+    if (handle === null) return undefined;
+    return {
+      kind: handle.isDirectory() ? "directory" : "file",
+      name: nameIn(path),
+      path,
+    };
+  };
 
   const asked = (event: MouseEvent) => {
     dismiss();
-    if (onEntry(event)) return;
     event.preventDefault();
-    at = { x: event.clientX, y: event.clientY };
+    const row = rowUnder(event);
+    const item = row === undefined ? undefined : itemIn(row);
+    /**
+     * Under the row, at its bottom edge -- not at the pointer, which is
+     * somewhere in the middle of a row that may be 30px tall or 75. The row
+     * is what the menu is about, so the row is what it hangs from.
+     */
+    at = {
+      x: event.clientX,
+      y:
+        row !== undefined && item !== undefined
+          ? row.getBoundingClientRect().bottom + BELOW
+          : event.clientY,
+    };
+    on = item;
+    /** Right-clicking a row focuses it, as it did while the tree drew this. */
+    if (item !== undefined) tree.focus.at(item.path);
   };
 
   // The anchor is placed within the tree so the menu travels with it; the
@@ -603,6 +652,14 @@
    * Two of the four the tree's own menu offers, because the other two need an
    * entry to act on and this menu has none.
    */
+  const actionsOn = (
+    item: Item | undefined,
+    open: Context,
+  ): ContextMenu.Action[] =>
+    item === undefined
+      ? rootActions(open)
+      : ContextMenu.actions({ model: tree, item, context: open });
+
   const rootActions = (open: Context): ContextMenu.Action[] => {
     // Adding hands focus straight to the tree's rename input, which the
     // menu's usual focus restore would immediately steal back.
@@ -645,23 +702,43 @@
   oncontextmenu={asked}
   role="presentation"
 >
-  <Tree.Component model={tree} style="height: 100%; {theme}">
-    {#snippet contextMenu(item, opened)}
-      <ContextMenu.Component
-        context={opened}
-        actions={ContextMenu.actions({ model: tree, item, context: opened })}
-      />
-    {/snippet}
-  </Tree.Component>
+  <!--
+    THE ONE PANEL THAT IS SCALED RATHER THAN RESIZED, and it has to be.
 
+    Everywhere else, `--wsfs-text-scale` moves font sizes and leaves the
+    layout alone. The tree cannot be asked that: it is virtualised, so its row
+    positions are computed in JavaScript from an item height fixed when the
+    model was built, and a stylesheet that grows the type without growing the
+    rows gets text in 30px slots -- clipped, and overlapping the moment
+    anything scrolls. The height is not ours to move; there is no setter for
+    it, and rebuilding the model to change it would throw away every
+    expansion, selection and half-typed rename in the panel.
+
+    `zoom` moves both together, because it scales the coordinate space the
+    tree does its own arithmetic in -- rows, indents, icons and type at once,
+    all still consistent with each other. It is applied HERE, to the tree
+    alone, and not to the region around it: the menus are drawn on that
+    region, and they place themselves from viewport coordinates, which a zoom
+    would multiply a second time. See the surface above.
+  -->
+  <Tree.Component
+    model={tree}
+    style="height: 100%; zoom: var(--wsfs-text-scale, 1); {theme}"
+  />
+
+  <!-- The tree's palette, on a surface that is not inside the tree: the menu
+       reads `--trees-*` for its colours, and would otherwise fall back to its
+       own defaults while everything around it wore the theme. Its SIZE comes
+       from the panel, in the stylesheet below. -->
   <div
     class="anchor"
     bind:this={anchor}
+    style={theme}
     style:left="{placed?.left ?? 0}px"
     style:top="{placed?.top ?? 0}px"
   >
     {#if context}
-      <ContextMenu.Component {context} actions={rootActions(context)} />
+      <ContextMenu.Component {context} actions={actionsOn(on, context)} />
     {/if}
   </div>
 </div>
@@ -673,12 +750,29 @@
     min-height: 0;
   }
 
-  /* Nothing of its own: a zero-sized origin at the pointer, for the menu to
-     hang off exactly as it hangs off a row's. */
+  /* Nothing of its own: a zero-sized origin at the point the menu hangs
+     from -- the bottom of a row, or the pointer where there is no row. */
   .anchor {
     position: absolute;
     width: 0;
     height: 0;
     z-index: 60;
+
+    /*
+     * AND THE MENU READS AT THE SIZE THE PANEL IS SET TO.
+     *
+     * Everything else in a scaled panel grows because `app.css` restates
+     * Tailwind's sizes against `--wsfs-text-scale`; the menu is drawn by the
+     * tree's own component, which names its size in `--trees-*` and has never
+     * heard of any of that. So it is told here, in the one declaration it
+     * does read -- and told a MULTIPLE of the size it already was, so a panel
+     * nobody has touched is unchanged. An explorer turned up for a lecture
+     * theatre whose menu still whispers is half a feature.
+     *
+     * The size only. The padding and the corners are the same as every other
+     * menu in the app, which is the same trade the rest of this makes: what
+     * is read grows, what holds it stays where it was.
+     */
+    --trees-menu-font-size: calc(0.875rem * var(--wsfs-text-scale, 1));
   }
 </style>

@@ -15,15 +15,24 @@
   import ProblemHeader from "./ProblemHeader.svelte";
   import { headerFor } from "./headers";
   import Runner, { type Outcome } from "./Runner.svelte";
+  import TextSizeSlider from "./shell/TextSizeSlider.svelte";
   import type { Workspace } from "../";
   import type { KernelPool, OpenFile } from "./Workspace.svelte";
   import type { Payload } from "../content";
+  import { TextSize } from "./textsize.svelte";
   import { onDestroy, onMount } from "svelte";
 
   type Params = {
     opened: OpenFile;
     workspace: Workspace;
     kernelPool: KernelPool;
+    /**
+     * How big the text in the open files is -- ONE size for all of them, so
+     * that a person who has found a comfortable size and then opens the next
+     * file gets that file at the size they set. Its own if the panel was
+     * mounted without one.
+     */
+    textSize?: TextSize;
     onFinished: (outcome: Outcome) => void;
     /** Every run as it starts, with the promise it will finish by. */
     onRun?: (started: {
@@ -97,6 +106,20 @@
   let runnable = $derived(params.opened.path.endsWith(".py"));
 
   /**
+   * The size everything in this panel is drawn at.
+   *
+   * The editor is TOLD its size rather than styled into it: monaco measures
+   * its own lines to place the cursor, so a font size it did not agree to is
+   * a caret that lands between characters. `size` is the option it agrees to,
+   * and 14 is the size it is drawn at ordinarily.
+   */
+  const EDITOR = 14;
+  /** Its own, for a panel mounted by something that keeps no sizes -- a test,
+   *  or any other host of this component. */
+  const alone = new TextSize("documents");
+  let textSize = $derived(params.textSize ?? alone);
+
+  /**
    * The problem this file is an answer to, for the files somebody wrote one
    * down for. Derived from the path rather than read once, so a file that is
    * renamed stops -- or starts -- carrying a header along with the name.
@@ -113,77 +136,122 @@
   let showingHistory = $state(false);
 </script>
 
-{#if binary}
-  {#if params.opened.sharedText?.shared?.replaced}
-    <p
-      class="bg-destructive/10 text-destructive border-destructive/30 border-b px-3 py-2 text-sm"
-      data-region="replaced"
-    >
-      Somebody wrote {params.opened.sharedText.shared.replaced.mime} over this file.
-      What you were editing is no longer what it holds.
+<!--
+  ONE PANEL, WHICHEVER WAY THE FILE TURNS OUT.
+
+  The toolbar is drawn before anything knows what the file holds, so nothing
+  moves underneath the pointer when the content arrives -- and so the slider
+  is in the same place on a picture as it is on a program.
+-->
+<div
+  class="panel"
+  data-region="file"
+  data-text-scale
+  style:--wsfs-text-scale={textSize.scale}
+>
+  <!-- Chrome: this row is about the file rather than part of it, and a
+       history offer at 35px would take the rows the code needs. -->
+  <div
+    class="flex shrink-0 items-center gap-1 border-b pr-2"
+    data-region="file-toolbar"
+    data-text-scale="chrome"
+  >
+    {#if params.opened.sharedText}
+      <button
+        type="button"
+        class="text-muted-foreground hover:bg-muted/60 flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-xs"
+        data-region="history-offer"
+        onclick={() => (showingHistory = true)}
+      >
+        <HistoryIcon class="size-3.5 shrink-0" />
+        <span class="truncate">
+          Missing something, or want to see how this looked before?
+          <span class="underline underline-offset-2">
+            Open this file's history
+          </span>
+        </span>
+      </button>
+    {:else}
+      <span class="min-w-0 flex-1"></span>
+    {/if}
+    <TextSizeSlider size={textSize} label="File text size" />
+  </div>
+
+  {#if params.opened.sharedText}
+    <History
+      workspace={params.workspace}
+      entry={params.opened.id}
+      path={params.opened.path}
+      bind:open={showingHistory}
+    />
+  {/if}
+
+  {#if binary}
+    <div class="body">
+      {#if params.opened.sharedText?.shared?.replaced}
+        <p
+          class="bg-destructive/10 text-destructive border-destructive/30 shrink-0 border-b px-3 py-2 text-sm"
+          data-region="replaced"
+        >
+          Somebody wrote {params.opened.sharedText.shared.replaced.mime} over this
+          file. What you were editing is no longer what it holds.
+        </p>
+      {/if}
+      <!-- The preview fills what the notice above it left, rather than the
+           whole panel: `h-full` under a row that is also in the panel is a
+           panel and a bit, and the bottom of the picture goes off the end. -->
+      <div class="min-h-0 flex-1">
+        <Preview path={params.opened.path} held={binary} />
+      </div>
+    </div>
+  {:else if params.opened.sharedText}
+    <div class="text" class:runnable class:headed={problem !== undefined}>
+      {#if problem !== undefined}
+        <ProblemHeader content={problem} />
+      {/if}
+      <!--
+        OVER the editor rather than above it.
+        A notice that takes a row pushes every line of code down the moment it
+        appears and pulls them back up when it goes -- and these come and go on
+        their own schedule, not the reader's. Floating it means the thing being
+        read never moves, which is the only way a transient notice is bearable.
+      -->
+      {#if params.opened.sharedText.shared?.trouble}
+        {@const trouble = params.opened.sharedText.shared.trouble}
+        <p
+          class="pointer-events-none absolute top-2 right-2 z-10 rounded-md border px-2 py-1 text-xs shadow-sm {trouble.passing
+            ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+            : 'bg-destructive/10 text-destructive border-destructive/30'}"
+          data-region="trouble"
+        >
+          {trouble.says} — what you type is kept, and goes when it can.
+        </p>
+      {/if}
+      <!-- `props` is everything the editor was configured with and the file is
+           the one thing that differs per panel. Spreading is what makes
+           `onEditor` reach anybody -- it was being carried this far and dropped.
+           `size` comes after it because the panel's slider outranks whatever
+           the workspace configured every editor with. -->
+      <Editor.Component
+        {...params.opened.sharedText.props}
+        file={params.opened.sharedText.file}
+        size={textSize.px(EDITOR)}
+      />
+      {#if runnable}
+        <Runner
+          kernelPool={params.kernelPool}
+          shared={params.opened.sharedText}
+          onFinished={params.onFinished}
+          onRun={params.onRun}
+        />
+      {/if}
+    </div>
+  {:else}
+    <p class="text-muted-foreground p-4 text-sm">
+      Opening {params.opened.path}…
     </p>
   {/if}
-  <Preview path={params.opened.path} held={binary} />
-{:else if params.opened.sharedText}
-  <button
-    type="button"
-    class="text-muted-foreground hover:bg-muted/60 flex w-full shrink-0 items-center gap-2 border-b px-3 py-1.5 text-left text-xs"
-    data-region="history-offer"
-    onclick={() => (showingHistory = true)}
-  >
-    <HistoryIcon class="size-3.5 shrink-0" />
-    <span class="truncate">
-      Missing something, or want to see how this looked before?
-      <span class="underline underline-offset-2">Open this file's history</span>
-    </span>
-  </button>
-  <History
-    workspace={params.workspace}
-    entry={params.opened.id}
-    path={params.opened.path}
-    bind:open={showingHistory}
-  />
-  <div class="text relative" class:runnable class:headed={problem !== undefined}>
-    {#if problem !== undefined}
-      <ProblemHeader content={problem} />
-    {/if}
-    <!--
-      OVER the editor rather than above it.
-      A notice that takes a row pushes every line of code down the moment it
-      appears and pulls them back up when it goes -- and these come and go on
-      their own schedule, not the reader's. Floating it means the thing being
-      read never moves, which is the only way a transient notice is bearable.
-    -->
-    {#if params.opened.sharedText.shared?.trouble}
-      {@const trouble = params.opened.sharedText.shared.trouble}
-      <p
-        class="pointer-events-none absolute top-2 right-2 z-10 rounded-md border px-2 py-1 text-xs shadow-sm {trouble.passing
-          ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
-          : 'bg-destructive/10 text-destructive border-destructive/30'}"
-        data-region="trouble"
-      >
-        {trouble.says} — what you type is kept, and goes when it can.
-      </p>
-    {/if}
-    <!-- `props` is everything the editor was configured with and the file is
-         the one thing that differs per panel. Spreading is what makes
-         `onEditor` reach anybody -- it was being carried this far and dropped. -->
-    <Editor.Component
-      {...params.opened.sharedText.props}
-      file={params.opened.sharedText.file}
-    />
-    {#if runnable}
-      <Runner
-        kernelPool={params.kernelPool}
-        shared={params.opened.sharedText}
-        onFinished={params.onFinished}
-        onRun={params.onRun}
-      />
-    {/if}
-  </div>
-{:else}
-  <p class="text-muted-foreground p-4 text-sm">Opening {params.opened.path}…</p>
-{/if}
+</div>
 
 <!--
   Both notices are SAID rather than hidden. Typing into a document that is
@@ -193,11 +261,31 @@
   the text on screen, because only one of the two has already cost something.
 -->
 <style>
+  /*
+   * The toolbar takes its row and whatever the file turned out to be takes
+   * the rest. `flex` rather than the `height: 100%` this used to carry: a
+   * hundred percent of the panel, underneath a row that is also in it, is a
+   * panel and a bit -- so the terminal went off the bottom by exactly the
+   * height of the strip above it.
+   */
+  .panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
   .text {
     display: grid;
     grid-template-rows: 1fr;
-    height: 100%;
+    flex: 1 1 auto;
     min-height: 0;
+    position: relative;
   }
   .text.runnable {
     grid-template-rows: 1fr minmax(7rem, 30%);

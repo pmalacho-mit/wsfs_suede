@@ -152,7 +152,9 @@
   class="bg-sidebar grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] border-t"
   data-region="runner"
 >
-  <header class="flex h-9 shrink-0 items-center gap-1 px-2">
+  <!-- `min-h-9` rather than `h-9`: the labels on these grow with the
+       panel's text size, and a row that cannot is a row that clips them. -->
+  <header class="flex min-h-9 shrink-0 items-center gap-1 px-2">
     {#if running}
       <Button
         size="xs"
@@ -179,21 +181,21 @@
       Clear
     </Button>
     <Separator orientation="vertical" class="mx-1 h-4" />
-    <span class="text-muted-foreground truncate font-mono text-[0.7rem]">
+    <span class="text-muted-foreground truncate font-mono text-(length:--text-2xs-mono)">
       {shared.file.path}
     </span>
   </header>
   <output
     bind:this={view}
     onscroll={watching}
-    class="block overflow-auto px-3 pb-3 font-mono text-[0.78rem] leading-relaxed whitespace-pre-wrap"
+    class="block overflow-auto px-3 pb-3 font-mono text-(length:--text-xs-mono) leading-relaxed whitespace-pre-wrap"
     data-region="outputs"
   >
     {#each shared.executions as execution, at (execution.at + at)}
       <!-- Delineated, because three runs' output in a row reads as one
            confusing run. The header is what says where each one began. -->
       <div
-        class="text-muted-foreground mt-3 flex items-center gap-2 border-t pt-1 text-[0.68rem] first:mt-0 first:border-t-0"
+        class="text-muted-foreground mt-3 flex items-center gap-2 border-t pt-1 text-(length:--text-2xs) first:mt-0 first:border-t-0"
         data-region="execution"
         data-ok={execution.ok}
       >
@@ -215,7 +217,7 @@
 
     {#if running || live.length > 0}
       <div
-        class="text-muted-foreground mt-3 flex items-center gap-2 border-t pt-1 text-[0.68rem] first:mt-0 first:border-t-0"
+        class="text-muted-foreground mt-3 flex items-center gap-2 border-t pt-1 text-(length:--text-2xs) first:mt-0 first:border-t-0"
         data-region="execution"
         data-ok="running"
       >
