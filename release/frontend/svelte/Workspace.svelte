@@ -537,7 +537,8 @@
   import { Kernel } from "../../../wsfs_suede.python-web-kernel-suede";
   import { WarmPool } from "./pool";
   import fs from "../../../wsfs_suede.python-web-kernel-suede/fs";
-  import { FileText, FolderTree } from "@lucide/svelte";
+  import FileText from "@lucide/svelte/icons/file-text";
+  import FolderTree from "@lucide/svelte/icons/folder-tree";
   import { InView } from "./inview.svelte";
   import PanelHeading from "./shell/PanelHeading.svelte";
   import TextSizeSlider from "./shell/TextSizeSlider.svelte";

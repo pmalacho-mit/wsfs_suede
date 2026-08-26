@@ -38,6 +38,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/wsfs/workspaces/{workspace_id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add Files
+         * @description Add these files, at these paths, with this text.
+         *
+         *     THE ADDITIVE HALF of `place`, and the only half with a URL. A client
+         *     logged in on behalf of a user putting files into that user's workspace
+         *     is an ordinary thing to mean, and having to walk the tree, mint an id
+         *     per folder and chain CAS tokens by hand to say it is a tax on saying
+         *     something harmless. What it may NOT mean is the rest of `place`:
+         *     `overwrite=False` is passed here and not read from the body, and
+         *     `prune` has no field at all -- so nothing arriving over this route can
+         *     change text it did not write or delete anything whatsoever.
+         *
+         *     A path already holding something else is refused, per path, rather
+         *     than written over, and everything that had nowhere to conflict still
+         *     lands. That is the same shape every other refusal in this package has
+         *     and the reason this answers 200 with a list rather than 409 with
+         *     nothing: one occupied path is a fact about the workspace, not a
+         *     malformed call.
+         *
+         *     REPEATABLE, like the function behind it. A path already holding
+         *     exactly this text is `unchanged` -- no transaction, no event, no
+         *     flicker for anybody with the file open -- so a client that cannot tell
+         *     whether its last attempt landed can simply send it again.
+         *
+         *     400, and only 400, for `place.Unusable`: a path that is not a path,
+         *     one path spelled two ways, or one path asked to be both a file and the
+         *     folder above another. That is the CALL being wrong, it is caught
+         *     before anything is written, and a workspace half-described by it would
+         *     be a state nobody asked for.
+         */
+        post: operations["add_files_wsfs_workspaces__workspace_id__files_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wsfs/workspaces/{workspace_id}/blobs/{digest}": {
         parameters: {
             query?: never;
@@ -620,6 +667,8 @@ export interface components {
             attached?: components["schemas"]["Attaching"][];
             /** Offset */
             offset?: number | null;
+            /** System */
+            system?: string | null;
         };
         /** Attached */
         Attached: {
@@ -670,6 +719,17 @@ export interface components {
             /** Mime */
             mime: string;
         };
+        /**
+         * Change
+         * @description What one path needed doing to it.
+         *
+         *     UNCHANGED is the one worth having a word for. It is not a failure and not
+         *     a no-op the caller should ignore -- it is this function's whole claim to
+         *     being safe to run repeatedly, and a caller watching for churn wants to see
+         *     that the second run was all of these.
+         * @enum {string}
+         */
+        Change: "created" | "written" | "unchanged" | "deleted";
         /**
          * Clearing
          * @description Drafts whose work has since reached everybody else.
@@ -1022,6 +1082,13 @@ export interface components {
             /** Parent */
             parent?: string | null;
         };
+        /** NotPlaced */
+        NotPlaced: {
+            /** Path */
+            path: string;
+            /** Reason */
+            reason: string;
+        };
         /**
          * Occurrence
          * @description When one transaction happened, in both clocks that saw it.
@@ -1040,6 +1107,45 @@ export interface components {
             offset?: number | null;
             /** Accepted */
             accepted: string | null;
+        };
+        /** Placed */
+        Placed: {
+            /**
+             * Workspace
+             * Format: uuid
+             */
+            workspace: string;
+            /** Entries */
+            entries?: components["schemas"]["PlacedEntry"][];
+            /** Refused */
+            refused?: components["schemas"]["NotPlaced"][];
+        };
+        /** PlacedEntry */
+        PlacedEntry: {
+            /** Path */
+            path: string;
+            /**
+             * Entry
+             * Format: uuid
+             */
+            entry: string;
+            type: components["schemas"]["Type"];
+            change: components["schemas"]["Change"];
+        };
+        /**
+         * PlacementRequest
+         * @description Paths, and the text each should hold.
+         *
+         *     NO `prune`, and no way to ask for one. Deleting everything a body did not
+         *     name is a thing a host may mean and a client may not, so it stays where
+         *     the host is -- an argument to the in-process `Mounted.place`, never a
+         *     field on the wire. See `PlaceFiles`.
+         */
+        PlacementRequest: {
+            /** Files */
+            files?: {
+                [key: string]: string;
+            };
         };
         /**
          * Reconstructed
@@ -1618,6 +1724,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_files_wsfs_workspaces__workspace_id__files_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlacementRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Placed"];
                 };
             };
             /** @description Validation Error */

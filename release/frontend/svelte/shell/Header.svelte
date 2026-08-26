@@ -51,14 +51,14 @@
   <div class="flex min-w-0 flex-col items-center text-center" data-region="workspace-identity">
     <h1 class="truncate text-sm leading-tight font-semibold">{title}</h1>
     <p class="text-muted-foreground truncate text-xs leading-tight">
-      Course event {event}: Course {course}
+      {course}: {event}
     </p>
   </div>
 
   <div class="flex items-center justify-end gap-1">
-    <Button variant="ghost" size="icon-sm" aria-label="Help">
+    <!-- <Button variant="ghost" size="icon-sm" aria-label="Help">
       <CircleHelpIcon />
-    </Button>
+    </Button> -->
     <Separator orientation="vertical" class="mx-1 h-5" />
     <ModeToggle />
   </div>
