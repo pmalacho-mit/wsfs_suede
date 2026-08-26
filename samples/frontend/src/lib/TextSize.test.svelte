@@ -32,6 +32,8 @@
   import {
     clickRow,
     drawn,
+    menuOn,
+    openMenu,
     region,
     rowFor,
     tabs,
@@ -124,31 +126,8 @@
     },
   };
 
-  /**
-   * A right click, as the browser makes one: `composed`, because a row lives
-   * in the tree's shadow root and the panel that answers for the menu does
-   * not.
-   */
-  const menuOn = async (row: HTMLElement) => {
-    const { top, left } = row.getBoundingClientRect();
-    row.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        composed: true,
-        clientX: left + 4,
-        clientY: top + 4,
-      }),
-    );
-    await new Promise((wake) => setTimeout(wake, 120));
-  };
-
-  const menu = (within: HTMLElement) =>
-    within.querySelector(
-      "[data-file-tree-context-menu-root]",
-    ) as HTMLElement | null;
-
   const items = (within: HTMLElement) =>
-    [...(menu(within)?.querySelectorAll("button") ?? [])] as HTMLElement[];
+    [...(openMenu(within)?.querySelectorAll("button") ?? [])] as HTMLElement[];
 
   const said = (within: HTMLElement) =>
     items(within).map((one) => one.textContent?.trim());
@@ -548,7 +527,7 @@
      * is the claim.
      */
     const gap = () => {
-      const box = menu(container)?.getBoundingClientRect();
+      const box = openMenu(container)?.getBoundingClientRect();
       if (!box) throw new Error("no menu opened");
       const bottom = row().getBoundingClientRect().bottom;
       return Math.min(Math.abs(box.top - bottom), Math.abs(box.bottom - bottom));
