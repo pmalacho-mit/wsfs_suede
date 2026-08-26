@@ -129,6 +129,57 @@
         }
       }
     },
+    "/wsfs/workspaces/{workspace_id}/files": {
+      "post": {
+        "summary": "Add Files",
+        "description": "Add these files, at these paths, with this text.\n\nTHE ADDITIVE HALF of `place`, and the only half with a URL. A client\nlogged in on behalf of a user putting files into that user's workspace\nis an ordinary thing to mean, and having to walk the tree, mint an id\nper folder and chain CAS tokens by hand to say it is a tax on saying\nsomething harmless. What it may NOT mean is the rest of `place`:\n`overwrite=False` is passed here and not read from the body, and\n`prune` has no field at all -- so nothing arriving over this route can\nchange text it did not write or delete anything whatsoever.\n\nA path already holding something else is refused, per path, rather\nthan written over, and everything that had nowhere to conflict still\nlands. That is the same shape every other refusal in this package has\nand the reason this answers 200 with a list rather than 409 with\nnothing: one occupied path is a fact about the workspace, not a\nmalformed call.\n\nREPEATABLE, like the function behind it. A path already holding\nexactly this text is `unchanged` -- no transaction, no event, no\nflicker for anybody with the file open -- so a client that cannot tell\nwhether its last attempt landed can simply send it again.\n\n400, and only 400, for `place.Unusable`: a path that is not a path,\none path spelled two ways, or one path asked to be both a file and the\nfolder above another. That is the CALL being wrong, it is caught\nbefore anything is written, and a workspace half-described by it would\nbe a state nobody asked for.",
+        "operationId": "add_files_wsfs_workspaces__workspace_id__files_post",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlacementRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Placed"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/wsfs/workspaces/{workspace_id}/blobs/{digest}": {
       "put": {
         "summary": "Store",
@@ -1372,6 +1423,19 @@
               }
             ],
             "title": "Offset"
+          },
+          "system": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32000,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System"
           }
         },
         "type": "object",
@@ -1466,6 +1530,17 @@
           "mime"
         ],
         "title": "BinaryBody"
+      },
+      "Change": {
+        "type": "string",
+        "enum": [
+          "created",
+          "written",
+          "unchanged",
+          "deleted"
+        ],
+        "title": "Change",
+        "description": "What one path needed doing to it.\n\nUNCHANGED is the one worth having a word for. It is not a failure and not\na no-op the caller should ignore -- it is this function's whole claim to\nbeing safe to run repeatedly, and a caller watching for churn wants to see\nthat the second run was all of these."
       },
       "Clearing": {
         "properties": {
@@ -2231,6 +2306,24 @@
         "title": "Moved",
         "description": "Where an entry went, and what it is called now."
       },
+      "NotPlaced": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "reason"
+        ],
+        "title": "NotPlaced"
+      },
       "Occurrence": {
         "properties": {
           "minted": {
@@ -2277,6 +2370,76 @@
         ],
         "title": "Occurrence",
         "description": "When one transaction happened, in both clocks that saw it.\n\nTwo clocks because they answer different questions and disagree for honest\nreasons. `minted` is the client's, and it is when the USER acted -- which,\nafter a week offline, is the only one that means anything to them. `accepted`\nis this server's, and it is when the change entered the workspace and became\nsomething other clients could see. An offline session makes the gap between\nthem days wide, and neither number is the other's approximation."
+      },
+      "Placed": {
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Workspace"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/PlacedEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/NotPlaced"
+            },
+            "type": "array",
+            "title": "Refused"
+          }
+        },
+        "type": "object",
+        "required": [
+          "workspace"
+        ],
+        "title": "Placed"
+      },
+      "PlacedEntry": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "entry": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entry"
+          },
+          "type": {
+            "$ref": "#/components/schemas/Type"
+          },
+          "change": {
+            "$ref": "#/components/schemas/Change"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "entry",
+          "type",
+          "change"
+        ],
+        "title": "PlacedEntry"
+      },
+      "PlacementRequest": {
+        "properties": {
+          "files": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "maxProperties": 1000,
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "title": "PlacementRequest",
+        "description": "Paths, and the text each should hold.\n\nNO `prune`, and no way to ask for one. Deleting everything a body did not\nname is a thing a host may mean and a client may not, so it stays where\nthe host is -- an argument to the in-process `Mounted.place`, never a\nfield on the wire. See `PlaceFiles`."
       },
       "Reconstructed": {
         "properties": {
