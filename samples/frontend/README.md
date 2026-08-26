@@ -47,6 +47,17 @@ a test, with any set of files at all. Nothing behind it sends anywhere yet;
 withdraws itself the moment somebody starts typing again -- because somebody
 who is editing is no longer stuck.
 
+`textsize.svelte.ts` is the slider on each panel's heading. A workspace is as
+often shown as worked in -- an instructor on a laptop, with a room reading the
+projection -- and the browser's own zoom is no answer, because it takes the
+layout with it. So each panel scales its own text and leaves its width alone,
+by declaring `--wsfs-text-scale`; `app.css` restates Tailwind's font sizes
+against it, which reaches every utility, shadcn component and rendered answer
+underneath without any of them knowing. The two things that cannot be reached
+that way are told instead: monaco is handed a font size, because it measures
+its own lines to place the caret, and the tree is `zoom`ed, because it is
+virtualised and its row heights are arithmetic rather than style.
+
 Three seams are worth reading, because they are the whole point:
 
 `FileTree.svelte` mirrors paths in both directions -- a gesture becomes a

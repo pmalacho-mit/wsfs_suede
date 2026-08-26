@@ -49,6 +49,81 @@
   position: static;
 }
 
+/**
+ * The sizes this app names that Tailwind's scale has no word for.
+ *
+ * Declared rather than written into the markup as `text-[0.68rem]`, because
+ * the block below has to be able to answer for every size a panel draws --
+ * and a literal in a class attribute is one it cannot reach. See
+ * `textsize.svelte.ts`.
+ */
+:root {
+  /* Panel headings, and the strip over a run's output. */
+  --text-2xs: 0.68rem;
+  /* The path a terminal names, and a version's timestamp. */
+  --text-2xs-mono: 0.7rem;
+  /* What a run actually printed. */
+  --text-xs-mono: 0.78rem;
+}
+
+/**
+ * HOW BIG THE TEXT IN ONE PANEL IS.
+ *
+ * A panel that carries `data-text-scale` and sets `--wsfs-text-scale` draws
+ * every piece of text inside it at that multiple of its usual size. What is
+ * NOT scaled is everything else -- padding, borders, icons, the panel's own
+ * width -- which is the whole difference between this and the browser's zoom:
+ * the three panels still fit beside each other afterwards.
+ *
+ * It works by restating Tailwind's own font-size scale, because `text-sm` and
+ * the rest compile to `font-size: var(--text-sm)` -- so a subtree that says
+ * what `--text-sm` means there has said it for every utility, every shadcn
+ * component and every line of rendered markdown underneath it, none of which
+ * has to know this exists.
+ *
+ * MULTIPLIED REM RATHER THAN EM, and that is not a preference. `em` would
+ * compound: a `text-2xs` strip inside a `text-xs-mono` output block would be
+ * a fraction of a fraction, so the panel would not be scaled, it would be
+ * redesigned. Each of these stays a fixed multiple of the document's size,
+ * exactly as it is now, times the one number.
+ *
+ * The line heights are deliberately absent: Tailwind writes them as ratios
+ * (`calc(1.25 / 0.875)`), so they follow the size they belong to on their own.
+ */
+[data-text-scale] {
+  /* Anything that inherits its size rather than naming one. */
+  font-size: calc(1rem * var(--wsfs-text-scale, 1));
+
+  --text-2xs: calc(0.68rem * var(--wsfs-text-scale, 1));
+  --text-2xs-mono: calc(0.7rem * var(--wsfs-text-scale, 1));
+  --text-xs-mono: calc(0.78rem * var(--wsfs-text-scale, 1));
+
+  --text-xs: calc(0.75rem * var(--wsfs-text-scale, 1));
+  --text-sm: calc(0.875rem * var(--wsfs-text-scale, 1));
+  --text-base: calc(1rem * var(--wsfs-text-scale, 1));
+  --text-lg: calc(1.125rem * var(--wsfs-text-scale, 1));
+  --text-xl: calc(1.25rem * var(--wsfs-text-scale, 1));
+  --text-2xl: calc(1.5rem * var(--wsfs-text-scale, 1));
+  --text-3xl: calc(1.875rem * var(--wsfs-text-scale, 1));
+}
+
+/**
+ * WHAT A PANEL SHOWS GROWS. WHAT DRIVES THE PANEL DOES NOT.
+ *
+ * The strip that names a panel and the controls on it are inside the panel,
+ * so without this they scale with everything else -- and a sidebar at 250%
+ * spends a row 170px wide on the word "EXPLORER" at 27px, pushing the very
+ * slider that got it there off the end of its own heading. Somebody who
+ * overshoots then cannot get back.
+ *
+ * So chrome says so, and is drawn at the size it always was. It reads as a
+ * value on the same attribute because that is exactly what it is: a subtree
+ * whose scale is one, nested inside one whose scale is not.
+ */
+[data-text-scale="chrome"] {
+  --wsfs-text-scale: 1;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

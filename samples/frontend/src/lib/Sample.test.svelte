@@ -145,11 +145,19 @@
   const holds = (client: Client, path: string) => () =>
     client.paths.includes(path);
 
+  /**
+   * `composed`, because a row lives in the tree's shadow root and the panel
+   * that answers for the menu does not. A real right click is composed --
+   * every user-generated event is -- so an uncomposed one is a test asking a
+   * question the browser never asks: it stops at the shadow boundary, and
+   * the menu never opens.
+   */
   const menuOn = async (row: HTMLElement) => {
     const { top, left } = row.getBoundingClientRect();
     row.dispatchEvent(
       new MouseEvent("contextmenu", {
         bubbles: true,
+        composed: true,
         clientX: left + 4,
         clientY: top + 4,
       }),

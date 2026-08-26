@@ -65,7 +65,7 @@
     <!-- A span rather than a heading: a button may only hold phrasing
          content, and this one is the whole bar so that the target is the bar. -->
     <span
-      class="text-muted-foreground shrink-0 text-[0.68rem] font-semibold tracking-[0.08em] uppercase"
+      class="text-muted-foreground shrink-0 font-semibold tracking-[0.08em] uppercase text-(length:--text-2xs)"
     >
       {label}
     </span>

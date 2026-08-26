@@ -32,16 +32,27 @@
   } from "../shadcn/ai-elements/prompt-input";
   //import { Suggestion, Suggestions } from "../shadcn/ai-elements/suggestion";
   import PanelHeading from "../shell/PanelHeading.svelte";
+  import TextSizeSlider from "../shell/TextSizeSlider.svelte";
   import AttachedFiles from "./AttachedFiles.svelte";
   import type { Conversation } from "./conversation.svelte";
   import type { Id } from "../../contract";
   import { Button } from "../shadcn/ui/button";
+  import { TextSize } from "../textsize.svelte";
 
   let {
     conversation,
     attached,
     oninput,
     onAsk,
+    /**
+     * How big this panel's text is.
+     *
+     * Handed in, because a workspace remembers one size for this panel and
+     * the panel is drawn by whoever is holding that. Its own when nobody
+     * says -- which is what makes this component something a test, or any
+     * other host, can put on a page by itself.
+     */
+    textSize = new TextSize("assistant"),
   }: {
     conversation: Conversation;
     /** What goes with the next question, and how much goes with each. */
@@ -49,6 +60,7 @@
     oninput?: (input: Event) => void;
     /** Asks, once whoever knows what is on screen has said what that is. */
     onAsk?: (text: string) => void;
+    textSize?: TextSize;
   } = $props();
 
   /** Streamdown's shadcn base leaves lists unmarked. These are the markers. */
@@ -81,8 +93,14 @@
 <section
   class="bg-sidebar grid h-full min-h-0 w-full min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden"
   data-region="assistant"
+  data-text-scale
+  style:--wsfs-text-scale={textSize.scale}
 >
-  <PanelHeading label="Assistant" icon={MessagesSquare} />
+  <PanelHeading label="Assistant" icon={MessagesSquare}>
+    {#snippet controls()}
+      <TextSizeSlider size={textSize} label="Assistant text size" />
+    {/snippet}
+  </PanelHeading>
 
   <Transcript class="min-h-0 min-w-0">
     <ConversationContent class="gap-6 p-3">

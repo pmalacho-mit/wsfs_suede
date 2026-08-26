@@ -540,6 +540,8 @@
   import { FileText, FolderTree } from "@lucide/svelte";
   import { InView } from "./inview.svelte";
   import PanelHeading from "./shell/PanelHeading.svelte";
+  import TextSizeSlider from "./shell/TextSizeSlider.svelte";
+  import { TextSizes } from "./textsize.svelte";
   import Assistant from "./assistant/Assistant.svelte";
   import { Conversation } from "./assistant/conversation.svelte";
   import { Nudge } from "./assistant/nudge";
@@ -600,6 +602,16 @@
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
+
+  /**
+   * How big the text in each panel is, and it is remembered.
+   *
+   * Held here rather than inside the panels because the dock builds and
+   * discards them -- a file view is made when a tab opens and gone when it
+   * shuts -- and a size that went with the tab would be a size somebody set
+   * for the last file. See `textsize.svelte.ts`.
+   */
+  const textSizes = new TextSizes();
 
   const conversation = new Conversation();
 
@@ -1336,6 +1348,7 @@
                 opened,
                 kernelPool,
                 workspace,
+                textSize: textSizes.documents,
                 onFinished: finished,
                 onRun: onCodeExecution,
               },
@@ -1377,8 +1390,14 @@
   <section
     class="bg-sidebar grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] border-r"
     data-region="explorer"
+    data-text-scale
+    style:--wsfs-text-scale={textSizes.explorer.scale}
   >
-    <PanelHeading label="Explorer" icon={FolderTree} />
+    <PanelHeading label="Explorer" icon={FolderTree}>
+      {#snippet controls()}
+        <TextSizeSlider size={textSizes.explorer} label="Explorer text size" />
+      {/snippet}
+    </PanelHeading>
     <FileTree {model} />
   </section>
 {/snippet}
@@ -1425,6 +1444,7 @@
   <div class="h-full min-h-0 border-l" data-region="assistant">
     <Assistant
       {conversation}
+      textSize={textSizes.assistant}
       onAsk={ask}
       oninput={(event: Event) =>
         typed((event.currentTarget as HTMLTextAreaElement | null)?.value.length ?? 0)}
