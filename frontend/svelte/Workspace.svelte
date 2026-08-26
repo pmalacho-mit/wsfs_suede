@@ -561,6 +561,7 @@
     onSnapshot,
     onStuck,
     courseEvent,
+    oneFileAtATime = false,
   }: {
     model: Model;
     workspace: Workspace;
@@ -599,6 +600,21 @@
      * researcher actually cares about.
      */
     courseEvent?: string;
+    /**
+     * One file open at a time: opening a second closes the first.
+     *
+     * OFF BY DEFAULT, because a workspace where two files sit side by side is
+     * the ordinary one and this component is not only a study's instrument.
+     *
+     * ON, it makes "what the student was looking at" a question with one
+     * answer. The stuck rules ask that question constantly -- the code
+     * snapshot on every episode, and the before-and-after the progress rule
+     * compares -- and each of them reads the FIRST visible file, which with
+     * two panels open is a coin toss dressed up as a fact. A term run this
+     * way has a snapshot per episode that is actually the program the student
+     * was working on.
+     */
+    oneFileAtATime?: boolean;
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
@@ -905,6 +921,18 @@
         typeof idOrEntry === "string" ? idOrEntry : idOrEntry.id,
       );
 
+    /**
+     * Close every file but this one. See `oneFileAtATime`.
+     *
+     * Nothing is disposed here: `onDidRemovePanel` is what keeps what was
+     * typed and lets the room go, and it runs for a panel closed from here
+     * exactly as it does for one closed by its own tab.
+     */
+    const onlyKeep = (id: Id) => {
+      for (const panel of [...tabsAPI.panels])
+        if (panel.id !== id) panel.api.close();
+    };
+
     const override: FileOverride = {
       get: (path) => {
         const id = tree.mapping.of(path);
@@ -1025,6 +1053,48 @@
       typeof window === "undefined" ? "" : window.location.search,
     );
 
+    /**
+     * EVERY DETECTION, IN THE CONSOLE, whatever became of it.
+     *
+     * The protocol's difficulty is that most of what it does is INVISIBLE. A
+     * detection randomized into silence, one that arrived during a cooldown
+     * and one that never happened at all look identical from the outside --
+     * like nothing. Somebody watching a student over their shoulder, or
+     * checking that `?nudge.idle=10` did what they asked, needs the ones that
+     * never reach a screen and, for each, which rule held it back.
+     *
+     * `console.info` rather than `console.error`: none of this is wrong, and
+     * a student's console should not say it is.
+     */
+    const clock = (at: number) =>
+      at === 0 ? "never" : new Date(at).toLocaleTimeString();
+
+    const becameBecause = (episode: Episode) => {
+      if (episode.became === "offered") return "PROMPTING";
+      if (episode.became === "silent")
+        return `no prompt -- the coin said silent (offer rate ${settings.offerRate})`;
+      if (episode.became === "held back by the cooldown")
+        return `no prompt -- a cooldown is running until ${clock(held.cooldownUntil)}`;
+      return `no prompt -- a post-episode window is open until ${clock(held.windowUntil)}`;
+    };
+
+    const announce = (episode: Episode) =>
+      console.info(
+        `[stuck] ${episode.rule} (${episode.detail}) -- ${becameBecause(episode)}`,
+        {
+          episode: episode.id,
+          at: clock(episode.at),
+          became: episode.became,
+          path: episode.code?.path,
+          window: episode.window
+            ? `${clock(episode.window.from)} to ${clock(episode.window.until)}`
+            : "none",
+          cooldown: episode.cooldown
+            ? `${clock(episode.cooldown.from)} to ${clock(episode.cooldown.until)}`
+            : "none",
+        },
+      );
+
     const held = new Stuck({
       settings,
       offer: (episode, forMs) =>
@@ -1034,11 +1104,13 @@
            * before the question goes anywhere: what is being measured is
            * whether they accepted, not whether the tutor answered.
            */
+          console.info(`[stuck] offer accepted`, { episode: episode.id });
           void offerTaken(episode);
           acted("offer accepted", { episode: episode.id });
           void askTheTutor(becauseOf(episode));
-        }, forMs),
+        }, forMs, settings.floor),
       record: (episode) => {
+        announce(episode);
         onStuck?.(episode);
         /**
          * The window opens for BOTH arms, which is the whole comparison --
@@ -1354,6 +1426,17 @@
               },
               { id, title },
             );
+            /**
+             * AFTER the new panel is up, not before.
+             *
+             * Closing first would leave the dock empty for as long as opening
+             * takes, and -- worse -- would race two fast clicks: the file
+             * being closed for is not added yet, so the one already on its
+             * way in survives and there are two after all. Closing whatever
+             * is not the panel just added is the same instruction written so
+             * that arriving in either order gives the same answer.
+             */
+            if (oneFileAtATime) onlyKeep(id);
           } finally {
             // However it went. Left set, a file that has been opened once can
             // never be opened again -- and closing its panel is exactly when
@@ -1380,7 +1463,9 @@
   onDestroy(() => {
     cleanup();
     conversation.dispose();
-    nudge.withdraw();
+    /** `close` and not `withdraw`: the panel is going, so there is no floor
+     *  left to honour and nothing to honour it on. */
+    nudge.close();
   });
 </script>
 

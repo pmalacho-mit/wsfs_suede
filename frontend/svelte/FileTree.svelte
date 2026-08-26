@@ -35,6 +35,25 @@
   const sanitizeForTree = (path: string, folder: boolean) =>
     folder ? `${path}/` : path;
 
+  /** Either spelling of a path names the same row, so both are asked about. */
+  const bothSpellings = (path: string) => [
+    path,
+    path.endsWith("/") ? path.slice(0, -1) : `${path}/`,
+  ];
+
+  /**
+   * The same numbering the tree gives a draft whose name is taken, so an
+   * upload that lands beside an entry of the same name reads like every other
+   * duplicate here rather than like a second convention.
+   */
+  const numbered = (path: string, suffix: number) => {
+    if (path.endsWith("/")) return `${path.slice(0, -1)}-${suffix}/`;
+    const dot = path.lastIndexOf(".");
+    return dot > path.lastIndexOf("/")
+      ? `${path.slice(0, dot)}-${suffix}${path.slice(dot)}`
+      : `${path}-${suffix}`;
+  };
+
   const depth = (path: string) => path.split("/").length;
 
   /** The last segment, whichever kind of path it is. */
@@ -191,6 +210,8 @@
     | "create"
     | "remove"
     | "watch"
+    /** Downloading a copy of a file is the one thing here that READS one. */
+    | "read"
   >;
 
   /**
@@ -234,6 +255,16 @@
         paths: [],
         renaming: true,
         dragAndDrop: true,
+        /**
+         * A folder whose only child is another folder keeps its own row.
+         *
+         * The tree's default is to draw `a/b/` as one row, which reads well
+         * in a diff and badly in an explorer somebody is USING: the outer
+         * folder then has nothing of its own to right click, to drop onto, or
+         * to drag -- so the one gesture available on it is the one that acts
+         * on the inner folder instead.
+         */
+        flattenEmptyDirectories: false,
       });
     }
 
@@ -345,6 +376,11 @@
   import { themes } from "../../../wsfs_suede.pierre-trees-svelte-suede/themes";
   import { appearance } from "./appearance.svelte";
   import { pointAsRect } from "./utils";
+  import MenuLayer from "./MenuLayer.svelte";
+  import { Button } from "./shadcn/ui/button";
+  import DownloadIcon from "@lucide/svelte/icons/download";
+  import UploadIcon from "@lucide/svelte/icons/upload";
+  import { chosen, download, foldersFor, type Chosen } from "./transfer";
 
   let { model }: Props = $props();
 
@@ -377,6 +413,41 @@
    * lose a path, and cannot lose an id.
    */
   const awaiting = new Set<Id>();
+
+  /**
+   * What an uploaded file holds, waiting for the tree to ask for it.
+   *
+   * An upload is a hand-made entry with something already in it, and this is
+   * the only difference between the two. It is left here rather than passed,
+   * because passing it would mean a SECOND way to create an entry -- and the
+   * one below is the way that keeps the mapping, the deferred announcements
+   * and the outbox in step. So the upload adds a row like a person does, and
+   * `add` finds the content here when it goes to create it.
+   */
+  const uploading = new Map<Path, Chosen>();
+
+  /**
+   * What the create `add` last made is waiting for.
+   *
+   * An upload is the only thing that needs it, and it needs it badly. A
+   * create names its parent by ID, and two of them sent in the same breath
+   * are two requests in flight at once -- which the server is free to answer
+   * in either order. Answer the child first and it names a folder that does
+   * not exist yet, and it is refused, along with everything under it.
+   *
+   * Everywhere else these are seconds apart, because a person is typing
+   * between them, and nothing has ever had to wait.
+   */
+  let lastSubmitted: Submitting | undefined;
+
+  /**
+   * What it is waiting for, read through a call.
+   *
+   * The assignment that fills it in happens inside the tree's own event, so
+   * it is not one the compiler can see -- and a plain read straight after
+   * clearing it is narrowed to `undefined` and refuses to have a `settled`.
+   */
+  const settling = (): Promise<unknown> | undefined => lastSubmitted?.settled;
 
   const workspaceToTreeOperation = {
     removed: (entry: Id): Tree.BatchOperation | undefined => {
@@ -494,15 +565,23 @@
 
   const add = (path: string) => {
     const isFolder = path.endsWith("/");
+    const carried = uploading.get(path);
+    uploading.delete(path);
     const submission = submissions.trackUntilSettled(
-      isFolder ? workspace.folder(path) : workspace.create(path, ""),
+      isFolder
+        ? workspace.folder(path)
+        : workspace.create(path, carried?.content ?? "", carried?.mime),
     );
     const { entry } = submission;
+    lastSubmitted = submission;
     model.performAndDeferAnyAnnouncements(() => mapping.set(entry, path));
-    if (!isFolder) {
-      awaiting.add(entry);
-      void warmOnceMade(submission);
-    }
+    if (isFolder) return;
+    // An uploaded file is neither opened nor warmed. A person naming a file
+    // is about to type into it, and one choosing forty of them is not -- and
+    // forty rooms nobody has asked for is forty round trips to the host.
+    if (carried !== undefined) return;
+    awaiting.add(entry);
+    void warmOnceMade(submission);
   };
 
   const move = (from: string, to: string) => {
@@ -567,27 +646,132 @@
   onDestroy(() => tree.dispose());
 
   /**
+   * Keeps a copy of what is at `path` -- the file, or the folder as a zip.
+   *
+   * `""` is the workspace itself, which is what the buttons below and the
+   * menu on the tree's own empty space both act on.
+   */
+  const keepACopy = (path: Path) => {
+    void download(workspace, path).catch((trouble) =>
+      console.error(`could not download ${path || "the workspace"}`, trouble),
+    );
+  };
+
+  /**
+   * A path no row in the tree is using, under either spelling -- and that
+   * nothing else in the same upload has already been promised.
+   */
+  const vacant = (path: Path, claimed: ReadonlySet<Path>): Path => {
+    const taken = (candidate: Path) =>
+      bothSpellings(candidate).some(
+        (spelling) => tree.item(spelling) !== null || claimed.has(spelling),
+      );
+    let suffix = 0;
+    let candidate = path;
+    while (taken(candidate)) candidate = numbered(path, ++suffix);
+    return candidate;
+  };
+
+  /**
+   * Where an uploaded path lands.
+   *
+   * Only its FIRST segment can collide with anything already here -- what is
+   * below that is inside something this upload is bringing with it -- so that
+   * is the only segment renamed, and every file under a folder renamed this
+   * way follows it. Merging into an existing folder of the same name would be
+   * the other answer, and it is the one that can overwrite somebody's work.
+   */
+  const placing = () => {
+    const settled = new Map<string, string>();
+    // Nothing in the tree yet, because nothing has been added yet -- so the
+    // names this upload has already spoken for are only written down here.
+    const claimed = new Set<string>();
+    return (path: Path): Path => {
+      const [head = "", ...rest] = path.split("/");
+      const inFolder = rest.length > 0;
+      const key = inFolder ? `${head}/` : head;
+      let free = settled.get(key);
+      if (free === undefined) {
+        free = vacant(key, claimed);
+        settled.set(key, free);
+        for (const spelling of bothSpellings(free)) claimed.add(spelling);
+      }
+      return inFolder ? `${free}${rest.join("/")}` : free;
+    };
+  };
+
+  /**
+   * Files from a disk, added exactly as a person adds them.
+   *
+   * Folders first and shallowest first, because a create names its parent by
+   * id and the parent has to exist before the child asks for it. Everything
+   * after that is `tree.add`, which is the same call the tree makes when a
+   * draft is finally named -- so the workspace, the mapping and the outbox
+   * hear about these the one way they hear about anything.
+   */
+  const receive = async (files: readonly File[]) => {
+    if (files.length === 0) return;
+    const place = placing();
+    const landing = (await chosen(files)).map((one) => ({
+      ...one,
+      path: place(one.path),
+    }));
+
+    // One at a time, and waiting: see `lastSubmitted`. The ROW appears at
+    // once either way -- what is being waited for is the server's answer,
+    // and only so that what goes inside has somewhere to go.
+    for (const folder of foldersFor(landing.map((one) => one.path))) {
+      if (tree.item(folder) !== null) continue;
+      lastSubmitted = undefined;
+      tree.add(folder);
+      await settling();
+    }
+
+    for (const one of landing) {
+      uploading.set(one.path, one);
+      tree.add(one.path);
+      // A row the tree declined to draw is a file that will never be created,
+      // and its bytes would otherwise sit here until the page went away.
+      uploading.delete(one.path);
+    }
+  };
+
+  let picker = $state<HTMLInputElement>();
+
+  const askForFiles = () => picker?.click();
+
+  const picked = (event: Event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    // Cleared before the work starts, so choosing the same file twice in a
+    // row is still a change the input reports.
+    input.value = "";
+    void receive(files).catch((trouble) =>
+      console.error("could not upload", trouble),
+    );
+  };
+
+  /**
    * EVERY MENU IN THIS PANEL IS THIS ONE.
    *
    * The tree draws its own for a row, and it used to. Two things were wrong
-   * with leaving it to: a right click that misses every entry gets nothing
-   * from it, and the space below the last row is most of the panel -- and it
-   * places a row's menu `position: fixed` at the pointer's VIEWPORT
-   * coordinates, which the browser then multiplies again by whatever the
-   * panel is zoomed to. At 200% the menu opened twice as far down the page as
-   * the click. (The zoom is below, and is what makes the tree readable from
-   * the back of a room.)
+   * with leaving it to. A right click that misses every entry gets nothing
+   * from it, and the space below the last row is most of the panel. And it
+   * anchors a row's menu at the pointer's VIEWPORT coordinates, which the
+   * browser multiplies again by whatever the panel is zoomed to -- at 200%
+   * the menu opened twice as far down the page as the click. `MenuLayer` does
+   * not save it: the top layer is what stops a menu being clipped by the
+   * panel it opened in, and a `position: fixed` box inside something zoomed
+   * is scaled wherever it ends up painted.
    *
    * So the tree is composed without one -- no snippet, no menu -- and this
-   * surface answers both. It sits OUTSIDE the zoomed tree, which is what
-   * makes the placement plain: a row's menu hangs under that row, a click on
-   * empty space hangs from the pointer, and neither has heard of the text
-   * size.
+   * surface answers both, from OUTSIDE the zoomed tree. That is what makes
+   * the placement plain: a row's menu hangs under that row, a click on empty
+   * space hangs from the pointer, and neither has heard of the text size.
    */
   let at = $state<{ x: number; y: number } | undefined>(undefined);
   /** Whose menu is open: an entry's, or -- when nothing -- the root's. */
   let on = $state<Item | undefined>(undefined);
-  let anchor = $state<HTMLElement>();
   let surface = $state<HTMLElement>();
 
   /** The gap between a row and the menu it opened. A constant, in pixels. */
@@ -630,36 +814,28 @@
     if (item !== undefined) tree.focus.at(item.path);
   };
 
-  // The anchor is placed within the tree so the menu travels with it; the
-  // rect it reports is the viewport point, which is what the menu flips on.
-  const placed = $derived.by(() => {
-    if (!at || !surface) return undefined;
-    const box = surface.getBoundingClientRect();
-    return { left: at.x - box.left, top: at.y - box.top };
-  });
-
   const context = $derived.by((): Context | undefined => {
-    if (!at || !anchor) return undefined;
+    if (!at || !surface) return undefined;
     return {
-      anchorElement: anchor,
+      anchorElement: surface,
       anchorRect: pointAsRect(at.x, at.y),
       close: dismiss,
       restoreFocus: () => {},
     };
   });
 
-  /**
-   * Two of the four the tree's own menu offers, because the other two need an
-   * entry to act on and this menu has none.
-   */
+  /** Whichever menu this click asked for: an entry's, or the workspace's. */
   const actionsOn = (
     item: Item | undefined,
     open: Context,
   ): ContextMenu.Action[] =>
-    item === undefined
-      ? rootActions(open)
-      : ContextMenu.actions({ model: tree, item, context: open });
+    item === undefined ? rootActions(open) : entryActions(item, open);
 
+  /**
+   * Two of the four the tree's own menu offers -- the other two need an entry
+   * to act on and this menu has none -- and the two that are ABOUT the
+   * workspace as a whole, which is the one thing only this menu can name.
+   */
   const rootActions = (open: Context): ContextMenu.Action[] => {
     // Adding hands focus straight to the tree's rename input, which the
     // menu's usual focus restore would immediately steal back.
@@ -676,7 +852,29 @@
         label: "Add folder",
         run: handOver(() => entries.add(tree, root, "folder")),
       },
+      { label: "Download", divided: true, run: handOver(() => keepACopy("")) },
+      { label: "Upload", run: handOver(askForFiles) },
     ];
+  };
+
+  /**
+   * The tree's four, plus a copy of this entry to keep.
+   *
+   * Slid in ahead of the destructive one rather than appended, so Delete
+   * stays where a hand already expects it: at the bottom, behind a divider.
+   */
+  const entryActions = (item: Item, open: Context): ContextMenu.Action[] => {
+    const standard = ContextMenu.actions({ model: tree, item, context: open });
+    const destructive = standard.findIndex((action) => action.danger === true);
+    const keeping: ContextMenu.Action = {
+      label: "Download",
+      run: () => {
+        open.close({ restoreFocus: false });
+        keepACopy(item.path);
+      },
+    };
+    const before = destructive < 0 ? standard.length : destructive;
+    return [...standard.slice(0, before), keeping, ...standard.slice(before)];
   };
 
   $effect(() => {
@@ -693,86 +891,146 @@
   });
 </script>
 
-<!-- The tree fills this, so the empty space below the last entry is still the
-     tree's -- which is the whole point of the menu above. -->
-<div
-  class="tree"
-  data-region="tree"
-  bind:this={surface}
-  oncontextmenu={asked}
-  role="presentation"
->
-  <!--
-    THE ONE PANEL THAT IS SCALED RATHER THAN RESIZED, and it has to be.
-
-    Everywhere else, `--wsfs-text-scale` moves font sizes and leaves the
-    layout alone. The tree cannot be asked that: it is virtualised, so its row
-    positions are computed in JavaScript from an item height fixed when the
-    model was built, and a stylesheet that grows the type without growing the
-    rows gets text in 30px slots -- clipped, and overlapping the moment
-    anything scrolls. The height is not ours to move; there is no setter for
-    it, and rebuilding the model to change it would throw away every
-    expansion, selection and half-typed rename in the panel.
-
-    `zoom` moves both together, because it scales the coordinate space the
-    tree does its own arithmetic in -- rows, indents, icons and type at once,
-    all still consistent with each other. It is applied HERE, to the tree
-    alone, and not to the region around it: the menus are drawn on that
-    region, and they place themselves from viewport coordinates, which a zoom
-    would multiply a second time. See the surface above.
-  -->
-  <Tree.Component
-    model={tree}
-    style="height: 100%; zoom: var(--wsfs-text-scale, 1); {theme}"
-  />
-
-  <!-- The tree's palette, on a surface that is not inside the tree: the menu
-       reads `--trees-*` for its colours, and would otherwise fall back to its
-       own defaults while everything around it wore the theme. Its SIZE comes
-       from the panel, in the stylesheet below. -->
+<!-- Two rows: the tree, which fills what is left so the empty space below the
+     last entry is still the tree's -- which is the whole point of the menu
+     above -- and the strip of the two things that are about all of it. -->
+<div class="explorer">
   <div
-    class="anchor"
-    bind:this={anchor}
-    style={theme}
-    style:left="{placed?.left ?? 0}px"
-    style:top="{placed?.top ?? 0}px"
+    class="tree"
+    data-region="tree"
+    bind:this={surface}
+    oncontextmenu={asked}
+    role="presentation"
   >
+    <!--
+      THE ONE PANEL THAT IS SCALED RATHER THAN RESIZED, and it has to be.
+
+      Everywhere else, `--wsfs-text-scale` moves font sizes and leaves the
+      layout alone. The tree cannot be asked that: it is virtualised, so its
+      row positions are computed in JavaScript from an item height fixed when
+      the model was built, and a stylesheet that grows the type without
+      growing the rows gets text in 30px slots -- clipped, and overlapping the
+      moment anything scrolls. The height is not ours to move; there is no
+      setter for it, and rebuilding the model to change it would throw away
+      every expansion, selection and half-typed rename in the panel.
+
+      `zoom` moves both together, because it scales the coordinate space the
+      tree does its own arithmetic in -- rows, indents, icons and type at
+      once, all still consistent with each other. It is applied HERE, to the
+      tree alone, and not to the region around it: the menu is drawn on that
+      region and places itself from viewport coordinates, which a zoom would
+      multiply a second time.
+
+      And no `contextMenu` snippet, which is what leaves the tree composed
+      without a menu at all -- see the surface above.
+    -->
+    <Tree.Component
+      model={tree}
+      style="height: 100%; zoom: var(--wsfs-text-scale, 1); {theme}"
+    />
+
     {#if context}
-      <ContextMenu.Component {context} actions={actionsOn(on, context)} />
+      <MenuLayer anchor={context.anchorRect}>
+        <!--
+          The tree's palette, on a menu that is not inside the tree: it reads
+          `--trees-*` for its colours, and would otherwise wear the neutral
+          fallbacks while everything around it wore the theme. Its SIZE comes
+          from the panel -- see the stylesheet below.
+        -->
+        <div class="menu" style={theme}>
+          <ContextMenu.Component {context} actions={actionsOn(on, context)} />
+        </div>
+      </MenuLayer>
     {/if}
+  </div>
+
+  <!-- Chrome: these two are about the workspace rather than part of what the
+       panel shows, so they keep their size while the tree grows. -->
+  <div
+    class="flex shrink-0 gap-1 border-t p-1.5"
+    data-region="tree-actions"
+    data-text-scale="chrome"
+  >
+    <Button
+      variant="ghost"
+      size="sm"
+      class="flex-1"
+      title="Download the whole workspace"
+      onclick={() => keepACopy("")}
+    >
+      <DownloadIcon />
+      Download
+    </Button>
+    <Button
+      variant="ghost"
+      size="sm"
+      class="flex-1"
+      title="Add files from this machine"
+      onclick={askForFiles}
+    >
+      <UploadIcon />
+      Upload
+    </Button>
   </div>
 </div>
 
+<!-- Outside the tree, because the tree is where a right click means the root
+     and a click landing on this would be one. Nobody ever sees it: the
+     buttons and the menu both reach it by asking it to open. -->
+<input
+  class="picker"
+  type="file"
+  multiple
+  bind:this={picker}
+  onchange={picked}
+  tabindex="-1"
+  aria-hidden="true"
+/>
+
 <style>
+  .explorer {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    height: 100%;
+    min-height: 0;
+  }
+
   .tree {
     position: relative;
     height: 100%;
     min-height: 0;
   }
 
-  /* Nothing of its own: a zero-sized origin at the point the menu hangs
-     from -- the bottom of a row, or the pointer where there is no row. */
-  .anchor {
-    position: absolute;
+  /*
+   * THE MENU READS AT THE SIZE THE PANEL IS SET TO.
+   *
+   * Everything else in a scaled panel grows because `app.css` restates
+   * Tailwind's sizes against `--wsfs-text-scale`; the menu is drawn by the
+   * tree's own component, which names its size in `--trees-*` and has never
+   * heard of any of that. So it is told here, in the one declaration it does
+   * read -- and told a MULTIPLE of the size it already was, so a panel nobody
+   * has touched is unchanged. An explorer turned up for a lecture theatre
+   * whose menu still whispers is half a feature.
+   *
+   * The size only. The padding and the corners are the same as every other
+   * menu in the app, which is the trade the rest of this makes too: what is
+   * read grows, what holds it stays where it was.
+   *
+   * It reaches the menu because `MenuLayer` leaves it in the DOM where it was
+   * written -- the top layer moves where a thing PAINTS, not what it
+   * inherits.
+   */
+  .menu {
+    --trees-menu-font-size: calc(0.875rem * var(--wsfs-text-scale, 1));
+  }
+
+  /* Present rather than displayed: `display: none` makes an input one some
+     browsers refuse to open a picker for. */
+  .picker {
+    position: fixed;
     width: 0;
     height: 0;
-    z-index: 60;
-
-    /*
-     * AND THE MENU READS AT THE SIZE THE PANEL IS SET TO.
-     *
-     * Everything else in a scaled panel grows because `app.css` restates
-     * Tailwind's sizes against `--wsfs-text-scale`; the menu is drawn by the
-     * tree's own component, which names its size in `--trees-*` and has never
-     * heard of any of that. So it is told here, in the one declaration it
-     * does read -- and told a MULTIPLE of the size it already was, so a panel
-     * nobody has touched is unchanged. An explorer turned up for a lecture
-     * theatre whose menu still whispers is half a feature.
-     *
-     * The size only. The padding and the corners are the same as every other
-     * menu in the app, which is the same trade the rest of this makes: what
-     * is read grows, what holds it stays where it was.
-     */
-    --trees-menu-font-size: calc(0.875rem * var(--wsfs-text-scale, 1));
+    opacity: 0;
+    pointer-events: none;
   }
 </style>
