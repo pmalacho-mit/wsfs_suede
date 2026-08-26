@@ -527,7 +527,7 @@
     themes,
     type ViewAPI,
   } from "../../../wsfs_suede.dockview-svelte-suede";
-  import "wsfs_suede.dockview-svelte-suede/styles/dockview.css";
+  import "../../../wsfs_suede.dockview-svelte-suede/styles/dockview.css";
   import { LayoutPriority } from "dockview";
   import FileTree, { Model as FileTreeModel, type Id } from "./FileTree.svelte";
   import { appearance } from "./appearance.svelte";
@@ -547,7 +547,12 @@
   import { Nudge } from "./assistant/nudge";
   import { goalOf } from "./assistant/goals";
   import { mint } from "../identity";
-  import { settingsFrom, Stuck, tickFor, type Episode } from "./assistant/stuck";
+  import {
+    settingsFrom,
+    Stuck,
+    tickFor,
+    type Episode,
+  } from "./assistant/stuck";
   import { Activity } from "./assistant/activity";
   import type { Outcome } from "./Runner.svelte";
   import { WithEvents } from "../../../wsfs_suede.with-events-suede";
@@ -742,7 +747,6 @@
   const stuckOn = ({ because }: Extract<Outcome, { ok: false }>) =>
     `My last run ended in an error:\n\n\`\`\`\n${because}\n\`\`\`\n\nCan you help me work out why?`;
 
-
   /**
    * What the person is asked on their behalf, given why they look stuck.
    *
@@ -899,8 +903,7 @@
            * how much of it there is at each moment is what a study of when
            * they reached for help actually needs.
            */
-          typed: (length: number) =>
-            acted("prompt typing", { length }),
+          typed: (length: number) => acted("prompt typing", { length }),
         },
         {
           size: 340,
@@ -1098,17 +1101,21 @@
     const held = new Stuck({
       settings,
       offer: (episode, forMs) =>
-        nudge.offer(() => {
-          /**
-           * TAKING THE OFFER IS A FACT ABOUT THE STUDENT, and it is recorded
-           * before the question goes anywhere: what is being measured is
-           * whether they accepted, not whether the tutor answered.
-           */
-          console.info(`[stuck] offer accepted`, { episode: episode.id });
-          void offerTaken(episode);
-          acted("offer accepted", { episode: episode.id });
-          void askTheTutor(becauseOf(episode));
-        }, forMs, settings.floor),
+        nudge.offer(
+          () => {
+            /**
+             * TAKING THE OFFER IS A FACT ABOUT THE STUDENT, and it is recorded
+             * before the question goes anywhere: what is being measured is
+             * whether they accepted, not whether the tutor answered.
+             */
+            console.info(`[stuck] offer accepted`, { episode: episode.id });
+            void offerTaken(episode);
+            acted("offer accepted", { episode: episode.id });
+            void askTheTutor(becauseOf(episode));
+          },
+          forMs,
+          settings.floor,
+        ),
       record: (episode) => {
         announce(episode);
         onStuck?.(episode);
@@ -1117,8 +1124,7 @@
          * and only for episodes that opened one, so a detection held back by
          * a cooldown cannot start a second recording inside the first.
          */
-        if (episode.window)
-          activity.open(episode.id, episode.window.until);
+        if (episode.window) activity.open(episode.id, episode.window.until);
         activity.note("stuck", {
           episode: episode.id,
           rule: episode.rule,
@@ -1146,8 +1152,13 @@
      * asks for: they set a threshold the tick cannot resolve and conclude the
      * setting does nothing. See `tickFor`.
      */
-    const ticking = setInterval(() => (held.check(), activity.check()), tickFor(settings));
-    cleanup.add(() => (held.stop(), activity.dispose(), clearInterval(ticking)));
+    const ticking = setInterval(
+      () => (held.check(), activity.check()),
+      tickFor(settings),
+    );
+    cleanup.add(
+      () => (held.stop(), activity.dispose(), clearInterval(ticking)),
+    );
     onSnapshot?.(snapshot);
 
     /**
@@ -1177,10 +1188,16 @@
           path: episode.code?.path.slice(0, 1_000) ?? null,
           code: episode.code?.text.slice(0, 400_000) ?? null,
           cooldown: episode.cooldown
-            ? { began: when(episode.cooldown.from), ends: when(episode.cooldown.until) }
+            ? {
+                began: when(episode.cooldown.from),
+                ends: when(episode.cooldown.until),
+              }
             : null,
           window: episode.window
-            ? { began: when(episode.window.from), ends: when(episode.window.until) }
+            ? {
+                began: when(episode.window.from),
+                ends: when(episode.window.until),
+              }
             : null,
         })
         .catch(() => undefined);
@@ -1310,14 +1327,13 @@
       acted("asked", { length: text.length });
       const held = snapshot({ resolveDirty: true });
       const taken = workspace.snapshot(held.entries.map((one) => one.entry));
-      const attached = held.visible
-        .map((one) => ({
-          entry: one.entry,
-          path: one.path,
-          executions: (openFiles.get(one.entry)?.sharedText?.executions ?? [])
-            .map((run) => run.transaction)
-            .filter((named): named is string => named !== undefined),
-        }));
+      const attached = held.visible.map((one) => ({
+        entry: one.entry,
+        path: one.path,
+        executions: (openFiles.get(one.entry)?.sharedText?.executions ?? [])
+          .map((run) => run.transaction)
+          .filter((named): named is string => named !== undefined),
+      }));
 
       let named: string | undefined;
       try {
@@ -1532,7 +1548,10 @@
       textSize={textSizes.assistant}
       onAsk={ask}
       oninput={(event: Event) =>
-        typed((event.currentTarget as HTMLTextAreaElement | null)?.value.length ?? 0)}
+        typed(
+          (event.currentTarget as HTMLTextAreaElement | null)?.value.length ??
+            0,
+        )}
       attached={snapshot().visible.map(({ path, executions, entry }) => ({
         entry,
         path,
