@@ -79,6 +79,7 @@ from .contract import (
     Judged,
     Judging,
     Occurrence,
+    PlacementRequest,
     ReconstructionRequest,
     ReconstructionResponse,
     Recorded,
@@ -407,12 +408,15 @@ async def place_within(
     user_id: UUID,
     wanted: Mapping[placing.Segments, str],
     prune: bool,
+    overwrite: bool,
 ) -> tuple[Placed, list[Emitted]]:
     """ONE database transaction, like Initialize and like a clone: what is
     being appended is a tree, and a tree half-appended is a workspace holding
     folders whose contents never arrived."""
     async with submitting(backend, controller, user_id) as submission:
-        placed, events = await placing.placed_into(submission, wanted, prune=prune)
+        placed, events = await placing.placed_into(
+            submission, wanted, prune=prune, overwrite=overwrite
+        )
         await submission.session.commit()
         return placed, events
 
@@ -618,13 +622,20 @@ class CloneWorkspace(Protocol):
 class PlaceFiles(Protocol):
     """Make a workspace hold these files, at these paths, with this text.
 
-    NOT A ROUTE either, and for a different reason from `clone`'s. One
-    workspace is named, so `authorize` could perfectly well answer for it --
-    what it cannot answer is whether a caller may rewrite a whole workspace in
-    one call, without an outbox, without presenting a token for anything it
-    overwrites, and with a `prune` that deletes. Every write a CLIENT makes
-    says what it thought it was replacing; this one says "make it so", which
-    is a thing a host may mean and a browser may not.
+    THE WHOLE OF IT, unlike `clone`, which has no route at all. One workspace
+    is named, so `authorize` answers for it perfectly well, and the additive
+    half of this -- `overwrite=False`, no `prune` -- is `POST
+    /workspaces/{id}/files` (see `add_files`), because a client logged in on
+    behalf of a user adding files to that user's workspace is an ordinary
+    thing to mean.
+
+    WHAT THE ROUTE DOES NOT EXPOSE is the other two arguments, and they are
+    the reason this stayed in-process for as long as it did. Every write a
+    CLIENT makes says what it thought it was replacing; an overwrite here
+    presents no token for text somebody may have open, and `prune` deletes
+    every path the call did not name. Together they are "make it so", which is
+    a thing a host may mean and a browser may not -- so they are reachable
+    only by holding this, and never by asking for them in a body.
     """
 
     async def __call__(
@@ -634,6 +645,7 @@ class PlaceFiles(Protocol):
         files: Mapping[str, str],
         user: UUID,
         prune: bool = False,
+        overwrite: bool = True,
         warm: bool = True,
     ) -> Placed:
         """`files` maps a `/`-separated path to the text it should hold.
@@ -650,8 +662,17 @@ class PlaceFiles(Protocol):
         this". Off by default because it is the one thing here that destroys
         something.
 
+        `overwrite=False` withholds the right to CHANGE text: a path already
+        holding something different is refused `PATH_OCCUPIED` and left
+        exactly as it was, while every other path still lands. It does not
+        withhold the silent case -- a path already holding that exact text is
+        still `UNCHANGED` -- so an additive call is as repeatable as any
+        other. This is the shape the route uses.
+
         `user` is who this is done on behalf of, and nothing here checks them
-        -- see the class docstring. `warm` settles each moved file's
+        -- see the class docstring. Over the route it is `authorize` that
+        says who; called directly it is this argument, which is the one
+        difference between the two doors. `warm` settles each moved file's
         collaboration room before returning.
 
         Raises `place.Unusable`, before writing anything, for a call that
@@ -664,6 +685,7 @@ class PlaceFiles(Protocol):
 
 Initialize = Callable[[UUID, InitializeRequest, UUID], Awaitable[InitializeResponse]]
 Transact = Callable[[UUID, Submitted, UUID], Awaitable[Response]]
+AddFiles = Callable[[UUID, PlacementRequest, UUID], Awaitable[Placed]]
 Store = Callable[[str, Request, UUID], Awaitable[Response]]
 FetchBlob = Callable[[UUID, str, UUID], Awaitable[Response]]
 FetchContent = Callable[[UUID, UUID, UUID | None, UUID], Awaitable[Response]]
@@ -708,13 +730,21 @@ class Mounted:
     router: APIRouter
 
     clone: CloneWorkspace
+    """The one piece of work that is NOT a route: a clone's permission
+    question spans two workspaces, and `authorize` answers about one."""
+
     place: PlaceFiles
-    """The two pieces of work that are NOT routes, and the two reasons: a
-    clone's permission question spans two workspaces, and a placement is a
-    host saying "make it so" rather than a client saying what it saw."""
+    """A placement, with the two arguments the route withholds.
+
+    `add_files` below is this same work with `overwrite=False` and no
+    `prune`. Holding this is what lets a host mean "make it so" -- overwrite
+    text nobody presented a token for, delete every path the call did not
+    name -- which is exactly the reason it is not askable for over HTTP.
+    """
 
     initialize: Initialize
     transact: Transact
+    add: AddFiles
     store: Store
     fetch_blob: FetchBlob
     content: FetchContent
@@ -791,13 +821,18 @@ def create_router(
         files: Mapping[str, str],
         user: UUID,
         prune: bool = False,
+        overwrite: bool = True,
         warm: bool = True,
     ) -> Placed:
-        """Not a route, and not registered on one. See `PlaceFiles`."""
+        """All of it, including what the route will not ask for. See
+        `PlaceFiles`; `add_files` is this with the destructive half nailed
+        shut."""
         wanted = placing.parsed(files)  # raises before the controller is taken
         async with serving(workspace) as controller:
             placed = await controller.submit(
-                lambda: place_within(backend, controller, user, wanted, prune)
+                lambda: place_within(
+                    backend, controller, user, wanted, prune, overwrite
+                )
             )
         if warm:
             await warmed(backend, placed.files)
@@ -832,6 +867,56 @@ def create_router(
             outcome.response.model_dump(mode="json", exclude_none=True),
             status_code=409 if outcome.response.rejected else 200,
         )
+
+    @router.post("/workspaces/{workspace_id}/files")
+    async def add_files(
+        workspace_id: Annotated[UUID, APIPath()],
+        body: Annotated[PlacementRequest, Body()],
+        user: UUID = Depends(authorize),
+    ) -> Placed:
+        """Add these files, at these paths, with this text.
+
+        THE ADDITIVE HALF of `place`, and the only half with a URL. A client
+        logged in on behalf of a user putting files into that user's workspace
+        is an ordinary thing to mean, and having to walk the tree, mint an id
+        per folder and chain CAS tokens by hand to say it is a tax on saying
+        something harmless. What it may NOT mean is the rest of `place`:
+        `overwrite=False` is passed here and not read from the body, and
+        `prune` has no field at all -- so nothing arriving over this route can
+        change text it did not write or delete anything whatsoever.
+
+        A path already holding something else is refused, per path, rather
+        than written over, and everything that had nowhere to conflict still
+        lands. That is the same shape every other refusal in this package has
+        and the reason this answers 200 with a list rather than 409 with
+        nothing: one occupied path is a fact about the workspace, not a
+        malformed call.
+
+        REPEATABLE, like the function behind it. A path already holding
+        exactly this text is `unchanged` -- no transaction, no event, no
+        flicker for anybody with the file open -- so a client that cannot tell
+        whether its last attempt landed can simply send it again.
+
+        400, and only 400, for `place.Unusable`: a path that is not a path,
+        one path spelled two ways, or one path asked to be both a file and the
+        folder above another. That is the CALL being wrong, it is caught
+        before anything is written, and a workspace half-described by it would
+        be a state nobody asked for.
+        """
+        try:
+            placed = await place_files(
+                workspace=workspace_id,
+                files=body.files,
+                # From the request, never from the body. Over the wire this is
+                # the whole of who is acting; the argument exists for the
+                # in-process caller that has no request to read it from.
+                user=user,
+                prune=False,
+                overwrite=False,
+            )
+        except placing.Unusable as unusable:
+            raise HTTPException(400, str(unusable)) from unusable
+        return placed
 
     @router.put("/workspaces/{workspace_id}/blobs/{digest}")
     async def store(
@@ -1400,6 +1485,7 @@ def create_router(
         place=place_files,
         initialize=initialize,
         transact=transact,
+        add=add_files,
         store=store,
         fetch_blob=fetch_blob,
         content=content,
