@@ -7,7 +7,7 @@
    * carries is decided by whoever knows what is on screen -- and so this can
    * be looked at, in a test, with any set of files at all.
    */
-  import { MessagesSquare } from "@lucide/svelte";
+  import MessagesSquare from "@lucide/svelte/icons/messages-square";
   import {
     Conversation as Transcript,
     ConversationContent,

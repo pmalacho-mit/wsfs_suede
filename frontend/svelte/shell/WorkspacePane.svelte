@@ -13,6 +13,7 @@
    */
   import type { Faltering, Reclamation, Workspace as WSFS } from "../../";
   import Workspace, { Model } from "../Workspace.svelte";
+  import type { Configured } from "../assistant/stuck";
   import type { createClient } from "@liveblocks/client";
 
   let {
@@ -21,15 +22,32 @@
     storage,
     room,
     courseEvent,
+    protocol,
+    system,
+    readonly = false,
   }: {
     workspace: WSFS;
     liveblocks: ReturnType<typeof createClient>;
     /** Which sitting of which course this is, for the study's records. */
     courseEvent?: string;
+    /** What this course was set up to run. See `stuck.ts`. */
+    protocol?: Configured;
     /** What is wrong with writing the queue down, if anything. */
     storage?: Faltering;
     /** What the last pass at making room found. */
     room?: Reclamation;
+    /** System prompt */
+    system: string;
+    /**
+     * Whether or not the workspace is opened in readonly mode.
+     *
+     * Declared here AND handed on below, which is the whole of it: this sat
+     * in the type without being destructured or passed, so a route setting it
+     * got a workspace that had never heard of it -- every panel writable, the
+     * tree offering rename and delete, and nothing to show for the setting
+     * except a prop that type-checked.
+     */
+    readonly?: boolean;
   } = $props();
 
   /**
@@ -75,6 +93,14 @@
     </p>
   {/if}
   <div class="min-h-0 flex-1" data-region="workspace-body">
-    <Workspace {workspace} {liveblocks} {model} {courseEvent} />
+    <Workspace
+      {workspace}
+      {liveblocks}
+      {model}
+      {courseEvent}
+      {protocol}
+      {system}
+      {readonly}
+    />
   </div>
 </div>

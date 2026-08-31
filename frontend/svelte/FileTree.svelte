@@ -240,8 +240,23 @@
     #deferredAnnouncements: (() => void)[] | undefined;
     #selecting = false;
 
-    constructor(workspace: MinimalWorkspace) {
+    /**
+     * Whether this workspace may be changed from the panel at all.
+     *
+     * HERE AS WELL AS ON THE COMPONENT, and it has to be. The panel decides
+     * what to OFFER, which is a prop and can change; the tree decides what
+     * gestures exist at all -- dragging a row onto a folder, F2 on a
+     * selection -- and it is told once, in the options below, with no way to
+     * be told again. So a panel handed a model that was never told is
+     * read-only in every menu and still draggable, which is why the component
+     * takes its default from here and guards the bridge for the case where
+     * somebody sets one and not the other.
+     */
+    readonly readonly: boolean;
+
+    constructor(workspace: MinimalWorkspace, options?: { readonly?: boolean }) {
       super();
+      this.readonly = options?.readonly ?? false;
       this.workspace = workspace;
       this.mapping = new EntryMapping({
         added: (entry) =>
@@ -253,8 +268,8 @@
       });
       this.tree = new Tree.Model({
         paths: [],
-        renaming: true,
-        dragAndDrop: true,
+        renaming: !this.readonly,
+        dragAndDrop: !this.readonly,
         /**
          * A folder whose only child is another folder keeps its own row.
          *
@@ -355,6 +370,18 @@
 
   export type Props = {
     model: Model;
+    /**
+     * Whether this panel offers anything that CHANGES the workspace.
+     *
+     * Read-only leaves the tree entirely usable -- expanding, selecting,
+     * opening, downloading -- and takes away the four that write: new file,
+     * new folder, rename, delete. Upload goes with them, being a create by
+     * another name. What is left says so, in the menu and under the tree,
+     * because a menu that is quietly shorter reads as a bug.
+     *
+     * Defaults to what the model was built with. See `Model.readonly`.
+     */
+    readonly?: boolean;
   };
 
   /** Where the workspace says an entry belongs, spelled the tree's way. */
@@ -375,14 +402,21 @@
   import type { Change, Submitting, Workspace } from "../";
   import { themes } from "../../../wsfs_suede.pierre-trees-svelte-suede/themes";
   import { appearance } from "./appearance.svelte";
+  import { headerFor } from "./headers";
   import { pointAsRect } from "./utils";
   import MenuLayer from "./MenuLayer.svelte";
   import { Button } from "./shadcn/ui/button";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import UploadIcon from "@lucide/svelte/icons/upload";
+  import FilePlusIcon from "@lucide/svelte/icons/file-plus";
+  import FolderPlusIcon from "@lucide/svelte/icons/folder-plus";
+  import LockIcon from "@lucide/svelte/icons/lock";
   import { chosen, download, foldersFor, type Chosen } from "./transfer";
 
-  let { model }: Props = $props();
+  let { model, readonly = model.readonly }: Props = $props();
+
+  /** What the menu and the strip below the tree both say, said once. */
+  const READ_ONLY = "Read-only: nothing here can be changed.";
 
   /**
    * The tree's palette, which is a fetch rather than a class: its themes are
@@ -599,6 +633,21 @@
   };
 
   /**
+   * A change the tree made that this panel will not pass on, put back.
+   *
+   * The BACKSTOP, not the mechanism. A model told it is read-only builds a
+   * tree with neither renaming nor drag-and-drop, so the gesture that would
+   * reach here never starts -- see `Model.readonly`. This is for the panel
+   * handed `readonly` on its own, where the row can still be dragged: it
+   * moves, and then it comes back, which is worse than never moving and far
+   * better than a workspace quietly written to.
+   *
+   * Wrapped, because the tree announces the undo exactly as it announced the
+   * change, and an unwrapped one would be heard here and undone again.
+   */
+  const undo = (put: () => void) => applyWorkspaceChanges.wrap(put);
+
+  /**
    * A file named here opens once it is real. Nothing else does: `added` also
    * arrives for the first snapshot and for everybody else's work, and opening
    * on that would fling every file in the workspace onto the screen.
@@ -620,12 +669,34 @@
         openWhatWasNamed();
       }),
       tree.subscribe({
-        added: ({ path }) => applyWorkspaceChanges.guard(() => add(path)),
+        added: ({ path }) =>
+          applyWorkspaceChanges.guard(() =>
+            readonly ? undo(() => tree.remove(path)) : add(path),
+          ),
         moved: ({ from, to }) =>
-          applyWorkspaceChanges.guard(() => move(from, to)),
+          applyWorkspaceChanges.guard(() =>
+            readonly || renames(from, to)
+              ? undo(() => tree.move(to, from))
+              : move(from, to),
+          ),
         renamed: ({ sourcePath, destinationPath }) =>
-          applyWorkspaceChanges.guard(() => move(sourcePath, destinationPath)),
-        removed: ({ path }) => applyWorkspaceChanges.guard(() => remove(path)),
+          applyWorkspaceChanges.guard(() =>
+            // `renames` as well as `readonly`, and for the same reason the
+            // menu drops Rename: taking the item out of the menu does not
+            // take the gesture off the row, and the tree renames from its own
+            // input whatever the menu happens to be offering.
+            readonly || renames(sourcePath, destinationPath)
+              ? undo(() => tree.move(destinationPath, sourcePath))
+              : move(sourcePath, destinationPath),
+          ),
+        removed: ({ path }) =>
+          applyWorkspaceChanges.guard(() =>
+            readonly
+              ? applyWorkspaceChanges.wrap(() =>
+                  tree.batch(workspaceToTreeOperation.materialized()),
+                )
+              : remove(path),
+          ),
         "selection changed": ([path]) => {
           if (model.selecting) return;
           if (path === undefined || Tree.isDirectory(tree.item(path))) return;
@@ -801,12 +872,35 @@
      * Under the row, at its bottom edge -- not at the pointer, which is
      * somewhere in the middle of a row that may be 30px tall or 75. The row
      * is what the menu is about, so the row is what it hangs from.
+     *
+     * BUT ONLY WHERE THE ROW CAN BE BELIEVED.
+     *
+     * The pointer is inside the row it just hit -- that is what a hit test
+     * means -- so a box that does NOT contain it was measured in some other
+     * coordinate space than the one this menu is placed in. WebKit reports
+     * exactly that for anything inside `zoom`: rects come back in the
+     * zoomed element's own space, which is the viewport's divided by the
+     * scale, while the pointer stays in the viewport's. The panel's own
+     * offset is in that figure too, so the error is there on the FIRST row
+     * and grows with every one after it -- at 80% the menu opened 40px
+     * below the top row and 70px below one further down, and at 150% it
+     * opened above them by more.
+     *
+     * Asking whether the two agree names no browser and undoes no scale,
+     * and it stops being asked the day WebKit reports these the way
+     * everything else does. Where they disagree the pointer wins: it never
+     * came from layout, and a menu at the cursor is where a click on the
+     * empty space below the last row already puts one.
      */
+    const box = row?.getBoundingClientRect();
     at = {
       x: event.clientX,
       y:
-        row !== undefined && item !== undefined
-          ? row.getBoundingClientRect().bottom + BELOW
+        box !== undefined &&
+        item !== undefined &&
+        event.clientY >= box.top &&
+        event.clientY <= box.bottom
+          ? box.bottom + BELOW
           : event.clientY,
     };
     on = item;
@@ -843,29 +937,80 @@
       open.close({ restoreFocus: false });
       act();
     };
+    const keeping: ContextMenu.Action = {
+      label: "Download",
+      divided: !readonly,
+      run: handOver(() => keepACopy("")),
+    };
+    if (readonly) return [{ label: READ_ONLY, note: true }, keeping];
     return [
       {
-        label: "Add file",
+        label: "New file",
         run: handOver(() => entries.add(tree, root, "file")),
       },
       {
-        label: "Add folder",
+        label: "New folder",
         run: handOver(() => entries.add(tree, root, "folder")),
       },
-      { label: "Download", divided: true, run: handOver(() => keepACopy("")) },
+      keeping,
       { label: "Upload", run: handOver(askForFiles) },
     ];
   };
+
+  /**
+   * The two the package offers on ANY entry, because it reads them as "make
+   * one of these near here" -- inside a directory, beside a file. See below
+   * for why a file is not offered them at all.
+   *
+   * Matched by label because that is all an `Action` carries. A rename
+   * upstream turns this back into today's behaviour rather than into an
+   * error, which is the right way for it to fail: visible, and not a crash.
+   */
+  const containing = new Set(["New file", "New folder"]);
+
+  /**
+   * WHETHER SOMETHING IS WRITTEN DOWN ABOUT THIS FILE.
+   *
+   * The problem a file is an answer to is held BY NAME -- see `headers.ts` --
+   * so renaming the file is how a student loses the question they were asked,
+   * silently and with no way back from inside the panel. The name is load
+   * bearing, so it is not theirs to change.
+   *
+   * Only the name. Moving it into a folder is still allowed, because that
+   * changes the path and not the name, and the table is keyed by the half
+   * that did not move.
+   */
+  const spokenFor = (path: Path) => headerFor(path) !== undefined;
+
+  /**
+   * Whether a change would take a spoken-for file's NAME away from it.
+   *
+   * Asked of the paths rather than of which event carried them, because the
+   * tree has two that can arrive here and the distinction it draws is not the
+   * one that matters: its `renamed` is the rename input, its `moved` is a
+   * drag -- and a drag into a folder keeps the name, while a `move` that
+   * changes the last segment is a rename whatever it was called on the way
+   * in. The table is keyed by name, so the name is the only thing to guard.
+   */
+  const renames = (from: Path, to: Path) =>
+    spokenFor(from) && nameIn(from) !== nameIn(to);
 
   /**
    * The tree's four, plus a copy of this entry to keep.
    *
    * Slid in ahead of the destructive one rather than appended, so Delete
    * stays where a hand already expects it: at the bottom, behind a divider.
+   *
+   * MINUS THE TWO THAT MAKE SOMETHING, WHEN THIS IS A FILE. The package
+   * lands a new entry beside a file rather than inside it, which is a
+   * defensible reading and not this panel's: a menu opened on `main.py` that
+   * offers "New folder" reads as a promise to put one IN it, and the folder
+   * that then appears somewhere else is a surprise every time. The two
+   * places that can honestly make one -- a folder's own menu, and the strip
+   * at the top of the panel, which says the workspace root -- are the two
+   * that keep them.
    */
   const entryActions = (item: Item, open: Context): ContextMenu.Action[] => {
-    const standard = ContextMenu.actions({ model: tree, item, context: open });
-    const destructive = standard.findIndex((action) => action.danger === true);
     const keeping: ContextMenu.Action = {
       label: "Download",
       run: () => {
@@ -873,6 +1018,22 @@
         keepACopy(item.path);
       },
     };
+    // The one thing a read-only panel can do to an entry, and the reason the
+    // other four are not here.
+    if (readonly) return [{ label: READ_ONLY, note: true }, keeping];
+
+    const offered = ContextMenu.actions({ model: tree, item, context: open });
+    const withheld = new Set<string>();
+    if (item.kind !== "directory")
+      for (const one of containing) withheld.add(one);
+    if (spokenFor(item.path)) {
+      withheld.add("Rename");
+      withheld.add("Delete");
+    }
+    const standard = offered.filter((action) => !withheld.has(action.label));
+    const destructive = standard.findIndex(
+      (action) => !ContextMenu.isNote(action) && action.danger === true,
+    );
     const before = destructive < 0 ? standard.length : destructive;
     return [...standard.slice(0, before), keeping, ...standard.slice(before)];
   };
@@ -891,10 +1052,55 @@
   });
 </script>
 
-<!-- Two rows: the tree, which fills what is left so the empty space below the
-     last entry is still the tree's -- which is the whole point of the menu
-     above -- and the strip of the two things that are about all of it. -->
-<div class="explorer">
+<!-- Three rows: the two that MAKE something, the tree, which fills what is
+     left so the empty space below the last entry is still the tree's --
+     which is the whole point of the menu above -- and the two that move the
+     workspace on and off this machine.
+
+     THE MAKING PAIR IS AT THE TOP because it is the only half of this panel
+     nothing else announces. Download and Upload are about a workspace that
+     already exists and can wait to be found; a student who has not learnt
+     that a right click offers anything has no way to make their first file,
+     and an explorer they cannot put a file into is not an explorer. The
+     right click still does everything these do, and more precisely -- these
+     two say the root, that one says wherever you clicked. -->
+<div class="explorer" class:readonly>
+  <!-- Chrome: about the workspace rather than part of what the panel shows,
+       so it keeps its size while the tree grows.
+
+       GONE ENTIRELY when the panel is read-only, rather than disabled in
+       place. Two greyed buttons at the top of a panel are a promise that
+       something elsewhere will turn them on, and nothing will; the strip
+       under the tree says why they are not there. -->
+  {#if !readonly}
+    <div
+      class="flex shrink-0 gap-1 border-b p-1.5"
+      data-region="tree-new"
+      data-text-scale="chrome"
+    >
+      <Button
+        variant="ghost"
+        size="sm"
+        class="flex-1"
+        title="New file at the top level of the workspace"
+        onclick={() => entries.add(tree, root, "file")}
+      >
+        <FilePlusIcon />
+        New file
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="flex-1"
+        title="New folder at the top level of the workspace"
+        onclick={() => entries.add(tree, root, "folder")}
+      >
+        <FolderPlusIcon />
+        New folder
+      </Button>
+    </div>
+  {/if}
+
   <div
     class="tree"
     data-region="tree"
@@ -944,33 +1150,52 @@
     {/if}
   </div>
 
-  <!-- Chrome: these two are about the workspace rather than part of what the
-       panel shows, so they keep their size while the tree grows. -->
+  <!-- Chrome, the same way, and the mirror of the strip at the top.
+
+       READ-ONLY KEEPS ITS DOWNLOAD AND SAYS WHY IT KEPT ONLY THAT. This is
+       the bottom of the panel, which is where a reader ends up once they have
+       looked for the thing they wanted and not found it -- and the one line
+       here answers the question the whole panel raises, so it is a sentence
+       and not a badge. Upload goes with the making pair above: it is a create
+       with a file picker in front of it. -->
   <div
-    class="flex shrink-0 gap-1 border-t p-1.5"
+    class="flex shrink-0 flex-col gap-1 border-t p-1.5"
     data-region="tree-actions"
     data-text-scale="chrome"
   >
-    <Button
-      variant="ghost"
-      size="sm"
-      class="flex-1"
-      title="Download the whole workspace"
-      onclick={() => keepACopy("")}
-    >
-      <DownloadIcon />
-      Download
-    </Button>
-    <Button
-      variant="ghost"
-      size="sm"
-      class="flex-1"
-      title="Add files from this machine"
-      onclick={askForFiles}
-    >
-      <UploadIcon />
-      Upload
-    </Button>
+    <div class="flex gap-1">
+      <Button
+        variant="ghost"
+        size="sm"
+        class="flex-1"
+        title="Download the whole workspace"
+        onclick={() => keepACopy("")}
+      >
+        <DownloadIcon />
+        Download
+      </Button>
+      {#if !readonly}
+        <Button
+          variant="ghost"
+          size="sm"
+          class="flex-1"
+          title="Add files from this machine"
+          onclick={askForFiles}
+        >
+          <UploadIcon />
+          Upload
+        </Button>
+      {/if}
+    </div>
+    {#if readonly}
+      <p
+        class="text-muted-foreground flex items-start gap-1.5 px-1 pb-0.5 text-(length:--text-2xs) leading-snug"
+        data-region="tree-readonly"
+      >
+        <LockIcon class="mt-px size-3 shrink-0" aria-hidden="true" />
+        <span>{READ_ONLY}</span>
+      </p>
+    {/if}
   </div>
 </div>
 
@@ -990,9 +1215,16 @@
 <style>
   .explorer {
     display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
     height: 100%;
     min-height: 0;
+  }
+
+  /* No making pair at the top, so no row for it -- otherwise the tree takes
+     the `auto` track meant for that strip and the strip below it takes the
+     `1fr`, which is the panel upside down. */
+  .explorer.readonly {
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .tree {
@@ -1012,16 +1244,41 @@
    * has touched is unchanged. An explorer turned up for a lecture theatre
    * whose menu still whispers is half a feature.
    *
-   * The size only. The padding and the corners are the same as every other
-   * menu in the app, which is the trade the rest of this makes too: what is
-   * read grows, what holds it stays where it was.
+   * The size and the surface. The padding and the corners are the same as
+   * every other menu in the app, which is the trade the rest of this makes
+   * too: what is read grows, what holds it stays where it was.
    *
-   * It reaches the menu because `MenuLayer` leaves it in the DOM where it was
+   * Both reach the menu because `MenuLayer` leaves it in the DOM where it was
    * written -- the top layer moves where a thing PAINTS, not what it
    * inherits.
    */
   .menu {
     --trees-menu-font-size: calc(0.875rem * var(--wsfs-text-scale, 1));
+
+    /*
+     * AND THE COLOURS, WHICH THE MENU CANNOT REACH ON ITS OWN.
+     *
+     * The menu asks for `--trees-search-bg` and the tree's other resolved
+     * variables, and the note above its own rule says why: it expects to be a
+     * light-DOM child of the tree's host, where those inherit. Here it is a
+     * SIBLING of the tree -- the layer is drawn beside the component, not
+     * inside it -- so it inherits none of them and falls all the way through
+     * to the neutral fallbacks the package ships. In light mode that is pure
+     * white, which on this panel reads as no background at all: a menu with a
+     * border, a shadow, and nothing in it.
+     *
+     * `theme` on this element carries the `--trees-theme-*` half of the
+     * palette, which is the half a consumer CAN see. So the chains the tree
+     * would have resolved are resolved here instead, from those, ending on
+     * the app's own popover colours so a menu opened before the theme's fetch
+     * lands is still a surface rather than a hole.
+     */
+    --trees-menu-bg: var(
+      --trees-theme-input-bg,
+      var(--trees-theme-sidebar-bg, var(--popover))
+    );
+    --trees-menu-fg: var(--trees-theme-sidebar-fg, var(--popover-foreground));
+    --trees-menu-border-color: var(--trees-theme-sidebar-border, var(--border));
   }
 
   /* Present rather than displayed: `display: none` makes an input one some

@@ -59,14 +59,29 @@
     oninput={(event) => (size.scale = Number(event.currentTarget.value))}
   />
 
-  <!-- Only once it has been moved: a panel sitting at 100% is saying nothing
-       worth the width, and the width is what a sidebar has least of. -->
-  {#if size.changed}
-    <span
-      class="text-muted-foreground w-8 shrink-0 text-right tabular-nums text-(length:--text-2xs)"
-      data-region="text-size-percent"
-    >
-      {size.percent}%
-    </span>
-  {/if}
+  <!--
+    Read only once it has been moved -- a panel sitting at 100% is saying
+    nothing worth reading -- but the WIDTH IS HELD EITHER WAY, and that is
+    not a detail.
+
+    This used to be an `{#if}`, and the control is pushed to the right edge
+    of the strip it sits on. So the moment a drag reached exactly 100% this
+    span left the row, the group narrowed by its width and the gap before it,
+    and the track slid 36px right -- out from under the pointer that was
+    dragging it. The browser reads the next mouse move against the track's
+    new position, which on a 64px track is most of its travel: 105% became
+    80% in one pixel of movement, and putting the readout back moved
+    everything again. A control cannot be dragged through a size that moves
+    it. Hidden rather than removed, so the row is the same width at every
+    size, and `visibility` rather than opacity so a reader is not offered
+    "100%" by a screen reader when nothing is shown.
+  -->
+  <span
+    class="text-muted-foreground w-8 shrink-0 text-right tabular-nums text-(length:--text-2xs)"
+    class:invisible={!size.changed}
+    data-region="text-size-percent"
+    data-changed={size.changed}
+  >
+    {size.percent}%
+  </span>
 </div>

@@ -13,7 +13,9 @@
    * list afterwards, and a restore can be refused like any other write if
    * somebody moved the file on meanwhile.
    */
-  import { Clock, Eye, RotateCcw } from "@lucide/svelte";
+  import Clock from "@lucide/svelte/icons/clock";
+  import Eye from "@lucide/svelte/icons/eye";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import type { Told } from "../history";
   import type { Workspace } from "../";
   import type { Id } from "../contract";

@@ -309,11 +309,21 @@ async def prompt(
     request: Asking,
     until: datetime,
 ) -> list[Said]:
-    """Everything the model is given, in the order it is given it."""
+    """Everything the model is given, in the order it is given it.
+
+    THE CALLER'S SYSTEM MESSAGE, IF IT SENT ONE, goes after this package's and
+    before the conversation. After, because `SYSTEM` says what a tutor is and
+    the caller's says what this particular one is teaching -- the narrower of
+    two instructions is the one that should be read last. Before the turns,
+    because instructions that arrive halfway through a conversation read as
+    something somebody said in it.
+    """
     shown = await _shown(session, models, text, workspace_id, request)
     asking = request.text if not shown else f"{request.text}\n\n{shown}"
+    standing = (request.system or "").strip()
     return [
         Said(role="system", text=SYSTEM),
+        *([Said(role="system", text=standing)] if standing else []),
         *await _before(session, models, workspace_id, user_id, until),
         Said(role="user", text=asking),
     ]

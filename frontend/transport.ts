@@ -39,7 +39,19 @@ export type Subscription = { close: () => void };
 
 export type Transport = {
   initialize: (workspace: Id, outbox: Submitted[]) => Promise<Snapshot>;
-  submit: (workspace: Id, request: Submitted) => Promise<Response>;
+  /**
+   * `keepalive` is for the last write of a session, made as the page is going
+   * away. An ordinary fetch is cancelled along with the document that made
+   * it, so the work a person typed in the seconds before they closed the tab
+   * never leaves the machine -- see `Workspace.rescue`. Bodies are capped at
+   * 64KB across all in-flight keepalive requests, which is why it is the
+   * exception and not the rule.
+   */
+  submit: (
+    workspace: Id,
+    request: Submitted,
+    options?: { keepalive?: boolean },
+  ) => Promise<Response>;
   content: (workspace: Id, entry: Id, version?: Version) => Promise<Payload>;
   store: (
     workspace: Id,
@@ -187,9 +199,11 @@ export const http = (base: string, authorize: Authorized): Transport => {
         await posted(`${workspaces(workspace)}/initialize`, { outbox }),
       ),
 
-    submit: async (workspace, request) =>
+    submit: async (workspace, request, { keepalive = false } = {}) =>
       json<Response>(
-        await posted(`${workspaces(workspace)}/transactions`, request),
+        await posted(`${workspaces(workspace)}/transactions`, request, {
+          keepalive,
+        }),
       ),
 
     cleared: async (workspace, transactions) => {

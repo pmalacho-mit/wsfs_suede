@@ -96,6 +96,64 @@ export const DEFAULTS: Settings = {
   floor: 1.5 * SECOND,
 };
 
+/** A number somebody actually wrote, as opposed to a field left alone. */
+const given = (value: number | null | undefined): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+/**
+ * What a course says about the protocol, in the units its own form asks for.
+ *
+ * Seconds and a percentage, because that is what somebody setting up a term
+ * types into a config; `Settings` is milliseconds and a share. Null and
+ * undefined mean the same thing here -- nothing was said -- because a field
+ * never filled in and one somebody cleared are the same instruction: leave
+ * the default where it is.
+ *
+ * Only the three the study varies. The rest are `DEFAULTS` or a URL away, and
+ * a config that could reach them would be a second place to look when the
+ * protocol behaves in a way nobody expected.
+ */
+export type Configured = {
+  /** Seconds. */
+  cooldown?: number | null;
+  /** Seconds. */
+  window?: number | null;
+  /** The share of eligible episodes offered a prompt, as a percentage: 0-100. */
+  offerRate?: number | null;
+};
+
+/**
+ * The defaults, with anything the course said on top.
+ *
+ * The lower of two layers over `DEFAULTS`: this, and then `settingsFrom`
+ * reading the URL over the top of it. That order is what lets somebody watch
+ * a configured term run through in a minute without editing the term.
+ *
+ * A number outside what its setting can mean is left alone rather than
+ * clamped into range. A cooldown of -5 or a rate of 300% is a typo, and
+ * honouring half of it -- silence for the rest of the sitting, or a prompt
+ * every single time -- would run a term at a protocol nobody chose.
+ */
+export const settingsWith = (
+  configured: Configured | undefined,
+  base: Settings = DEFAULTS,
+): Settings => {
+  const seconds = (value: number | null | undefined, held: number) => {
+    const asked = given(value);
+    return asked !== undefined && asked >= 0 ? asked * SECOND : held;
+  };
+  const percentage = given(configured?.offerRate);
+  return {
+    ...base,
+    cooldown: seconds(configured?.cooldown, base.cooldown),
+    window: seconds(configured?.window, base.window),
+    offerRate:
+      percentage !== undefined && percentage >= 0 && percentage <= 100
+        ? percentage / 100
+        : base.offerRate,
+  };
+};
+
 /**
  * The settings, with anything the URL says on top.
  *
@@ -135,6 +193,81 @@ export const settingsFrom = (
     banner: seconds("banner", base.banner),
     floor: seconds("floor", base.floor),
     offerRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : base.offerRate,
+  };
+};
+
+/**
+ * How long the protocol is still holding, as absolute times.
+ *
+ * A cooldown and a window OUTLIVE THE TAB THEY STARTED IN. A student who
+ * refreshes -- or whose browser reloads the page out from under them -- is
+ * the same student, mid-protocol, and a reload that cleared these would hand
+ * them a fresh coin toss and a second prompt inside a stretch that was
+ * supposed to be quiet. Both arms of the study depend on those stretches
+ * being the length they claim.
+ *
+ * Zero for "not running", which is what both are until something opens one.
+ */
+export type Deadlines = { cooldownUntil: number; windowUntil: number };
+
+/**
+ * A remembered deadline still worth honouring, or none.
+ *
+ * Read back into a session that may not be running the protocol that wrote
+ * it, so three things make one worthless: it is not a number, it has already
+ * passed, or it is further off than the rule that could have set it. That
+ * last covers a term reconfigured to a shorter cooldown and a clock that has
+ * moved since -- and it fails towards asking again sooner, rather than
+ * towards a silence nobody could account for afterwards.
+ */
+const stillHolding = (
+  until: number | null | undefined,
+  at: number,
+  longest: number,
+): number => {
+  const held = given(until);
+  return held !== undefined && held > at && held <= at + longest ? held : 0;
+};
+
+const DEADLINES = "wsfs:stuck:deadlines:";
+
+/**
+ * Where one workspace's deadlines are kept between visits.
+ *
+ * KEYED BY WORKSPACE, because a cooldown is a fact about one student working
+ * on one thing. Carried across workspaces it would silence a protocol that
+ * had never spoken in the new one, and two sittings would land in the record
+ * as one unbroken stretch of behaviour.
+ *
+ * Nothing at all when there is no storage to speak to -- a page rendered on a
+ * server, a browser told to keep nothing, a quota already full. None of those
+ * is a reason to stop watching somebody. They mean this visit starts with the
+ * protocol clear, which is what every visit did before any of this.
+ */
+export const deadlinesIn = (workspace: string) => {
+  const key = `${DEADLINES}${workspace}`;
+  return {
+    read: (): Deadlines | undefined => {
+      try {
+        const held = globalThis.localStorage?.getItem(key);
+        if (held === null || held === undefined) return undefined;
+        const read = JSON.parse(held) as Partial<Deadlines>;
+        return {
+          cooldownUntil: given(read.cooldownUntil) ?? 0,
+          windowUntil: given(read.windowUntil) ?? 0,
+        };
+      } catch {
+        /** Unreadable, or nothing to read it from. Either way: start clear. */
+        return undefined;
+      }
+    },
+    write: (deadlines: Deadlines) => {
+      try {
+        globalThis.localStorage?.setItem(key, JSON.stringify(deadlines));
+      } catch {
+        /** A protocol that cannot be written down still runs for this tab. */
+      }
+    },
   };
 };
 
@@ -214,6 +347,17 @@ type Wiring = {
   /** Asks whether the code moved. Absent means the rule is off. */
   judging?: Judging;
   now?: () => number;
+  /**
+   * The deadlines this workspace was left in, if an earlier visit left any.
+   *
+   * Handed in rather than read from here, for the same reason the clock is:
+   * a test says "twenty minutes into a cooldown" instead of arranging
+   * storage, and this class goes on knowing nothing about browsers. See
+   * `deadlinesIn` for where they actually live.
+   */
+  resume?: Deadlines;
+  /** Called whenever a deadline moves, so it can outlive the tab. */
+  remember?: (deadlines: Deadlines) => void;
   /** In [0, 1). Handed in so a test can say which way the coin lands. */
   roll?: () => number;
   /** Names an episode. Handed in so a test can predict what it is called. */
@@ -247,6 +391,21 @@ export class Stuck {
     this.#mint = wiring.mint ?? mint;
     this.#acted = this.#now();
     this.#since = this.#current();
+    /**
+     * Picked up where the last visit left them, if it left any and if they
+     * still mean anything. See `Deadlines` for why a refresh must not be a
+     * way out of a quiet stretch.
+     */
+    this.#cooldownUntil = stillHolding(
+      wiring.resume?.cooldownUntil,
+      this.#acted,
+      this.settings.cooldown,
+    );
+    this.#windowUntil = stillHolding(
+      wiring.resume?.windowUntil,
+      this.#acted,
+      this.settings.window,
+    );
   }
 
   /**
@@ -417,6 +576,7 @@ export class Stuck {
       ? { from: at, until: at + this.settings.cooldown }
       : undefined;
     if (cooldown) this.#cooldownUntil = cooldown.until;
+    this.#remember();
 
     const episode = this.#write(
       of(offered ? "offered" : "silent", {
@@ -425,6 +585,20 @@ export class Stuck {
       }),
     );
     if (offered) this.#wiring.offer(episode, this.settings.banner);
+  }
+
+  /**
+   * Both deadlines, wherever they are being kept.
+   *
+   * Called from the one place either can move -- an eligible episode always
+   * opens a window, and opens a cooldown too if the coin said so -- so the
+   * two never drift apart on the way out.
+   */
+  #remember(): void {
+    this.#wiring.remember?.({
+      cooldownUntil: this.#cooldownUntil,
+      windowUntil: this.#windowUntil,
+    });
   }
 
   #write(episode: Episode): Episode {

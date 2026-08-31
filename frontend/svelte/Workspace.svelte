@@ -21,6 +21,7 @@
   import { enteringWith, hostedIn, persisting } from "./collaborator";
   import type { editor } from "monaco-editor";
   import { UserEdits, type UserEdit } from "./edits";
+  import * as unsaved from "../unsaved";
   import { cleaner } from "./utils";
 
   type LiveblocksClient = ReturnType<typeof createClient>;
@@ -49,6 +50,7 @@
     readonly rooms: Rooms;
     readonly editorProps: EditorHooks;
     readonly workspace: Workspace;
+    readonly readonly: boolean;
 
     sharedText = $state<SharedTextFile>();
     path = $state("");
@@ -58,12 +60,14 @@
       rooms: Rooms,
       editorProps: EditorHooks,
       workspace: Workspace,
+      readonly: boolean,
     ) {
       this.id = id;
       this.path = path;
       this.rooms = rooms;
       this.editorProps = editorProps;
       this.workspace = workspace;
+      this.readonly = readonly;
     }
 
     move(path: string) {
@@ -80,6 +84,7 @@
         rooms,
         editorProps,
         this.workspace,
+        this.readonly,
       );
     }
   }
@@ -149,7 +154,28 @@
      * anywhere else yet" -- which is what anything about to send this file
      * somewhere needs to know, so it can store first.
      */
-    dirty = $state(false);
+    #dirty = $state(false);
+
+    get dirty(): boolean {
+      return this.#dirty;
+    }
+
+    /**
+     * Every transition through one door, so the prompt cannot drift.
+     *
+     * Whether to warn a person on their way out is the same question as this
+     * flag, asked of every open file at once -- so it is answered here rather
+     * than at the four places that set it. A setter and not a call at each
+     * site because the sites are the problem: one of them forgetting is a
+     * page that asks about work it already sent, or worse, one that does not
+     * ask about work it did not. See `unsaved.ts`.
+     */
+    set dirty(value: boolean) {
+      if (this.#dirty === value) return;
+      this.#dirty = value;
+      if (value) unsaved.hold(this.id);
+      else unsaved.release(this.id);
+    }
 
     constructor(
       id: Id,
@@ -158,6 +184,7 @@
       rooms: Rooms,
       props: EditorHooks,
       workspace: Workspace,
+      readonly: boolean,
     ) {
       this.id = id;
       this.initialContent = content;
@@ -167,6 +194,7 @@
         name: nameOf(path),
         parent: this.parent,
         source: content,
+        readonly,
       });
 
       /**
@@ -419,6 +447,35 @@
       this.dirty = false;
     }
 
+    /**
+     * The same intent as `keepWhatWasTyped`, for the moment the page goes.
+     *
+     * `keepWhatWasTyped` is the right thing everywhere the page is still
+     * alive -- a panel shutting, a tab being switched away from -- because it
+     * goes through the outbox, which is what promises the text will arrive
+     * eventually even if this attempt does not. It is the WRONG thing on the
+     * way out of the document: the outbox hashes and writes to IndexedDB
+     * before anything reaches the network, and a document being torn down
+     * does not come back from those awaits. Which is how "created a file,
+     * typed into it, reloaded" ended with an empty file and no version to
+     * recover: the write never left, and the queue that was supposed to
+     * remember it never got written down either.
+     *
+     * `dirty` is exactly the right question to ask. It is cleared the moment
+     * text leaves this machine by any route, so a file that is still dirty is
+     * one whose text is nowhere else yet -- whether or not a room holds it.
+     *
+     * `source` rather than the editor's model, because it prefers the shared
+     * document when there is one and falls back to the model when there is
+     * not, and this has to work in both.
+     */
+    rescueWhatWasTyped() {
+      if (!this.dirty) return;
+      const text = this.source;
+      if (text === undefined || text === this.initialContent) return;
+      this.workspace.rescue(this.id, text);
+    }
+
     dispose() {
       if (this.#disposed) return;
       this.keepWhatWasTyped();
@@ -537,7 +594,8 @@
   import { Kernel } from "../../../wsfs_suede.python-web-kernel-suede";
   import { WarmPool } from "./pool";
   import fs from "../../../wsfs_suede.python-web-kernel-suede/fs";
-  import { FileText, FolderTree } from "@lucide/svelte";
+  import FileText from "@lucide/svelte/icons/file-text";
+  import FolderTree from "@lucide/svelte/icons/folder-tree";
   import { InView } from "./inview.svelte";
   import PanelHeading from "./shell/PanelHeading.svelte";
   import TextSizeSlider from "./shell/TextSizeSlider.svelte";
@@ -545,17 +603,20 @@
   import Assistant from "./assistant/Assistant.svelte";
   import { Conversation } from "./assistant/conversation.svelte";
   import { Nudge } from "./assistant/nudge";
-  import { goalOf } from "./assistant/goals";
   import { mint } from "../identity";
   import {
+    deadlinesIn,
     settingsFrom,
+    settingsWith,
     Stuck,
     tickFor,
     type Episode,
   } from "./assistant/stuck";
+  import type { Configured } from "./assistant/stuck";
   import { Activity } from "./assistant/activity";
   import type { Outcome } from "./Runner.svelte";
   import { WithEvents } from "../../../wsfs_suede.with-events-suede";
+  import { headerFor } from "./headers";
 
   let {
     model,
@@ -565,8 +626,11 @@
     onEditor,
     onSnapshot,
     onStuck,
+    protocol,
     courseEvent,
     oneFileAtATime = false,
+    system,
+    readonly = false,
   }: {
     model: Model;
     workspace: Workspace;
@@ -597,6 +661,19 @@
      */
     onStuck?: (episode: Episode) => void;
     /**
+     * What this course was set up to run, if anybody said.
+     *
+     * Carried the same way `courseEvent` is, and for the same reason: the
+     * numbers live in a course's configuration, which is a thing the host
+     * knows about and this component does not. Absent -- or any field of it
+     * left unset -- means `DEFAULTS`, so a workspace opened outside a study
+     * behaves the way it always did.
+     *
+     * Beneath the URL, never over it: `?nudge.cooldown=5` still wins, which
+     * is what makes a configured term watchable in a minute.
+     */
+    protocol?: Configured;
+    /**
      * Which sitting of which course this is, as the host names it.
      *
      * Carried rather than derived, because this component knows about
@@ -620,6 +697,10 @@
      * was working on.
      */
     oneFileAtATime?: boolean;
+    /** system prompt */
+    system: string;
+    /** whether or not the workspace is written in readonly mode */
+    readonly?: boolean;
   } = $props();
 
   const chrome = $derived(themes[appearance.theme].className);
@@ -771,7 +852,7 @@
   const onAPI = async (api: Grid) => {
     cleanup();
 
-    const tree = new FileTreeModel(workspace);
+    const tree = new FileTreeModel(workspace, { readonly });
 
     /**
      * One registry for the whole workspace, and therefore ONE subscription to
@@ -1054,7 +1135,15 @@
      */
     const settings = settingsFrom(
       typeof window === "undefined" ? "" : window.location.search,
+      settingsWith(protocol),
     );
+
+    /**
+     * The cooldown and window this workspace was left in, if it was left in
+     * one. Keyed by the workspace itself, which is the only id in scope that
+     * means "this student, on this thing" -- see `deadlinesIn`.
+     */
+    const deadlines = deadlinesIn(workspace.id);
 
     /**
      * EVERY DETECTION, IN THE CONSOLE, whatever became of it.
@@ -1098,8 +1187,12 @@
         },
       );
 
+    console.log("Stuck settngs", settings);
+
     const held = new Stuck({
       settings,
+      resume: deadlines.read(),
+      remember: deadlines.write,
       offer: (episode, forMs) =>
         nudge.offer(
           () => {
@@ -1140,7 +1233,7 @@
           ? undefined
           : { entry: open.entry, path: open.path, text: showing.source };
       },
-      goalFor: goalOf,
+      goalFor: (path) => headerFor(path),
       judging: (asking) => workspace.tutor.progressing(asking),
     });
     stuck = held;
@@ -1342,7 +1435,19 @@
       } catch {
         /** Unsent. The question goes without it -- see above. */
       }
-      await conversation.ask(text, named === undefined ? [] : attached, named);
+      const problemDescription = attached
+        .map(({ path }) => {
+          const header = headerFor(path);
+          if (header)
+            return `The user is currently working on the following problem: ${header}`;
+        })
+        .join("\n\n");
+      await conversation.ask(
+        text,
+        named === undefined ? [] : attached,
+        problemDescription ? system + "\n\n" + problemDescription : system,
+        named,
+      );
     };
 
     const editorProps: EditorHooks = {
@@ -1376,19 +1481,46 @@
      * `pagehide` rather than `beforeunload`, for the reason the debouncer
      * gives: registering `beforeunload` disqualifies the page from the
      * back/forward cache in several browsers, and this needs no prompt.
+     *
+     * RESCUE RATHER THAN THE ORDINARY KEEP, which is the whole of the fix
+     * here: the ordinary one queues, and queueing is a round trip to
+     * IndexedDB that a dying document never returns from. See
+     * `rescueWhatWasTyped`.
      */
     const keepWhatNobodySaved = () => {
-      openFiles.forEach((open) => open.sharedText?.keepWhatWasTyped());
+      openFiles.forEach((open) => open.sharedText?.rescueWhatWasTyped());
       /** And whatever the window has recorded and not yet sent. `close`
        *  flushes with `keepalive`, which is the only kind of request that
        *  outlives the document it was made from. */
       activity.close();
     };
+
+    /**
+     * HIDDEN IS THE LAST MOMENT ANYTHING IS PROMISED.
+     *
+     * `pagehide` is not guaranteed: a tab discarded under memory pressure, a
+     * phone where the browser is swapped out, a window closed by the system
+     * -- several of those get `visibilitychange` and nothing else, and it is
+     * the only event the spec suggests treating as the end of a session.
+     *
+     * The ORDINARY keep here, not the rescue: the page is still alive and may
+     * well come back, so this wants the outbox and its retries rather than a
+     * single unacknowledged shot. Being cheap when nothing is dirty is what
+     * makes it safe to run on every tab switch -- both of these start by
+     * asking, and a file whose text has already left is not asked twice.
+     */
+    const keepBeforeHidden = () => {
+      if (document.visibilityState !== "hidden") return;
+      openFiles.forEach((open) => open.sharedText?.keepWhatWasTyped());
+    };
+
     if (typeof window !== "undefined") {
       window.addEventListener("pagehide", keepWhatNobodySaved);
-      cleanup.add(() =>
-        window.removeEventListener("pagehide", keepWhatNobodySaved),
-      );
+      document.addEventListener("visibilitychange", keepBeforeHidden);
+      cleanup.add(() => {
+        window.removeEventListener("pagehide", keepWhatNobodySaved);
+        document.removeEventListener("visibilitychange", keepBeforeHidden);
+      });
     }
 
     /**
@@ -1401,7 +1533,12 @@
     const onScreen = () => snapshot().visible.map((one) => one.path);
 
     cleanup.add(
-      () => openFiles.forEach((open) => open.sharedText?.dispose()),
+      () => (
+        openFiles.forEach((open) => open.sharedText?.dispose()),
+        /* Whatever is left claiming the prompt is claiming it for files that
+           no longer exist. */
+        unsaved.forgetAll()
+      ),
       tabsAPI.onDidActivePanelChange(({ panel }) => {
         tree.select(panel?.id);
         acted("panel active", { entry: panel?.id, visible: onScreen() });
@@ -1428,7 +1565,13 @@
           openInProgress.add(id);
           try {
             const title = nameOf(path);
-            const opened = new OpenFile(entry, rooms, editorProps, workspace);
+            const opened = new OpenFile(
+              entry,
+              rooms,
+              editorProps,
+              workspace,
+              readonly,
+            );
             openFiles.set(id, opened);
             await tabsAPI.addComponentPanel(
               "file",
