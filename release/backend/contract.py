@@ -367,6 +367,19 @@ class Refusal:
     FOLDER_FULL = "that folder already holds too many entries"
     CREATE_REFUSED = "the create this depends on was refused"
 
+    PATH_OCCUPIED = "something already holds that path"
+    """A placement that was told to add and found the path taken.
+
+    Not a conflict: nothing was superseded and there is nothing to rebase
+    onto. It is a caller that said "put this here" being told the workspace
+    already has an answer for that path -- which is the whole difference
+    between `place.placed_into(overwrite=False)` and an overwrite, and is
+    reported per path so the rest of the placement still lands.
+
+    A path already holding EXACTLY the text asked for never reaches this: it
+    comes back `UNCHANGED`, so a call repeated verbatim is still silent.
+    """
+
     UNKNOWN_VERSION = "the version presented was never issued"
     """A different CLASS of failure from the rest. A token is current (accept),
     superseded (an ordinary conflict -- rebase and retry), or was never issued
@@ -695,6 +708,35 @@ class TextContentResponse(BaseModel):
     """The content token this text was fetched at."""
 
 
+# -- placement -----------------------------------------------------------------
+
+
+MOST_FILES_PER_PLACEMENT = 1_000
+"""How many paths one placement may name.
+
+A generated project is tens of files and an assistant saving its work is
+fewer. The cap is not a guess at what anybody needs -- it is here because this
+is the one write whose size the caller chooses freely, and an uncapped
+mapping is a whole workspace's worth of text in a single body.
+"""
+
+
+class PlacementRequest(BaseModel):
+    """Paths, and the text each should hold.
+
+    NO `prune`, and no way to ask for one. Deleting everything a body did not
+    name is a thing a host may mean and a client may not, so it stays where
+    the host is -- an argument to the in-process `Mounted.place`, never a
+    field on the wire. See `PlaceFiles`.
+    """
+
+    files: dict[str, str] = Field(
+        default_factory=dict, max_length=MOST_FILES_PER_PLACEMENT
+    )
+    """A `/`-separated path to the text it should hold. Folders along the way
+    are created as needed and reused when they are already there."""
+
+
 # -- the tutor ------------------------------------------------------------------------
 
 
@@ -725,6 +767,23 @@ class Asking(BaseModel):
 
     attached: list[Attaching] = Field(default_factory=list, max_length=50)
     offset: int | None = None
+
+    system: str | None = Field(default=None, min_length=1, max_length=32_000)
+    """Standing instructions for this question, ahead of the conversation.
+
+    OPTIONAL AND PER-QUESTION. The tutor has a system prompt of its own and
+    this does not replace it -- it is said after it and before anything that
+    was ever asked, which is where a caller with something extra to say about
+    THIS workspace belongs: what is being taught, what not to give away, who
+    the person is.
+
+    NOT WRITTEN DOWN, deliberately. What a transcript holds is what was said
+    to and by the tutor, and instructions nobody uttered are neither. A caller
+    that wants the same standing instructions on the next question sends them
+    again, exactly as it sends the files again -- see `_shown` in `tutor.py`
+    for the same rule and the same reason: the copy carried forward is the one
+    that is out of date.
+    """
 
 
 class Asked(BaseModel):

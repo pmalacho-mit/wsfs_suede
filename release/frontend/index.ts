@@ -7,6 +7,15 @@
  * a consumer knows it has a buffer open, so preferring it is its rule to make.
  */
 export { connect } from "./workspace";
+export type { Recovery } from "./workspace";
+/**
+ * Whether anything typed here is still only here.
+ *
+ * The `beforeunload` prompt is raised by the package on its own -- see
+ * `unsaved.ts` -- but a SvelteKit host navigating WITHIN the app never fires
+ * that event, so it has to ask this and stop the navigation itself.
+ */
+export { anythingUnsaved } from "./unsaved";
 export type {
   Changed,
   Creating,

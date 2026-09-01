@@ -37,6 +37,7 @@ import { mint } from "./identity";
 import { offset } from "./minted";
 import * as loop from "./loop";
 import * as outbox from "./outbox";
+import { forget, stash, stashed, STALE_MS } from "./stash";
 import * as paths from "./paths";
 import * as writes from "./writes";
 import { heldAs } from "./writes";
@@ -177,6 +178,12 @@ export type Workspace = {
    * object already has both.
    */
   tutor: {
+    /**
+     * `system`, if sent, is standing instructions for this question -- said
+     * after the tutor's own system prompt and before any of the conversation.
+     * Per-question and never written down, so a caller that wants it on the
+     * next question sends it again. See `Asking.system` on the server.
+     */
     ask: (asking: Omit<Asking, "message"> & { message?: Id }) => Promise<Asked>;
     hear: (token: string) => AsyncIterable<Answering>;
     said: (asking: { before?: string; limit?: number }) => Promise<Transcript>;
@@ -269,6 +276,44 @@ export type Workspace = {
    * is a machine that never came back, and a note kept only on that machine
    * goes with it.
    */
+  /**
+   * THE LAST ATTEMPT, made as the page goes away.
+   *
+   * Every other write here is careful: it hashes the payload, puts the bytes
+   * in the durable outbox, records the transaction, and only then goes to the
+   * server -- so that a request lost to a flat battery or a closed lid is
+   * still on the machine when the person comes back. Each of those steps is
+   * an `await`, and that is exactly what makes them useless in the one moment
+   * this is for. A document being torn down does not run the continuation
+   * after an IndexedDB round trip, and the fetch at the end of it is
+   * cancelled with the document even if it does.
+   *
+   * So this skips all of it. No hashing, no outbox, no bookkeeping: one
+   * `keepalive` POST, made before anything can yield, which is the only kind
+   * of request the browser promises to finish after the page is gone.
+   *
+   * WHAT IT GIVES UP. It is unacknowledged -- nothing here will ever learn
+   * whether it landed -- and it is not retried, because there is no longer
+   * anywhere to retry from. It can also lose to the 64KB the browser allows
+   * all keepalive bodies together. It is a strictly better last resort than
+   * an ordinary write, not a replacement for one: `store` remains what a
+   * panel closing and an idle keyboard both use, and this runs after it.
+   *
+   * A duplicate is harmless. The transaction is minted fresh and the server
+   * adjudicates writes against the version they claim to follow, so the worst
+   * case is a second version holding the text the first one already had.
+   */
+  rescue: (entry: Id, text: string) => void;
+
+  /**
+   * Act on the notes the last session left behind. See `stash.ts`.
+   *
+   * Called once the first snapshot is in, because every question it asks is
+   * about what the server currently holds. Answers what it did, so a caller
+   * can say so.
+   */
+  recovered: () => Promise<Recovery>;
+
   cleared: (transactions: Transaction[]) => Promise<void>;
   create: (
     path: paths.Path,
@@ -326,6 +371,21 @@ const plainly = (outputs: unknown[]): unknown[] => {
       unstorable: Object.prototype.toString.call(one),
     }));
   }
+};
+
+/**
+ * What became of the notes a previous session left. See `Workspace.recovered`.
+ *
+ * `replayed` is text that has been put back into the outbox and will arrive;
+ * `landed` was already on the server, so the note was only ever a spare copy;
+ * `contested` is the one worth telling somebody about -- the entry moved on
+ * without this text, so putting it back would take somebody else's work away,
+ * and it has been left where it is instead.
+ */
+export type Recovery = {
+  replayed: Id[];
+  landed: Id[];
+  contested: { entry: Id; text: string }[];
 };
 
 export const connect = (options: Options): Workspace => {
@@ -750,6 +810,96 @@ export const connect = (options: Options): Workspace => {
       if (entry === undefined) return created(path, payload, mime);
       refuseIfShared(entry.id, path);
       return written(entry, payload, mime);
+    },
+
+    rescue: (entry, text) => {
+      const held = shown.view.get(entry);
+      const seen = held?.content_version;
+      // Nothing to follow means nothing the server would accept, and there is
+      // no time here to go and find out what it should have been.
+      if (held === undefined || seen == null) return;
+      /**
+       * THE NOTE FIRST, THE REQUEST SECOND, and the order is the point.
+       *
+       * `stash` is synchronous, so it has finished by the time the next line
+       * runs; the request may never be made at all -- no network, a server
+       * that is down, a browser that decided this page had had enough. Doing
+       * the certain thing before the uncertain one is what makes the text
+       * survive the cases `keepalive` cannot reach.
+       */
+      stash(workspace, { entry, basis: seen, text, at: Date.now() });
+      void transport
+        .submit(
+          workspace,
+          {
+            op: "write",
+            transaction: mint(),
+            id: entry,
+            content_version: seen,
+            content: { type: "text", content: text },
+            draft: false,
+            offset: offset(),
+          } as Submitted,
+          { keepalive: true },
+        )
+        .catch(() => undefined);
+    },
+
+    recovered: async () => {
+      const answer: Recovery = { replayed: [], landed: [], contested: [] };
+      for (const note of stashed(workspace)) {
+        const held = shown.view.get(note.entry);
+
+        /**
+         * Gone, or too old to act on without being asked.
+         *
+         * A fortnight is not a judgement about how long work matters; it is
+         * how long a note that nobody ever came back for should be allowed to
+         * sit in a store this small before it is somebody else's problem.
+         */
+        if (held === undefined || Date.now() - (note.at ?? 0) > STALE_MS) {
+          forget(workspace, note.entry);
+          continue;
+        }
+
+        /**
+         * NOBODY HAS WRITTEN SINCE. Then the difference between the note and
+         * the file is this person's own last few seconds of typing, and
+         * nothing else -- which is exactly what makes replaying it safe.
+         */
+        if (held.content_version === note.basis) {
+          void written(held, note.text, TEXT).settled.catch(() => undefined);
+          forget(workspace, note.entry);
+          answer.replayed.push(note.entry);
+          continue;
+        }
+
+        /**
+         * Somebody has. Usually that somebody is the rescue write this note
+         * was taken beside, which landed after all -- so the file already
+         * says what the note says, and the note has done its job by being
+         * unnecessary. Asked of the CONTENT rather than the version, because
+         * the version moving is what both cases look like.
+         */
+        try {
+          const now = await content.read(held);
+          if (now?.kind === "text" && now.text === note.text) {
+            forget(workspace, note.entry);
+            answer.landed.push(note.entry);
+            continue;
+          }
+        } catch {
+          /* Cannot say. Then it is contested, which is the careful answer. */
+        }
+
+        /**
+         * KEPT, NOT APPLIED. Something else is on top of this file, and
+         * writing the note over it would be this session taking away work it
+         * never saw. The note stays where it is so it can be offered.
+         */
+        answer.contested.push({ entry: note.entry, text: note.text });
+      }
+      return answer;
     },
 
     cleared: (transactions) => transport.cleared(workspace, transactions),
