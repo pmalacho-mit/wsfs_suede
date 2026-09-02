@@ -39,6 +39,7 @@ import * as loop from "./loop";
 import * as outbox from "./outbox";
 import { forget, stash, stashed, STALE_MS } from "./stash";
 import * as paths from "./paths";
+import { warming } from "./warming";
 import * as writes from "./writes";
 import { heldAs } from "./writes";
 import type { Transport } from "./transport";
@@ -454,10 +455,20 @@ export const connect = (options: Options): Workspace => {
   /**
    * Content arrives before it is asked for, so the kernel's filesystem calls
    * are answered out of state rather than out of a request it must wait on.
+   *
+   * Through `warming` rather than straight to `content.prefetch`, because
+   * the two moments this is called from are both bursts: a stream replaying
+   * everything a reconnect missed, and a snapshot naming every file in the
+   * workspace. See `warming.ts` -- the entry is looked up again when the
+   * request actually goes, so a file written twenty-five times during a
+   * disconnect is fetched once, at the version it ended on.
    */
-  const readied = (entry: Metadata | undefined) => {
-    if (entry && entry.type === "file") void content.prefetch(entry);
-  };
+  const warm = warming({
+    current: (id) => map.get(id),
+    fetch: (entry) => content.prefetch(entry),
+  });
+
+  const readied = (entry: Metadata | undefined) => warm.wanted(entry);
 
   const applied = (event: import("./contract").StreamEvent) => {
     map = confirmed.applied(map, event);
@@ -540,6 +551,15 @@ export const connect = (options: Options): Workspace => {
    * they are the one op whose token can be invalidated by this client's OWN
    * work in flight. See `writes.ts`.
    */
+  /**
+   * Entries whose create has been sent and not yet answered.
+   *
+   * Creates do not go through the pump -- `submit` puts them on the wire as
+   * soon as they are minted -- so this is the only thing that knows a write
+   * has a create in front of it. See `Wiring.landed`.
+   */
+  const creating = new Map<Id, Promise<unknown>>();
+
   const flight = writes.pump({
     queue,
     bytes,
@@ -554,6 +574,7 @@ export const connect = (options: Options): Workspace => {
      * implements one has implemented both.
      */
     lost: options.lost,
+    landed: (entry) => creating.get(entry),
   });
 
   const written = (
@@ -981,7 +1002,12 @@ export const connect = (options: Options): Workspace => {
       );
     },
 
-    stop: sync.stop,
+    /**
+     * Warming stops with the workspace: its debouncer holds timers and page
+     * listeners, and a stopped workspace warming content nobody will read is
+     * a request made on behalf of something that no longer exists.
+     */
+    stop: () => (warm.stop(), sync.stop()),
     nudge: sync.nudge,
   };
 
@@ -1043,6 +1069,26 @@ export const connect = (options: Options): Workspace => {
         payload,
         mime,
       ))();
+
+    /**
+     * Recorded BEFORE this returns, so it is already there when the caller
+     * writes to the file on the next line -- which is what somebody making a
+     * file and typing into it does. Registering it inside the async work
+     * above would leave exactly the gap this closes.
+     *
+     * Rejections are folded away because this is an ordering barrier and not
+     * an answer: whoever asked for the create is holding `settled` and hears
+     * about a refusal there.
+     */
+    const there = settled.then(
+      () => undefined,
+      () => undefined,
+    );
+    creating.set(entry, there);
+    void there.then(() => {
+      if (creating.get(entry) === there) creating.delete(entry);
+    });
+
     return { entry, transaction, settled };
   }
 };
