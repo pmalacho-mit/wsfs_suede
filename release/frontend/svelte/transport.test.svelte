@@ -33,6 +33,49 @@
     return seen;
   };
 
+<<<<<<< HEAD
+=======
+  /**
+   * `fetch`, answering from a script.
+   *
+   * Each entry is what the NEXT call gets: a status, or a thrown failure
+   * standing in for a request that never reached a server at all. The last
+   * entry repeats, so a test says only as much as it cares about.
+   */
+  type Answer = { status: number; headers?: Record<string, string> } | "unreachable";
+
+  const answering = (...script: Answer[]) => {
+    const seen: { url: string; init: RequestInit }[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = ((url: string, init: RequestInit = {}) => {
+      const answer = script[Math.min(seen.length, script.length - 1)]!;
+      seen.push({ url: String(url), init });
+      if (answer === "unreachable") {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ rejected: false, content: "hi" }), {
+          status: answer.status,
+          headers: { "content-type": "application/json", ...(answer.headers ?? {}) },
+        }),
+      );
+    }) as never;
+    return { seen, restore: () => void (globalThis.fetch = original) };
+  };
+
+  /** Short enough that a whole ladder fits in a test rather than a coffee break. */
+  const IMPATIENT = { attempts: 4, minDelayMs: 1, maxDelayMs: 4 };
+
+  const caught = async (act: () => Promise<unknown>) => {
+    try {
+      await act();
+      return undefined;
+    } catch (reason) {
+      return reason;
+    }
+  };
+
+>>>>>>> bc2290ca58dd09ae3f8a67582f76c23d4649fa23
   const write = (): Submitted =>
     ({
       op: "write",
@@ -208,3 +251,294 @@
     <div style="height: 1px"></div>
   {/snippet}
 </Sweater>
+<<<<<<< HEAD
+=======
+
+<Sweater
+  name="a read the server was too busy for is asked again"
+  id="retry-503"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering(
+      { status: 503, headers: { "retry-after": "0" } },
+      { status: 503 },
+      { status: 200 },
+    );
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      const held = await transport.content("WS-1", "E-1", "V-1");
+
+      harness.note(`sent ${seen.length} times, then ${JSON.stringify(held)}`);
+      // The admission gate answers 503 while it drains. A client that gave up
+      // on the first one would show an empty file for a server that was busy
+      // for a quarter of a second.
+      harness.expect(seen.length).toBe(3);
+      harness.expect(held.kind).toBe("text");
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="asking again has a limit"
+  id="retry-bounded"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering({ status: 503 });
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      const failure = await caught(() => transport.content("WS-1", "E-1", "V-1"));
+
+      harness.note(`sent ${seen.length} times, then gave up: ${failure}`);
+      // Four, not for ever. A server that is down stays down, and a client
+      // that never stops asking is the load that keeps it that way.
+      harness.expect(seen.length).toBe(IMPATIENT.attempts);
+      harness.expect(failure instanceof Error).toBe(true);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a request that never reached a server is asked again"
+  id="retry-offline"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering("unreachable", "unreachable", { status: 200 });
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      await transport.content("WS-1", "E-1", "V-1");
+
+      harness.note(`sent ${seen.length} times`);
+      // A dropped connection is not an answer, and a tab that woke on a train
+      // should not need a reload to read its own file.
+      harness.expect(seen.length).toBe(3);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a write whose id the client minted is sent again"
+  id="retry-replayable-post"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering({ status: 503 }, { status: 200 });
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      await transport.submit("WS-1", write());
+
+      harness.note(`sent ${seen.length} times`);
+      // The transaction id came from here and the server records it unchanged,
+      // so the second copy lands on the same write as the first.
+      harness.expect(seen.length).toBe(2);
+      harness.expect(seen[0]!.url).toContain("/transactions");
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a question to the tutor is asked once, however busy the server is"
+  id="no-retry-ask"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering({ status: 503 });
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      const failure = await caught(() =>
+        transport.ask("WS-1", { question: "why?" } as never),
+      );
+
+      harness.note(`sent ${seen.length} times, then ${failure}`);
+      // THE ONE POST THAT IS NOT REPLAYABLE. Sending it again starts a second
+      // answer, and the person gets two tutors talking over each other.
+      harness.expect(seen.length).toBe(1);
+      harness.expect(failure instanceof Error).toBe(true);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a study observation is posted once and forgotten"
+  id="no-retry-study"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering({ status: 503 });
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      await caught(() => transport.activity("WS-1", { window: [] } as never));
+
+      harness.note(`sent ${seen.length} times`);
+      // The trade here runs the other way round from everything else on this
+      // transport: a lost observation costs a row in a study, and retrying
+      // costs a server that is already refusing work.
+      harness.expect(seen.length).toBe(1);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="an answer the caller asked for is not second-guessed"
+  id="no-retry-answers"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    for (const [status, expected] of [
+      [409, "returned"],
+      [403, "thrown"],
+      [404, "thrown"],
+      [500, "thrown"],
+    ] as const) {
+      const { seen, restore } = answering({ status });
+      try {
+        const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+        const failure = await caught(() => transport.content("WS-1", "E-1", "V-1"));
+
+        harness.note(`${status} → sent ${seen.length} time(s), ${expected}`);
+        // A refusal is an answer. Only "not now" is worth asking twice, and a
+        // 500 is the server broken rather than the server busy.
+        harness.expect(seen.length).toBe(1);
+        harness.expect(failure === undefined).toBe(status === 409);
+      } finally {
+        restore();
+      }
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="a lapsed token is refreshed without spending the retry budget"
+  id="retry-401-then-503"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering(
+      { status: 401 },
+      { status: 503 },
+      { status: 200 },
+    );
+    try {
+      let refreshed = 0;
+      const transport = http(
+        "/wsfs",
+        async () => ({}),
+        async () => (refreshed += 1) > 0,
+        IMPATIENT,
+      );
+      await transport.content("WS-1", "E-1", "V-1");
+
+      harness.note(`refreshed ${refreshed}×, sent ${seen.length}×`);
+      // Three requests: the refused one, the one after re-authorising, and
+      // the retry of the 503. The re-auth must not eat an attempt the busy
+      // server still needs.
+      harness.expect(refreshed).toBe(1);
+      harness.expect(seen.length).toBe(3);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="the server saying how long to wait is waited out"
+  id="retry-after-honoured"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering(
+      { status: 503, headers: { "retry-after": "1" } },
+      { status: 200 },
+    );
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, {
+        attempts: 3,
+        minDelayMs: 1,
+        maxDelayMs: 5_000,
+      });
+      const started = performance.now();
+      await transport.content("WS-1", "E-1", "V-1");
+      const waited = performance.now() - started;
+
+      harness.note(`waited ${Math.round(waited)}ms for a 1s Retry-After`);
+      // A FLOOR, not a suggestion. The backoff would have been 1ms, and
+      // jittering the server's number the way the backoff is jittered would
+      // have come back after half of it -- while the gate that sent it was
+      // still draining. Never less than asked; spread out above it.
+      harness.expect(seen.length).toBe(2);
+      harness.expect(waited >= 1_000).toBe(true);
+      harness.expect(waited < 2_500).toBe(true);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+
+<Sweater
+  name="Initialize is not retried here, because the loop already retries it"
+  id="initialize-not-replayed"
+  body={async (harness) => {
+    harness.set(new Pocket());
+    const { seen, restore } = answering({ status: 503 });
+    try {
+      const transport = http("/wsfs", async () => ({}), undefined, IMPATIENT);
+      const failure = await caught(() => transport.initialize("WS-1", []));
+
+      harness.note(`sent ${seen.length} time(s), then ${failure}`);
+      // `loop.ts` re-enters Initialize on every failure with its own 500ms to
+      // 30s ladder. Retrying here too would put four Initializes on the wire
+      // per loop cycle -- four copies of the whole outbox -- in the window a
+      // shedding server can least afford them.
+      harness.expect(seen.length).toBe(1);
+      harness.expect(failure instanceof Error).toBe(true);
+    } finally {
+      restore();
+    }
+  }}
+>
+  {#snippet vest(_p: Pocket)}
+    <div style="height: 1px"></div>
+  {/snippet}
+</Sweater>
+>>>>>>> bc2290ca58dd09ae3f8a67582f76c23d4649fa23
